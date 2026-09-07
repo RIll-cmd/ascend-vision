@@ -1,0 +1,142 @@
+# All paths are relative to this file. Phase 2 estimates holding from proximity.
+camera:
+  index: 0
+  backend: auto # DirectShow on Windows; also: dshow, msmf, v4l2, avfoundation
+  width: 640
+  height: 480
+  fps: 30
+  read_timeout_seconds: 5.0
+  shutdown_timeout_seconds: 3.0
+detector:
+  model: models/yolo26n.pt
+  confidence: 0.5
+  image_size: 640
+  device: cpu
+  every_n_frames: 1
+  cpu_threads: 4
+runtime:
+  preview: true
+  stats_interval_seconds: 5.0
+  target_fps: 15.0
+hands:
+  model: models/hand_landmarker.task
+  num_hands: 2
+  detection_confidence: 0.5
+  presence_confidence: 0.5
+  tracking_confidence: 0.5
+face:
+  model: models/face_landmarker.task
+  num_faces: 1
+  detection_confidence: 0.5
+  presence_confidence: 0.5
+  tracking_confidence: 0.5
+drowsiness:
+  ear_threshold: 0.22
+  closed_consec_frames: 15
+  cooldown_seconds: 30.0
+  calibration_frames: 30
+  adaptive_threshold_ratio: 0.70 # threshold = baseline_ear * 0.70
+yawn:
+  mar_threshold: 0.65
+  yawn_consec_frames: 20
+  cooldown_seconds: 20.0
+  calibration_frames: 30
+  adaptive_threshold_ratio: 1.75 # threshold = max(0.65, baseline_mar * 1.75)
+posture:
+  enabled: true
+  calibration_frames: 30
+  consec_frames: 30
+  cooldown_seconds: 35.0
+  head_drop_threshold: 0.15
+  pitch_threshold_deg: 12.0
+hold:
+  threshold_frames: 12
+  proximity_px: 60.0
+  cooldown_seconds: 45.0
+  distance_metric: center # center (spec pseudocode), or box (nearest edge)
+  max_observation_gap_seconds: 1.0
+  posture_enabled: true
+  call_proximity_px: 120.0
+  trajectory_smoothing_frames: 5
+
+storage:
+  database: data/phone_watch.db
+  busy_timeout_seconds: 5.0
+  heartbeat_seconds: 5.0
+  update_seconds: 1.0
+sessions:
+  initial_mode: background
+  tray: true
+  hotkey_enabled: true
+  hotkey: ctrl+alt+f
+feedback:
+  enabled: true
+  model: gemini-3.6-flash
+  api_key_env: GEMINI_API_KEY # Name only; never put the actual key in this file.
+  request_timeout_seconds: 10.0
+  max_age_seconds: 15.0
+  shutdown_timeout_seconds: 3.0
+  max_output_tokens: 120
+  max_characters: 280
+  speech_rate: 175
+  speech_volume: 1.0
+  speech_voice: "" # Empty uses the system default voice.
+  speech_timeout_seconds: 20.0
+  tts_engine: kokoro_onnx # kokoro_onnx or pyttsx3
+  tts_model_path: models/kokoro/kokoro-v1.0.onnx
+  tts_voices_path: models/kokoro/voices-v1.0.bin
+  tts_voice: af_heart # Clean studio voices: af_heart, af_bella, af_sky, am_adam
+  tts_speed: 1.10
+  tts_lang: en-us
+  # Custom blended voice profile:
+  tts_voice_blend:
+    - name: jf_tebukuro
+      weight: 0.65
+    - name: af_bella
+      weight: 0.35
+
+dashboard:
+  port: 8765 # Always binds to 127.0.0.1; no LAN exposure.
+  refresh_seconds: 10
+  default_days: 28
+  timezone: local # Or an IANA name, such as Asia/Shanghai.
+  open_browser: true
+voice_commands:
+  enabled: true
+  model_size: tiny.en
+  compute_type: int8
+  device: cpu
+  device_index: null # null uses system default input device, or set to specific device index
+  cpu_threads: 2
+  energy_threshold: 0.005
+  silence_duration_seconds: 0.8
+  min_speech_duration_seconds: 0.3
+  max_speech_duration_seconds: 10.0
+  mute_duration_seconds: 300.0
+  conversational_mode: true
+  max_reply_words: 25
+  chat_cooldown_seconds: 5.0
+llm:
+  groq_model: "llama-3.1-8b-instant"
+  cerebras_model: "llama3.1-8b"
+  gemini_model: "gemini-2.5-flash"
+  groq_api_key_env: "GROQ_API_KEY"
+  cerebras_api_key_env: "CEREBRAS_API_KEY"
+  gemini_api_key_env: "GEMINI_API_KEY"
+  default_max_tokens: 60
+
+ascend:
+  enabled: true
+  base_url_env: ASCEND_BASE_URL
+  api_token_env: ASCEND_API_TOKEN
+  device_id_env: ASCEND_DEVICE_ID
+  character_id_env: ASCEND_CHARACTER_ID
+  timeout_seconds: 5.0
+  health_path: /api/integration/health
+  command_path: /api/integration/command
+  event_path: /api/integration/event
+
+screen_audit:
+  enabled: true
+  interval_seconds: 1800
+

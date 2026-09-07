@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Phone Watch · Your attention, observed</title>
+  <link rel="icon" href="{{ url_for('static', filename='mark.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+  <script defer src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</head>
+<body data-refresh="{{ refresh }}">
+  <a class="skip" href="#main">Skip to dashboard</a>
+  <header class="masthead">
+    <a class="brand" href="/" aria-label="Phone Watch home"><img src="{{ url_for('static', filename='mark.svg') }}" alt="" width="32" height="32"> PHONE WATCH</a>
+    <div class="masthead-actions">
+      <button type="button" id="launch-camera" class="camera-btn" title="Open live webcam window with detection">
+        <span class="cam-icon" aria-hidden="true">📷</span>
+        <span id="camera-btn-text">Open Live Camera</span>
+      </button>
+      <span class="local"><span aria-hidden="true">●</span> Private, on this device</span>
+    </div>
+  </header>
+  <main id="main">
+    <section class="intro">
+      <div><p class="eyebrow">THE ATTENTION JOURNAL</p><h1>A little less scrolling.<br><em>A little more here.</em></h1></div>
+      <p class="intro-note">Small patterns, clearly seen.<br>Your phone habits across the time<br>you chose to keep track.</p>
+    </section>
+    <form id="filters" class="filters" aria-label="Dashboard filters">
+      <div class="field"><label for="start">From</label><input id="start" name="start" type="date" value="{{ start }}" required></div>
+      <span class="range-arrow" aria-hidden="true">→</span>
+      <div class="field"><label for="end">Through</label><input id="end" name="end" type="date" value="{{ today }}" required></div>
+      <div class="field mode"><label for="mode">Sessions</label><select id="mode" name="mode"><option value="all">All sessions</option><option value="focus">Focus only</option><option value="background">Background only</option></select></div>
+      <button type="submit" id="apply">Apply dates <span aria-hidden="true">↗</span></button>
+      <button type="button" class="secondary" id="today" data-today="{{ today }}">Today</button>
+      <button type="button" class="secondary" id="refresh" aria-label="Refresh statistics">Refresh</button>
+    </form>
+    <div class="status-row"><p id="status" role="status" aria-live="polite">Loading your journal…</p><span>Timezone: {{ zone }} · Weeks start Monday</span></div>
+    <p id="error" class="notice error" role="alert" hidden></p>
+    <p id="empty" class="notice" hidden></p>
+    <section id="results" aria-label="Habit statistics" aria-busy="true">
+      <div class="metrics">
+        <article><p class="eyebrow">CONFIRMED PICKUPS</p><p class="metric" id="pickups">—</p><p class="metric-note">Every confirmed hold, counted once.</p></article>
+        <article><p class="eyebrow">PHONE TIME</p><p class="metric" id="phone">—</p><p class="metric-note">Recorded holding time in this range.</p></article>
+        <article><p class="eyebrow">FOCUS SESSION TIME</p><p class="metric" id="focus">—</p><p class="metric-note">Time monitored in focus mode.</p></article>
+        <article class="streak"><p class="eyebrow">LONGEST PHONE-FREE STREAK</p><p class="metric" id="streak">—</p><p class="metric-note">An uninterrupted stretch of monitored time.</p></article>
+      </div>
+      <section class="chart-section daily-section" aria-labelledby="daily-title">
+        <div class="section-heading"><div><p class="eyebrow">01 / THE DAILY PICTURE</p><h2 id="daily-title">Pickups, day by day.</h2></div><div class="legend"><span><i class="focus-key"></i>Focus</span><span><i class="background-key"></i>Background</span></div></div>
+        <svg id="daily-chart" class="chart" viewBox="0 0 1080 260" role="img" aria-label="Daily pickup bar chart"></svg>
+        <details><summary>View daily numbers</summary><div class="table-scroll"><table><caption class="sr-only">Daily confirmed pickups</caption><thead><tr><th scope="col">Date</th><th scope="col">Focus</th><th scope="col">Background</th><th scope="col">Total</th></tr></thead><tbody id="daily-data"></tbody></table></div></details>
+      </section>
+      <div class="lower-grid">
+        <section class="chart-section weekly-section" aria-labelledby="weekly-title">
+          <div class="section-heading"><div><p class="eyebrow">02 / THE LONGER VIEW</p><h2 id="weekly-title">A week at a time.</h2></div></div>
+          <svg id="weekly-chart" class="chart" viewBox="0 0 620 250" role="img" aria-label="Weekly pickup trend"></svg>
+          <p class="chart-note">* A partial week: only dates within your selection are counted.</p>
+          <details><summary>View weekly numbers</summary><div class="table-scroll"><table><caption class="sr-only">Weekly confirmed pickups</caption><thead><tr><th scope="col">Week of</th><th scope="col">Pickups</th></tr></thead><tbody id="weekly-data"></tbody></table></div></details>
+        </section>
+        <aside class="reflection"><p class="eyebrow">A NOTE ON YOUR NUMBERS</p><h2>The gaps matter, too.</h2><p>Your longest streak counts only time that Phone Watch recorded. Closing the app doesn’t add to it.</p><div class="monitored"><span id="monitored">—</span><span>total monitored time<br>in this selection</span></div><p class="fine">Focus time includes phone use. Open sessions show their last saved progress; figures may lag by a few seconds.</p></aside>
+      </div>
+      <section class="recent-section" aria-labelledby="recent-title"><div class="section-heading"><div><p class="eyebrow">03 / THE RECORD</p><h2 id="recent-title">Recent pickups.</h2></div><span class="muted">Latest 20 in your selection</span></div><div class="table-scroll"><table><caption class="sr-only">Recent pickup events and spoken feedback</caption><thead><tr><th scope="col">When</th><th scope="col">Session</th><th scope="col">Phone time</th><th scope="col">What was said</th></tr></thead><tbody id="recent-data"></tbody></table></div></section>
+    </section>
+    <noscript><p class="notice">Enable JavaScript to load the statistics and interactive charts. All dashboard scripts run locally.</p></noscript>
+  </main>
+  <footer><span>PHONE WATCH <span class="footer-slash">/</span> A habit, observed.</span><span>Local records. No video uploads.</span></footer>
+</body>
+</html>

@@ -1,0 +1,46 @@
+# Byte-compiled / cache / virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+ENV/
+env/
+
+# Environment variables & secrets (keep placeholder tracked)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Model weights & binaries (Prevents GitHub >100MB rejection)
+*.pt
+*.onnx
+*.bin
+*.weights
+*.engine
+models/kokoro/
+.ultralytics/
+Ultralytics/
+
+# Database & Runtime logs
+*.db
+*.db-wal
+*.db-shm
+*.db.lock
+*.sqlite
+*.sqlite3
+*.log
+data/
+runs/
+
+# Operating system & Editor configs
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json

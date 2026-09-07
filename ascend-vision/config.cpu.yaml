@@ -1,0 +1,8 @@
+# Optional lower-load preset. Unspecified values use the defaults in config.py.
+# Camera remains 640x480; only YOLO inference resolution/thread count changes.
+detector:
+  model: models/yolo26n.pt
+  image_size: 320
+  cpu_threads: 1
+hands:
+  model: models/hand_landmarker.task
