@@ -103,7 +103,7 @@ dashboard:
   open_browser: true
 voice_commands:
   enabled: true
-  model_size: small.en
+  model_size: base.en
   compute_type: int8
   device: cpu
   device_index: null # null uses system default input device, or set to specific device index

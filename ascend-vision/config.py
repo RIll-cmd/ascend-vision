@@ -332,7 +332,7 @@ class DashboardConfig:
 @dataclass(frozen=True)
 class VoiceCommandConfig:
     enabled: bool = True
-    model_size: str = 'small.en'
+    model_size: str = 'base.en'
     compute_type: str = 'int8'
     device: str = 'cpu'
     device_index: int | None = None
