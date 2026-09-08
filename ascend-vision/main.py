@@ -6,6 +6,7 @@ import math
 import os
 from pathlib import Path
 import signal
+import threading
 import time
 from contextlib import ExitStack
 
@@ -27,12 +28,16 @@ from db import Database
 from session_manager import SessionManager
 from controls import DesktopControls
 from feedback import FeedbackService, RoastContext, ConversationContext
-from gesture_controls import GestureAction, GestureController, GestureModeRouter, GestureRecognizer, count_fingers
+from gesture_controls import (GestureAction, GestureController, GestureModeRouter,
+                              GestureRecognizer, core_status_indicator, count_fingers,
+                              effective_core_connection_state, gesture_overlay_lines,
+                              vision_presence_indicator)
 from voice_listener import VoiceCommandListener, VoiceCommand
 
 LOG = logging.getLogger('phone_watch')
 
 WINDOW = 'Phone Watch - Space: focus toggle | Q / Esc: quit'
+VISION_VERSION = '1.0.0'
 
 
 
@@ -140,18 +145,41 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         ascend_character_id = None
         ascend_observations = None
         automation_proposals = None
+        core_connection_state = {'health': None, 'vision': None}
+        vision_presence_state = {'value': None}
+        core_connection_lock = threading.Lock()
         gesture_recognizer = GestureRecognizer()
         gesture_controller = GestureController()
+        gesture_count = None
+        gesture_handedness = None
+        gesture_last_action = None
+        gesture_last_action_at = float('-inf')
         if config.ascend.enabled:
             from integrations.ascend_client import AscendClient
             base_url = os.getenv(config.ascend.base_url_env, '').strip()
-            ascend_character_id = os.getenv(config.ascend.character_id_env)
+            configured_character_id = os.getenv(config.ascend.character_id_env)
+            from integrations.vision_context import VisionContextStore, resolve_character_id
+            from integrations.vision_token_store import VisionTokenStore
+            token_store = None
+            context_store = None
+            synced_token = None
+            try:
+                token_store = VisionTokenStore()
+                context_store = VisionContextStore()
+                synced_token = token_store.load()
+                synced_context = context_store.load()
+            except Exception as exc:
+                LOG.warning('Could not load synchronized Vision authorization (%s)', type(exc).__name__)
+                synced_context = None
+                synced_token = None
+            ascend_character_id = resolve_character_id(configured_character_id, synced_context, synced_token)
             if base_url:
                 ascend_client = AscendClient(base_url, os.getenv(config.ascend.api_token_env),
-                                             timeout_seconds=config.ascend.timeout_seconds,
-                                             health_path=config.ascend.health_path,
-                                             command_path=config.ascend.command_path,
-                                             event_path=config.ascend.event_path)
+                                              timeout_seconds=config.ascend.timeout_seconds,
+                                              health_path=config.ascend.health_path,
+                                              command_path=config.ascend.command_path,
+                                              event_path=config.ascend.event_path,
+                                              token_store=token_store, context_store=context_store)
                 if ascend_character_id:
                     from integrations.ascend_observations import AscendObservationDispatcher
                     ascend_observations = AscendObservationDispatcher(ascend_client, ascend_character_id)
@@ -161,6 +189,52 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     from llm_router import get_router
                     automation_proposals = AutomationProposalService(
                         ascend_client, ascend_character_id, StructuredAutomationProposalGenerator(get_router(config.llm)))
+
+        if ascend_client is not None and ascend_character_id:
+            from integrations.vision_heartbeat import VisionHeartbeatWorker
+            ascend_device_id = os.getenv(config.ascend.device_id_env, 'ascend-vision').strip() or 'ascend-vision'
+
+            def on_vision_heartbeat(result):
+                payload = getattr(result, 'payload', None)
+                state = payload.get('status') if isinstance(payload, dict) else None
+                with core_connection_lock:
+                    vision_presence_state['value'] = state or result.state.value
+                    core_connection_state['vision'] = result.state.value
+
+            vision_heartbeat = VisionHeartbeatWorker(
+                ascend_client,
+                character_id=ascend_character_id,
+                device_id=ascend_device_id,
+                version=VISION_VERSION,
+                interval_seconds=10.0,
+                callback=on_vision_heartbeat,
+            )
+            vision_heartbeat.start()
+            resources.callback(vision_heartbeat.close)
+
+        if ascend_client is not None:
+            core_monitor_stop = threading.Event()
+
+            def monitor_core_connection():
+                while not core_monitor_stop.is_set():
+                    try:
+                        result = ascend_client.get_status()
+                        state = result.state.value
+                    except Exception:
+                        state = 'ASCEND_OFFLINE'
+                    with core_connection_lock:
+                        core_connection_state['health'] = state
+                    core_monitor_stop.wait(5.0)
+
+            core_monitor = threading.Thread(target=monitor_core_connection,
+                                            name='ascend-core-status', daemon=True)
+            core_monitor.start()
+
+            def stop_core_monitor():
+                core_monitor_stop.set()
+                core_monitor.join(1.0)
+
+            resources.callback(stop_core_monitor)
 
         screen_auditor = None
         if getattr(config, 'screen_audit', None) and config.screen_audit.enabled:
@@ -179,6 +253,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 feedback.speak_announcement('Ascend character configuration is missing.')
                 return
             result = ascend_client.send_command(text, source='ascend_vision', character_id=ascend_character_id)
+            with core_connection_lock:
+                core_connection_state['health'] = result.state.value
             LOG.info('Ascend command state: %s', result.state.value)
             if result.state is AscendConnectionState.CONNECTED:
                 feedback.speak_announcement(result.message or 'Ascend completed your request.')
@@ -330,11 +406,13 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 hand_landmarks = hand_tracker.detect(packet.image, packet.monotonic_time)
                 hand_frames += bool(hand_landmarks)
                 gesture_count = None
+                gesture_handedness = None
                 if hand_landmarks:
                     handedness = getattr(hand_tracker, 'last_handedness', ())
+                    gesture_handedness = handedness[0] if handedness else None
                     gesture_count = count_fingers(
                         hand_landmarks[0],
-                        handedness=handedness[0] if handedness else None,
+                        handedness=gesture_handedness,
                     )
                 triggered_gesture = gesture_recognizer.update(gesture_count, packet.monotonic_time)
                 if triggered_gesture is not None:
@@ -345,13 +423,20 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     if action is GestureAction.MUTE:
                         # Gesture mute persists until the contextual open-palm unmute.
                         feedback.mute(315_360_000.0)
+                        gesture_last_action = 'Muted — show 5 fingers to unmute'
                     elif action is GestureAction.UNMUTE:
                         feedback.unmute()
                         feedback.speak_announcement('Voice active.')
+                        gesture_last_action = 'Voice active'
                     elif action is GestureAction.STOP_CANCEL:
                         feedback.cancel_speech()
                         if automation_proposals is not None and automation_proposals.pending is not None:
                             automation_proposals.cancel()
+                        gesture_last_action = 'Stop / cancel'
+                    elif gesture_controller.mode.value != 'idle':
+                        gesture_last_action = f'{gesture_controller.mode.value.title()} mode selected'
+                    if gesture_last_action is not None:
+                        gesture_last_action_at = packet.monotonic_time
                 if hasattr(face_tracker, 'detect_with_blendshapes'):
                     face_landmarks_list, face_blendshapes_list = face_tracker.detect_with_blendshapes(packet.image, packet.monotonic_time)
                 else:
@@ -488,6 +573,50 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         hold_label = f'holding {hold_status.active.duration_seconds:.1f}s'
                     cv2.putText(display, f'{hold_label} | {fps:.1f} FPS', (10, 25),
                                 cv2.FONT_HERSHEY_SIMPLEX, .55, (255, 255, 255), 2)
+
+                    with core_connection_lock:
+                        core_label, core_tone = core_status_indicator(
+                            configured=ascend_client is not None,
+                            state=effective_core_connection_state(
+                                core_connection_state['health'], core_connection_state['vision']),
+                        )
+                        vision_label, vision_tone = vision_presence_indicator(
+                            configured=ascend_client is not None and bool(ascend_character_id),
+                            state=vision_presence_state['value'],
+                        )
+                    gesture_lines = gesture_overlay_lines(
+                        finger_count=gesture_count,
+                        handedness=gesture_handedness,
+                        recognizer=gesture_recognizer,
+                        controller=gesture_controller,
+                        feedback_muted=feedback.is_muted(),
+                        now=packet.monotonic_time,
+                        last_action=(gesture_last_action
+                                     if packet.monotonic_time - gesture_last_action_at <= 3.0 else None),
+                        core_status=core_label,
+                        vision_status=vision_label,
+                    )
+                    panel_x = max(10, display.shape[1] - 470)
+                    panel_y2 = 232
+                    cv2.rectangle(display, (panel_x - 12, 8), (display.shape[1] - 8, panel_y2), (16, 18, 24), -1)
+                    cv2.rectangle(display, (panel_x - 12, 8), (display.shape[1] - 8, panel_y2), (100, 110, 125), 2)
+                    for index, line in enumerate(gesture_lines):
+                        if index == 0:
+                            color, scale = (255, 220, 80), .75
+                        elif index == 1 and 'MUTED' in line:
+                            color, scale = (0, 0, 255), .64
+                        elif index == 1:
+                            color = {'good': (0, 255, 120), 'warning': (0, 210, 255),
+                                     'bad': (0, 0, 255), 'muted': (180, 180, 180)}[core_tone]
+                            scale = .64
+                        elif index == 2:
+                            color = {'good': (0, 255, 120), 'warning': (0, 210, 255),
+                                     'bad': (0, 0, 255), 'muted': (180, 180, 180)}[vision_tone]
+                            scale = .64
+                        else:
+                            color, scale = (245, 245, 245), .62
+                        cv2.putText(display, line, (panel_x, 38 + index * 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, scale, color, 2)
 
                     fatigue_colors = {
                         'critical_drowsy': (0, 0, 255),

@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 import logging
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 import webbrowser
 
 from flask import Flask, abort, jsonify, render_template, request
@@ -12,6 +13,8 @@ from flask import Flask, abort, jsonify, render_template, request
 from config import load_config
 from dashboard_stats import DashboardError, get_zone, read_stats
 from integrations.ascend_client import AscendClient, AscendConnectionState
+from integrations.vision_context import VisionAuthContext, VisionContextStore
+from integrations.vision_token_store import VisionToken, VisionTokenStore
 
 LOG = logging.getLogger(__name__)
 
@@ -33,17 +36,24 @@ def create_app(config):
         response.headers['Cache-Control'] = 'no-store'
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Referrer-Policy'] = 'no-referrer'
+        core_url = os.getenv(config.ascend.base_url_env, '').strip().rstrip('/')
+        connect_sources = "'self'"
+        if _is_local_core_url(core_url):
+            parsed = urlsplit(core_url)
+            connect_sources = f"{connect_sources} {parsed.scheme}://{parsed.netloc}"
         response.headers['Content-Security-Policy'] = (
             "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; "
-            "connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+            f"connect-src {connect_sources}; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
         return response
 
     @app.get('/')
     def index():
         today = datetime.now(timezone.utc).astimezone(get_zone(config.dashboard.timezone)).date()
+        core_url = os.getenv(config.ascend.base_url_env, '').strip().rstrip('/')
         return render_template('dashboard.html', today=today.isoformat(),
             start=(today-timedelta(days=config.dashboard.default_days-1)).isoformat(),
-            refresh=config.dashboard.refresh_seconds, zone=config.dashboard.timezone)
+            refresh=config.dashboard.refresh_seconds, zone=config.dashboard.timezone,
+            core_url=core_url, local_auto_connect=_is_local_core_url(core_url))
 
     @app.get('/api/stats')
     def statistics():
@@ -61,6 +71,34 @@ def create_app(config):
         except DashboardError as exc:
             LOG.warning('Dashboard read failed (%s)', type(exc).__name__)
             return jsonify(error=str(exc)), 503
+
+    @app.get('/api/auth/local-vision-status')
+    def local_vision_status():
+        """Return safe local authorization status without exposing the Vision token."""
+        token_store = VisionTokenStore()
+        context_store = VisionContextStore()
+        token = token_store.load()
+        context = context_store.load()
+        if token is None or context is None:
+            _clear_handoff_stores(token_store, context_store)
+            return jsonify(status='re-authentication-required', coreApi='unreachable')
+
+        core_api = 'unreachable'
+        base_url = os.getenv(config.ascend.base_url_env, '').strip()
+        if _is_local_core_url(base_url):
+            try:
+                result = AscendClient(base_url, timeout_seconds=config.ascend.timeout_seconds,
+                                      token_store=token_store).get_automation_capabilities()
+                if result.state is AscendConnectionState.CONNECTED:
+                    core_api = 'reachable'
+            except Exception as exc:
+                LOG.warning('Local Core API status check failed (%s)', type(exc).__name__)
+        return jsonify(
+            status='connected',
+            character={'id': context.character_id, 'name': context.character_name},
+            expiresAt=context.expires_at.isoformat(),
+            coreApi=core_api,
+        )
 
     @app.post('/api/auth/vision-handoff')
     def vision_handoff():
@@ -80,6 +118,48 @@ def create_app(config):
             LOG.warning('Vision sign-in handoff failed: %s', result.state.value)
             return jsonify(error='Core sign-in could not be completed.'), 401
         return jsonify(status='connected')
+
+    @app.post('/api/auth/local-vision-handoff')
+    def local_vision_handoff():
+        """Persist a browser-handoff token only on the loopback-bound local dashboard."""
+        base_url = os.getenv(config.ascend.base_url_env, '').strip()
+        if not _is_local_core_url(base_url) or not _is_loopback_host(request.host):
+            abort(403)
+
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {'accessToken', 'expiresAt', 'character'}:
+            return jsonify(error='Invalid local Vision handoff.'), 400
+
+        token = payload['accessToken']
+        expires_at = _parse_future_expiry(payload['expiresAt'])
+        character = payload['character']
+        if (not isinstance(token, str) or not token.strip() or expires_at is None
+                or not isinstance(character, dict) or set(character) != {'id', 'name'}
+                or not isinstance(character['id'], str) or not character['id'].strip()
+                or not isinstance(character['name'], str) or not character['name'].strip()):
+            return jsonify(error='Invalid local Vision handoff.'), 400
+
+        vision_token = VisionToken(access_token=token, expires_at=expires_at)
+        vision_context = VisionAuthContext(
+            character_id=character['id'].strip(),
+            character_name=character['name'].strip(),
+            expires_at=expires_at,
+        )
+        token_store = VisionTokenStore()
+        context_store = VisionContextStore()
+        try:
+            token_store.save(vision_token)
+            context_store.save(vision_context)
+        except Exception:
+            _clear_handoff_stores(token_store, context_store)
+            LOG.warning('Local Vision handoff storage failed')
+            return jsonify(error='Vision authorization could not be saved.'), 503
+
+        return jsonify(
+            status='connected',
+            character={'id': vision_context.character_id, 'name': vision_context.character_name},
+            expiresAt=vision_context.expires_at.astimezone(timezone.utc).isoformat(),
+        )
 
     @app.get('/api/camera/status')
     def camera_status():
@@ -116,6 +196,36 @@ def create_app(config):
     return app
 
 
+def _is_loopback_host(host: str) -> bool:
+    return urlsplit(f'//{host}').hostname in {'localhost', '127.0.0.1', '::1'}
+
+
+def _is_local_core_url(base_url: str) -> bool:
+    parsed = urlsplit(base_url)
+    return parsed.scheme in {'http', 'https'} and parsed.hostname in {'localhost', '127.0.0.1', '::1'}
+
+
+def _parse_future_expiry(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        expires_at = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc):
+        return None
+    return expires_at.astimezone(timezone.utc)
+
+
+def _clear_handoff_stores(token_store: VisionTokenStore, context_store: VisionContextStore) -> None:
+    """Best-effort cleanup must not expose a credential-store failure to the caller."""
+    for store in (token_store, context_store):
+        try:
+            store.clear()
+        except Exception:
+            pass
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Phone Watch habit dashboard (Phase 5)')
     parser.add_argument('--config', type=Path, default=Path(__file__).with_name('config.yaml'))
@@ -133,8 +243,10 @@ def main(argv=None):
             options = replace(options, open_browser=args.open_browser)
         config = replace(config, dashboard=options)
         from waitress import create_server
+        # This server must remain loopback-only: the handoff endpoint persists a Vision credential.
         server = create_server(create_app(config), host='127.0.0.1', port=options.port, threads=4)
-        url = f'http://127.0.0.1:{options.port}'
+        # Use localhost so Core's host-only localhost session cookie is sent by the browser.
+        url = f'http://localhost:{options.port}'
         LOG.info('Dashboard: %s — Ctrl+C to stop. Detection runs separately.', url)
         if options.open_browser:
             try:

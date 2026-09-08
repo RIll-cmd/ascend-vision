@@ -138,3 +138,58 @@ def test_explicit_gesture_modes_route_to_only_the_selected_flow():
         ("missions", "next request"),
         ("habits", "next request"),
     ]
+
+
+def test_camera_overlay_labels_live_gesture_state():
+    from gesture_controls import GestureController, GestureRecognizer, gesture_overlay_lines
+
+    controller = GestureController()
+    controller.handle(3)
+    recognizer = GestureRecognizer(stable_seconds=0.9)
+    recognizer.update(3, 10.0)
+
+    assert gesture_overlay_lines(
+        finger_count=3,
+        handedness="Left",
+        recognizer=recognizer,
+        controller=controller,
+        feedback_muted=False,
+        now=10.5,
+        last_action="Missions mode selected",
+        core_status="CORE: CONNECTED",
+        vision_status="VISION: CONNECTED",
+    ) == [
+        "GESTURE CONTROLS",
+        "VOICE: ACTIVE | CORE: CONNECTED",
+        "VISION: CONNECTED",
+        "HAND: Left | FINGERS: 3",
+        "HOLD: ######---- 0.5 / 0.9s",
+        "MODE: MISSIONS",
+        "LAST: Missions mode selected",
+    ]
+
+
+def test_core_indicator_distinguishes_disabled_connecting_connected_and_unavailable():
+    from gesture_controls import core_status_indicator
+
+    assert core_status_indicator(configured=False, state=None) == ("CORE: DISABLED", "muted")
+    assert core_status_indicator(configured=True, state=None) == ("CORE: CONNECTING...", "warning")
+    assert core_status_indicator(configured=True, state="ASCEND_CONNECTED") == ("CORE: CONNECTED", "good")
+    assert core_status_indicator(configured=True, state="ASCEND_OFFLINE") == ("CORE: UNAVAILABLE", "bad")
+
+
+def test_successful_authenticated_vision_heartbeat_proves_core_is_reachable():
+    from gesture_controls import effective_core_connection_state
+
+    assert effective_core_connection_state("ASCEND_AUTH_ERROR", "ASCEND_CONNECTED") == "ASCEND_CONNECTED"
+    assert effective_core_connection_state("ASCEND_OFFLINE", None) == "ASCEND_OFFLINE"
+
+
+def test_vision_presence_indicator_distinguishes_connection_and_auth_states():
+    from gesture_controls import vision_presence_indicator
+
+    assert vision_presence_indicator(configured=False, state=None) == ("VISION: DISABLED", "muted")
+    assert vision_presence_indicator(configured=True, state=None) == ("VISION: CONNECTING...", "warning")
+    assert vision_presence_indicator(configured=True, state="CONNECTED") == ("VISION: CONNECTED", "good")
+    assert vision_presence_indicator(configured=True, state="ASCEND_AUTH_ERROR") == ("VISION: RE-AUTH REQUIRED", "bad")
+    assert vision_presence_indicator(configured=True, state="ASCEND_OFFLINE") == ("VISION: OFFLINE", "bad")

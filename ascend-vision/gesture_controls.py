@@ -121,3 +121,59 @@ class GestureModeRouter:
             return False
         handler(text)
         return True
+
+
+def core_status_indicator(*, configured: bool, state: str | None) -> tuple[str, str]:
+    """Translate existing Ascend health states into a compact camera badge."""
+    if not configured:
+        return 'CORE: DISABLED', 'muted'
+    if state is None:
+        return 'CORE: CONNECTING...', 'warning'
+    if state == 'ASCEND_CONNECTED':
+        return 'CORE: CONNECTED', 'good'
+    return 'CORE: UNAVAILABLE', 'bad'
+
+
+def effective_core_connection_state(health_state: str | None, vision_state: str | None) -> str | None:
+    """Treat a successful authenticated heartbeat as proof that Core is reachable."""
+    if health_state == 'ASCEND_CONNECTED' or vision_state == 'ASCEND_CONNECTED':
+        return 'ASCEND_CONNECTED'
+    return health_state or vision_state
+
+
+def vision_presence_indicator(*, configured: bool, state: str | None) -> tuple[str, str]:
+    """Translate heartbeat outcomes without conflating them with Core API health."""
+    if not configured:
+        return 'VISION: DISABLED', 'muted'
+    if state is None:
+        return 'VISION: CONNECTING...', 'warning'
+    if state == 'CONNECTED':
+        return 'VISION: CONNECTED', 'good'
+    if state == 'ASCEND_AUTH_ERROR':
+        return 'VISION: RE-AUTH REQUIRED', 'bad'
+    return 'VISION: OFFLINE', 'bad'
+
+
+def gesture_overlay_lines(*, finger_count: int | None, handedness: str | None,
+                          recognizer: GestureRecognizer, controller: GestureController,
+                          feedback_muted: bool, now: float, last_action: str | None,
+                          core_status: str = 'CORE: DISABLED',
+                          vision_status: str = 'VISION: OFFLINE') -> list[str]:
+    """Return compact, human-readable status text for the live camera preview."""
+    active_for = 0.0
+    if recognizer._candidate_started_at is not None:
+        active_for = min(recognizer.stable_seconds, max(0.0, now - recognizer._candidate_started_at))
+    voice = 'MUTED' if controller.muted or feedback_muted else 'ACTIVE'
+    fingers = '--' if finger_count is None else str(finger_count)
+    side = handedness or 'Unknown'
+    filled = round(10 * active_for / recognizer.stable_seconds) if recognizer.stable_seconds else 0
+    hold_bar = '#' * filled + '-' * (10 - filled)
+    return [
+        'GESTURE CONTROLS',
+        f'VOICE: {voice} | {core_status}',
+        vision_status,
+        f'HAND: {side} | FINGERS: {fingers}',
+        f'HOLD: {hold_bar} {active_for:.1f} / {recognizer.stable_seconds:.1f}s',
+        f'MODE: {controller.mode.value.upper()}',
+        f'LAST: {last_action or "Waiting for a stable hand pose"}',
+    ]

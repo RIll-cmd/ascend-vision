@@ -176,3 +176,79 @@ load(selection());
 
 const handoffForm=$('vision-handoff');
 if(handoffForm){handoffForm.addEventListener('submit',async event=>{event.preventDefault();const status=$('vision-handoff-status');const data=new FormData(handoffForm);try{const response=await fetch('/api/auth/vision-handoff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({identifier:data.get('identifier'),password:data.get('password')})});const body=await response.json();if(!response.ok)throw new Error(body.error||'Core sign-in could not be completed.');handoffForm.reset();status.textContent='Automation sign-in enabled for the next 15 minutes.';status.hidden=false;}catch(error){status.textContent=error.message;status.hidden=false;}})}
+
+const localAutoConnect=document.body.dataset.localAutoConnect==='true';
+const localCoreUrl=document.body.dataset.coreUrl;
+const localConnectStatus=$('vision-handoff-status');
+const localConnectState=$('local-vision-state');
+const localVisionExpiry=$('local-vision-expiry');
+const localCoreApiState=$('local-core-api-state');
+function setLocalConnectStatus(message){
+  if(localConnectState)localConnectState.textContent=message;
+  if(localConnectStatus){localConnectStatus.textContent=message;localConnectStatus.hidden=false;}
+}
+function setLocalConnectionDetails(status){
+  const character=status&&status.character;
+  const expiresAt=status&&status.expiresAt;
+  const expiresIn=Math.max(0,Math.ceil((Date.parse(expiresAt)-Date.now())/60000));
+  setLocalConnectStatus(`CONNECTED · Character: ${character.name} · Authorization active`);
+  if(localVisionExpiry)localVisionExpiry.textContent=Number.isFinite(expiresIn)?`Expires in: ${expiresIn}m`:'Expires in: unavailable';
+  if(localCoreApiState)localCoreApiState.textContent=`Core API: ${status.coreApi==='reachable'?'Reachable':'Unreachable'}`;
+}
+function hasStoredLocalAuthorization(status){
+  return Boolean(status&&status.status==='connected'&&status.character&&typeof status.character.id==='string'
+    &&typeof status.character.name==='string'&&typeof status.expiresAt==='string'
+    &&Date.parse(status.expiresAt)>Date.now());
+}
+async function localVisionStatus(){
+  const response=await fetch('/api/auth/local-vision-status',{cache:'no-store'});
+  const payload=await response.json().catch(()=>null);
+  if(!response.ok)throw new Error('Local Vision status is unavailable.');
+  return payload;
+}
+async function coreSessionRequest(path,options={}){
+  const response=await fetch(`${localCoreUrl}${path}`,{...options,credentials:'include',cache:'no-store'});
+  const payload=await response.json().catch(()=>null);
+  if(!response.ok)throw new Error('Core session is unavailable.');
+  return payload;
+}
+function authenticatedCharacter(context){
+  const character=context&&context.character;
+  if(!character||typeof character.id!=='string'||!character.id.trim()||typeof character.name!=='string')throw new Error('Core did not provide a character.');
+  return {id:character.id,name:character.name};
+}
+async function connectLocalCore({forceHandoff=false}={}){
+  if(!localAutoConnect||!localCoreUrl)return;
+  try{
+    if(!forceHandoff){
+      setLocalConnectStatus('Checking saved Vision authorization…');
+      const localStatus=await localVisionStatus();
+      if(hasStoredLocalAuthorization(localStatus)){
+        setLocalConnectionDetails(localStatus);
+        return;
+      }
+    }
+    setLocalConnectStatus('Checking your local Ascend Core session…');
+    const character=authenticatedCharacter(await coreSessionRequest('/api/auth/me'));
+    let visionToken;
+    try{
+      visionToken=await coreSessionRequest('/api/auth/vision-token',{method:'POST'});
+      if(!visionToken||typeof visionToken.accessToken!=='string'||typeof visionToken.expiresAt!=='string')throw new Error('Core did not provide Vision authorization.');
+      const handoff=await fetch('/api/auth/local-vision-handoff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accessToken:visionToken.accessToken,expiresAt:visionToken.expiresAt,character})});
+      const result=await handoff.json().catch(()=>null);
+      if(!handoff.ok)throw new Error((result&&result.error)||'Vision could not store authorization.');
+      setLocalConnectionDetails({...result,coreApi:'reachable'});
+    }finally{
+      visionToken=undefined;
+    }
+  }catch(error){
+    setLocalConnectStatus('NOT CONNECTED · Open Ascend Core and enter Guest Mode first.');
+    if(localVisionExpiry)localVisionExpiry.textContent='Expires in: unavailable';
+    if(localCoreApiState)localCoreApiState.textContent='Core API: Unreachable';
+  }
+}
+if(localAutoConnect){
+  $('retry-local-vision')?.addEventListener('click',()=>connectLocalCore({forceHandoff:true}));
+  $('reconnect-local-vision')?.addEventListener('click',()=>connectLocalCore({forceHandoff:true}));
+  connectLocalCore();
+}

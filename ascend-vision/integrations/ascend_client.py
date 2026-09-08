@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
 from integrations.vision_token_store import VisionToken, VisionTokenStore
+from integrations.vision_context import VisionContextStore, clear_vision_authorization
 
 
 LOG = logging.getLogger(__name__)
@@ -51,10 +52,11 @@ class AscendClient:
                  vision_token_path: str = "/api/auth/vision-token",
                  automation_capabilities_path: str = "/api/automations/capabilities",
                  eligible_habits_path: str = "/api/automations/eligible-habits",
-                 automation_validation_path: str = "/api/automations/proposals/validate",
-                 automations_path: str = "/api/automations",
-                 token_store: VisionTokenStore | None = None,
-                 opener: Callable = urlopen):
+                  automation_validation_path: str = "/api/automations/proposals/validate",
+                  automations_path: str = "/api/automations",
+                  token_store: VisionTokenStore | None = None,
+                  context_store: VisionContextStore | None = None,
+                  opener: Callable = urlopen):
         if not isinstance(base_url, str) or not base_url.strip():
             raise ValueError("Ascend base URL must be nonempty")
         if timeout_seconds <= 0:
@@ -72,6 +74,7 @@ class AscendClient:
         self.automation_validation_path = self._path(automation_validation_path)
         self.automations_path = self._path(automations_path)
         self._token_store = token_store or VisionTokenStore()
+        self._context_store = context_store
         self._opener = opener
 
     @staticmethod
@@ -97,6 +100,30 @@ class AscendClient:
         payload = {"source": source, "characterId": character_id.strip(), "text": text.strip(),
                    "timestamp": sent_at.isoformat(), "requestId": request_id or f"{source}-{uuid.uuid4()}"}
         return self._request("POST", self.command_path, payload)
+
+    def send_vision_heartbeat(self, *, character_id: str | None, device_id: str | None,
+                              version: str, timestamp: datetime | None = None) -> AscendResult:
+        """Report only safe Vision presence metadata using the Phase 6 Vision token."""
+        if not isinstance(character_id, str) or not character_id.strip():
+            return AscendResult(AscendConnectionState.CONFIG_ERROR,
+                                error="ASCEND_CHARACTER_ID is not configured")
+        if not isinstance(device_id, str) or not device_id.strip():
+            return AscendResult(AscendConnectionState.CONFIG_ERROR,
+                                error="ASCEND_DEVICE_ID is not configured")
+        if not isinstance(version, str) or not version.strip():
+            return AscendResult(AscendConnectionState.CONFIG_ERROR,
+                                error="Vision version is not configured")
+        sent_at = timestamp or datetime.now(timezone.utc)
+        if sent_at.tzinfo is None:
+            sent_at = sent_at.replace(tzinfo=timezone.utc)
+        payload = {
+            "source": "ascend_vision",
+            "characterId": character_id.strip(),
+            "deviceId": device_id.strip(),
+            "timestamp": sent_at.isoformat(),
+            "version": version.strip(),
+        }
+        return self._vision_request("POST", "/api/integration/vision/heartbeat", payload)
 
     def send_event(self, event_type: str, payload: dict[str, Any], *, source: str,
                    timestamp: datetime | None = None, device_id: str | None = None,
@@ -208,7 +235,8 @@ class AscendClient:
             return AscendResult(AscendConnectionState.AUTH_ERROR, error="Vision authentication is required.")
         result = self._user_request(method, path, payload, bearer_token=token.access_token)
         if result.state is AscendConnectionState.AUTH_ERROR and result.status_code == 401:
-            self._token_store.clear()
+            clear_vision_authorization(self._token_store,
+                                       self._context_store or VisionContextStore())
             return AscendResult(AscendConnectionState.AUTH_ERROR, status_code=401,
                                 error="Vision authentication is required.")
         return result

@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
   <script defer src="{{ url_for('static', filename='dashboard.js') }}"></script>
 </head>
-<body data-refresh="{{ refresh }}">
+<body data-refresh="{{ refresh }}" data-core-url="{{ core_url }}" data-local-auto-connect="{{ 'true' if local_auto_connect else 'false' }}">
   <a class="skip" href="#main">Skip to dashboard</a>
   <header class="masthead">
     <a class="brand" href="/" aria-label="Phone Watch home"><img src="{{ url_for('static', filename='mark.svg') }}" alt="" width="32" height="32"> PHONE WATCH</a>
@@ -26,12 +26,22 @@
       <p class="intro-note">Small patterns, clearly seen.<br>Your phone habits across the time<br>you chose to keep track.</p>
     </section>
     <section class="filters" aria-labelledby="core-handoff-heading">
-      <div><p class="eyebrow" id="core-handoff-heading">ASCEND CORE</p><p class="filter-note">Sign in once to enable 15-minute automation proposals. Credentials are exchanged locally and never saved here.</p></div>
+      <div><p class="eyebrow" id="core-handoff-heading">ASCEND CORE</p>{% if local_auto_connect %}<p class="filter-note">Reuse your active local Core Guest session to enable 15-minute automation proposals.</p>{% else %}<p class="filter-note">Sign in once to enable 15-minute automation proposals. Credentials are exchanged locally and never saved here.</p>{% endif %}</div>
+      {% if local_auto_connect %}
+      <div id="local-vision-connect" class="inline-form" aria-label="Local Ascend Core connection">
+        <p id="local-vision-state" class="filter-note">Checking Ascend Core…</p>
+        <p id="local-vision-expiry" class="filter-note">Expires in: checking…</p>
+        <p id="local-core-api-state" class="filter-note">Core API: checking…</p>
+        <button type="button" id="retry-local-vision" class="secondary">Retry Connection</button>
+        <button type="button" id="reconnect-local-vision" class="secondary">Reconnect</button>
+      </div>
+      {% else %}
       <form id="vision-handoff" class="inline-form" autocomplete="off">
         <label class="field" for="core-identifier">Account<input id="core-identifier" name="identifier" autocomplete="username" required></label>
         <label class="field" for="core-password">Password<input id="core-password" name="password" type="password" autocomplete="current-password" required></label>
         <button type="submit" class="secondary">Enable automations</button>
       </form>
+      {% endif %}
       <p id="vision-handoff-status" class="notice" role="status" aria-live="polite" hidden></p>
     </section>
     <form id="filters" class="filters" aria-label="Dashboard filters">

@@ -5,6 +5,7 @@ from urllib.error import HTTPError, URLError
 import pytest
 
 from integrations.ascend_client import AscendClient, AscendConnectionState
+from integrations.vision_token_store import VisionToken
 
 
 class FakeResponse:
@@ -20,6 +21,84 @@ class FakeResponse:
 
     def __exit__(self, *args):
         return False
+
+
+class VisionTokenStore:
+    def __init__(self):
+        self.token = VisionToken('vision-jwt-secret', datetime(2026, 9, 8, 12, tzinfo=timezone.utc))
+
+    def load(self):
+        return self.token
+
+    def clear(self):
+        self.token = None
+
+
+def test_vision_heartbeat_uses_the_core_contract_and_stored_vision_token():
+    requests = []
+
+    def opener(request, timeout):
+        requests.append((request, timeout))
+        return FakeResponse(200, {'status': 'CONNECTED', 'source': 'ascend_vision'})
+
+    client = AscendClient('http://ascend.local:8000', 'integration-secret', opener=opener,
+                          token_store=VisionTokenStore())
+    result = client.send_vision_heartbeat(
+        character_id='character-1', device_id='ascend-vision', version='1.0.0',
+        timestamp=datetime(2026, 9, 8, 9, tzinfo=timezone.utc),
+    )
+
+    request, _ = requests[0]
+    payload = json.loads(request.data)
+    assert result.state is AscendConnectionState.CONNECTED
+    assert request.full_url == 'http://ascend.local:8000/api/integration/vision/heartbeat'
+    assert request.get_header('Authorization') == 'Bearer vision-jwt-secret'
+    assert request.get_header('X-integration-key') is None
+    assert payload == {
+        'source': 'ascend_vision', 'characterId': 'character-1', 'deviceId': 'ascend-vision',
+        'timestamp': '2026-09-08T09:00:00+00:00', 'version': '1.0.0',
+    }
+    assert 'vision-jwt-secret' not in json.dumps(payload)
+
+
+def test_existing_automation_client_still_uses_stored_vision_token():
+    requests = []
+
+    def opener(request, timeout):
+        requests.append((request, timeout))
+        return FakeResponse(200, {'capabilities': []})
+
+    client = AscendClient('http://ascend.local:8000', 'integration-secret', opener=opener,
+                          token_store=VisionTokenStore())
+    result = client.get_automation_capabilities()
+
+    request, _ = requests[0]
+    assert result.state is AscendConnectionState.CONNECTED
+    assert request.full_url == 'http://ascend.local:8000/api/automations/capabilities'
+    assert request.get_header('Authorization') == 'Bearer vision-jwt-secret'
+    assert request.get_header('X-integration-key') is None
+
+
+def test_rejected_vision_token_clears_token_and_synced_context():
+    class ContextStore:
+        def __init__(self):
+            self.cleared = False
+
+        def clear(self):
+            self.cleared = True
+
+    def opener(request, timeout):
+        raise HTTPError(request.full_url, 401, 'Unauthorized', {}, BytesIO(b'{"detail":"bad token"}'))
+
+    token_store = VisionTokenStore()
+    context_store = ContextStore()
+    result = AscendClient('http://ascend.local:8000', opener=opener, token_store=token_store,
+                          context_store=context_store).get_automation_capabilities()
+
+    assert result.state is AscendConnectionState.AUTH_ERROR
+    assert result.status_code == 401
+    assert token_store.token is None
+    assert context_store.cleared is True
 
 
 def test_status_uses_configured_endpoint_and_integration_key():
