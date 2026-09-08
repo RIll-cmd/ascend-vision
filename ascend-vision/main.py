@@ -218,7 +218,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             def monitor_core_connection():
                 while not core_monitor_stop.is_set():
                     try:
-                        result = ascend_client.get_status()
+                        result = ascend_client.get_vision_status(ascend_character_id)
                         state = result.state.value
                     except Exception:
                         state = 'ASCEND_OFFLINE'

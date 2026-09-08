@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 import webbrowser
 
+from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, render_template, request
 
 from config import load_config
@@ -235,6 +236,7 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     server = None
     try:
+        load_dotenv(args.config.parent / '.env', override=False)
         config = load_config(args.config)
         options = config.dashboard
         if args.port is not None:

@@ -229,7 +229,14 @@ def test_voice_command_listener_transcription_and_callback():
         assert isinstance(audio_arg, np.ndarray)
         assert audio_arg.dtype == np.float32
         assert kwargs['language'] == 'en'
-        assert kwargs['beam_size'] == 1
+        # Recognition quality for free-form automation requests must not use
+        # greedy decoding, which frequently substitutes short domain words
+        # such as "log" with similar-sounding alternatives.
+        assert kwargs['beam_size'] == 5
+        assert kwargs['initial_prompt'] == (
+            'Ascend voice commands may mention YouTube, automations, habits, '
+            'and phrases such as "log my negative habit".'
+        )
     finally:
         listener.close()
 
@@ -586,6 +593,7 @@ def test_feedback_service_conversational_chat():
 def test_voice_command_config_conversational_schema():
     # Valid default
     cfg = VoiceCommandConfig()
+    assert cfg.model_size == 'small.en'
     assert cfg.conversational_mode is True
     assert cfg.max_reply_words == 25
     assert cfg.chat_cooldown_seconds == 5.0
@@ -603,4 +611,3 @@ def test_voice_command_config_conversational_schema():
         VoiceCommandConfig(max_reply_words=2)  # too low
     with pytest.raises(ValueError):
         VoiceCommandConfig(chat_cooldown_seconds=0.1)  # too low
-

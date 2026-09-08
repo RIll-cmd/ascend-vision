@@ -103,7 +103,7 @@ dashboard:
   open_browser: true
 voice_commands:
   enabled: true
-  model_size: tiny.en
+  model_size: small.en
   compute_type: int8
   device: cpu
   device_index: null # null uses system default input device, or set to specific device index
@@ -139,4 +139,3 @@ ascend:
 screen_audit:
   enabled: true
   interval_seconds: 1800
-

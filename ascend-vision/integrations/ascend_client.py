@@ -7,8 +7,8 @@ import logging
 import uuid
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from integrations.vision_token_store import VisionToken, VisionTokenStore
 from integrations.vision_context import VisionContextStore, clear_vision_authorization
@@ -85,6 +85,14 @@ class AscendClient:
 
     def get_status(self) -> AscendResult:
         return self._request("GET", self.health_path)
+
+    def get_vision_status(self, character_id: str | None) -> AscendResult:
+        """Check Core reachability through the authenticated Vision status contract."""
+        if not isinstance(character_id, str) or not character_id.strip():
+            return AscendResult(AscendConnectionState.CONFIG_ERROR,
+                                error="ASCEND_CHARACTER_ID is not configured")
+        path = "/api/integration/vision/status?" + urlencode({"characterId": character_id.strip()})
+        return self._vision_request("GET", path)
 
     def send_command(self, text: str, *, source: str, character_id: str | None,
                      timestamp: datetime | None = None, request_id: str | None = None) -> AscendResult:

@@ -386,3 +386,33 @@ def test_dashboard_config_validation(values):
 
 def test_cli_invalid_config_does_not_start_server(tmp_path):
     assert main(['--config', str(tmp_path/'missing.yaml'), '--no-open-browser']) == 1
+
+
+def test_cli_loads_dotenv_beside_selected_config_before_starting_server(monkeypatch, tmp_path):
+    config_path = tmp_path/'vision-config.yaml'
+    loaded_dotenv = []
+    startup_order = []
+
+    def fake_load_dotenv(path, *, override):
+        loaded_dotenv.append((path, override))
+        startup_order.append('dotenv')
+
+    class Server:
+        def run(self):
+            startup_order.append('run')
+
+        def close(self):
+            startup_order.append('close')
+
+    def fake_create_server(app, **kwargs):
+        startup_order.append('server')
+        return Server()
+
+    config = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    monkeypatch.setattr('dashboard.load_dotenv', fake_load_dotenv)
+    monkeypatch.setattr('dashboard.load_config', lambda path: config)
+    monkeypatch.setattr('waitress.create_server', fake_create_server)
+
+    assert main(['--config', str(config_path), '--no-open-browser']) == 0
+    assert loaded_dotenv == [(config_path.parent/'.env', False)]
+    assert startup_order.index('dotenv') < startup_order.index('server')

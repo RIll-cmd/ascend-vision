@@ -61,6 +61,25 @@ def test_vision_heartbeat_uses_the_core_contract_and_stored_vision_token():
     assert 'vision-jwt-secret' not in json.dumps(payload)
 
 
+def test_vision_status_uses_authenticated_endpoint_and_character_context():
+    requests = []
+
+    def opener(request, timeout):
+        requests.append((request, timeout))
+        return FakeResponse(200, {'status': 'CONNECTED'})
+
+    result = AscendClient('http://ascend.local:8000', 'integration-secret', opener=opener,
+                          token_store=VisionTokenStore()).get_vision_status('character-1')
+
+    request, _ = requests[0]
+    assert result.state is AscendConnectionState.CONNECTED
+    assert request.full_url == (
+        'http://ascend.local:8000/api/integration/vision/status?characterId=character-1'
+    )
+    assert request.get_header('Authorization') == 'Bearer vision-jwt-secret'
+    assert request.get_header('X-integration-key') is None
+
+
 def test_existing_automation_client_still_uses_stored_vision_token():
     requests = []
 

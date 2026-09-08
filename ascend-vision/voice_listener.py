@@ -321,7 +321,11 @@ class VoiceCommandListener:
                         segments, _ = self._model.transcribe(
                             utterance,
                             language='en',
-                            beam_size=1
+                            beam_size=5,
+                            initial_prompt=(
+                                'Ascend voice commands may mention YouTube, automations, habits, '
+                                'and phrases such as "log my negative habit".'
+                            )
                         )
                         text = ' '.join(seg.text.strip() for seg in segments).strip()
                     finally:
