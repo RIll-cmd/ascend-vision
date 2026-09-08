@@ -25,6 +25,15 @@
       <div><p class="eyebrow">THE ATTENTION JOURNAL</p><h1>A little less scrolling.<br><em>A little more here.</em></h1></div>
       <p class="intro-note">Small patterns, clearly seen.<br>Your phone habits across the time<br>you chose to keep track.</p>
     </section>
+    <section class="filters" aria-labelledby="core-handoff-heading">
+      <div><p class="eyebrow" id="core-handoff-heading">ASCEND CORE</p><p class="filter-note">Sign in once to enable 15-minute automation proposals. Credentials are exchanged locally and never saved here.</p></div>
+      <form id="vision-handoff" class="inline-form" autocomplete="off">
+        <label class="field" for="core-identifier">Account<input id="core-identifier" name="identifier" autocomplete="username" required></label>
+        <label class="field" for="core-password">Password<input id="core-password" name="password" type="password" autocomplete="current-password" required></label>
+        <button type="submit" class="secondary">Enable automations</button>
+      </form>
+      <p id="vision-handoff-status" class="notice" role="status" aria-live="polite" hidden></p>
+    </section>
     <form id="filters" class="filters" aria-label="Dashboard filters">
       <div class="field"><label for="start">From</label><input id="start" name="start" type="date" value="{{ start }}" required></div>
       <span class="range-arrow" aria-hidden="true">→</span>

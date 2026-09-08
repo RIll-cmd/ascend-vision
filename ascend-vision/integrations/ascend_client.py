@@ -8,6 +8,9 @@ import uuid
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlencode
+
+from integrations.vision_token_store import VisionToken, VisionTokenStore
 
 
 LOG = logging.getLogger(__name__)
@@ -44,6 +47,13 @@ class AscendClient:
                  health_path: str = "/api/integration/health",
                  command_path: str = "/api/integration/command",
                  event_path: str = "/api/integration/event",
+                 login_path: str = "/api/auth/login",
+                 vision_token_path: str = "/api/auth/vision-token",
+                 automation_capabilities_path: str = "/api/automations/capabilities",
+                 eligible_habits_path: str = "/api/automations/eligible-habits",
+                 automation_validation_path: str = "/api/automations/proposals/validate",
+                 automations_path: str = "/api/automations",
+                 token_store: VisionTokenStore | None = None,
                  opener: Callable = urlopen):
         if not isinstance(base_url, str) or not base_url.strip():
             raise ValueError("Ascend base URL must be nonempty")
@@ -55,6 +65,13 @@ class AscendClient:
         self.health_path = self._path(health_path)
         self.command_path = self._path(command_path)
         self.event_path = self._path(event_path)
+        self.login_path = self._path(login_path)
+        self.vision_token_path = self._path(vision_token_path)
+        self.automation_capabilities_path = self._path(automation_capabilities_path)
+        self.eligible_habits_path = self._path(eligible_habits_path)
+        self.automation_validation_path = self._path(automation_validation_path)
+        self.automations_path = self._path(automations_path)
+        self._token_store = token_store or VisionTokenStore()
         self._opener = opener
 
     @staticmethod
@@ -72,8 +89,8 @@ class AscendClient:
             raise ValueError("Ascend command text must be nonempty")
         if not isinstance(character_id, str) or not character_id.strip():
             return AscendResult(AscendConnectionState.CONFIG_ERROR, error="ASCEND_CHARACTER_ID is not configured")
-        if source not in ('phone', 'watch'):
-            raise ValueError("Ascend command source must be phone or watch")
+        if source not in ('phone', 'watch', 'ascend_vision'):
+            raise ValueError("Ascend command source must be phone, watch or ascend_vision")
         sent_at = timestamp or datetime.now().astimezone()
         if sent_at.tzinfo is None:
             sent_at = sent_at.astimezone()
@@ -100,6 +117,71 @@ class AscendClient:
             envelope["eventId"] = event_id.strip()
         return self._request("POST", self.event_path, envelope)
 
+    def obtain_vision_token(self, upstream_user_token: str) -> AscendResult:
+        """Exchange an existing, in-memory Core user credential for the 15-minute Vision token.
+
+        The upstream token is deliberately never persisted. The returned Vision token is
+        stored by ``VisionTokenStore`` in the OS credential vault.
+        """
+        if not isinstance(upstream_user_token, str) or not upstream_user_token.strip():
+            return AscendResult(AscendConnectionState.CONFIG_ERROR,
+                                error="A current Core user handoff is required.")
+        result = self._user_request("POST", self.vision_token_path, bearer_token=upstream_user_token.strip())
+        if result.state is not AscendConnectionState.CONNECTED:
+            return result
+        payload = result.payload or {}
+        try:
+            if payload.get("tokenType") != "Bearer":
+                raise ValueError("unexpected token type")
+            access_token = payload["accessToken"]
+            expires_at = datetime.fromisoformat(payload["expiresAt"])
+            if expires_at.tzinfo is None or not isinstance(access_token, str) or not access_token:
+                raise ValueError("invalid token response")
+            token = VisionToken(access_token, expires_at.astimezone(timezone.utc))
+            if token.is_expired() or payload.get("expiresIn") != 900:
+                raise ValueError("invalid token expiry")
+            self._token_store.save(token)
+        except (KeyError, TypeError, ValueError):
+            return AscendResult(AscendConnectionState.SERVER_ERROR, error="Core returned an invalid Vision token handoff.")
+        return result
+
+    def login_and_obtain_vision_token(self, identifier: str, password: str) -> AscendResult:
+        """Perform an intentional user login handoff without retaining the web token.
+
+        Callers must collect credentials through a deliberate local UI, never voice or
+        LLM text. The normal Core login token exists only for this method's exchange.
+        """
+        if not isinstance(identifier, str) or not identifier.strip() or not isinstance(password, str) or not password:
+            return AscendResult(AscendConnectionState.CONFIG_ERROR, error="Core sign-in details are required.")
+        login = self._http_request("POST", self.login_path,
+                                   {"identifier": identifier.strip(), "password": password})
+        if login.state is not AscendConnectionState.CONNECTED:
+            return login
+        payload = login.payload or {}
+        upstream_token = payload.get("token")
+        if not isinstance(upstream_token, str) or not upstream_token:
+            return AscendResult(AscendConnectionState.SERVER_ERROR, error="Core returned an invalid sign-in handoff.")
+        return self.obtain_vision_token(upstream_token)
+
+    def get_automation_capabilities(self) -> AscendResult:
+        return self._vision_request("GET", self.automation_capabilities_path)
+
+    def get_eligible_habits(self, character_id: str) -> AscendResult:
+        if not isinstance(character_id, str) or not character_id.strip():
+            return AscendResult(AscendConnectionState.CONFIG_ERROR, error="ASCEND_CHARACTER_ID is not configured")
+        path = f"{self.eligible_habits_path}?{urlencode({'characterId': character_id.strip()})}"
+        return self._vision_request("GET", path)
+
+    def validate_automation_proposal(self, proposal: dict[str, Any]) -> AscendResult:
+        if not isinstance(proposal, dict):
+            raise ValueError("Automation proposal must be a dictionary")
+        return self._vision_request("POST", self.automation_validation_path, proposal)
+
+    def create_automation(self, proposal: dict[str, Any]) -> AscendResult:
+        if not isinstance(proposal, dict):
+            raise ValueError("Automation proposal must be a dictionary")
+        return self._vision_request("POST", self.automations_path, proposal)
+
     @staticmethod
     def _envelope(event_type: str, source: str, timestamp: datetime | None,
                   device_id: str | None) -> dict[str, Any]:
@@ -118,12 +200,33 @@ class AscendClient:
         return data
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> AscendResult:
+        return self._http_request(method, path, payload, integration_key=self.api_token)
+
+    def _vision_request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> AscendResult:
+        token = self._token_store.load()
+        if token is None:
+            return AscendResult(AscendConnectionState.AUTH_ERROR, error="Vision authentication is required.")
+        result = self._user_request(method, path, payload, bearer_token=token.access_token)
+        if result.state is AscendConnectionState.AUTH_ERROR and result.status_code == 401:
+            self._token_store.clear()
+            return AscendResult(AscendConnectionState.AUTH_ERROR, status_code=401,
+                                error="Vision authentication is required.")
+        return result
+
+    def _user_request(self, method: str, path: str, payload: dict[str, Any] | None = None,
+                      *, bearer_token: str) -> AscendResult:
+        return self._http_request(method, path, payload, bearer_token=bearer_token)
+
+    def _http_request(self, method: str, path: str, payload: dict[str, Any] | None = None, *,
+                      integration_key: str | None = None, bearer_token: str | None = None) -> AscendResult:
         body = json.dumps(payload, allow_nan=False).encode("utf-8") if payload is not None else None
         headers = {"Accept": "application/json"}
         if body is not None:
             headers["Content-Type"] = "application/json"
-        if self.api_token:
-            headers["X-Integration-Key"] = self.api_token
+        if integration_key:
+            headers["X-Integration-Key"] = integration_key
+        if bearer_token:
+            headers["Authorization"] = f"Bearer {bearer_token}"
         request = Request(f"{self.base_url}{path}", data=body, headers=headers, method=method)
         try:
             with self._opener(request, timeout=self.timeout_seconds) as response:

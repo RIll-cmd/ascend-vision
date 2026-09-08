@@ -5,6 +5,7 @@ import pytest
 
 from config import Config, StorageConfig, DashboardConfig
 from dashboard import create_app, main
+from integrations.ascend_client import AscendConnectionState
 
 
 @pytest.fixture
@@ -25,6 +26,25 @@ def test_dashboard_starts_without_database_and_serves_only_local_assets(client):
     assert client.get('/static/dashboard.css').status_code == 200
     assert client.get('/.env').status_code == 404
     assert client.post('/api/stats').status_code == 405
+
+
+def test_local_dashboard_exchanges_sign_in_only_for_secure_vision_handoff(monkeypatch, client):
+    calls = []
+    monkeypatch.setenv('ASCEND_BASE_URL', 'https://core.example')
+
+    class CoreClient:
+        def __init__(self, base_url, *args, **kwargs):
+            calls.append((base_url, args, kwargs))
+        def login_and_obtain_vision_token(self, identifier, password):
+            assert identifier == 'hunter' and password == 'not-logged'
+            return type('Result', (), {'state': AscendConnectionState.CONNECTED})()
+
+    monkeypatch.setattr('dashboard.AscendClient', CoreClient)
+    response = client.post('/api/auth/vision-handoff', json={'identifier': 'hunter', 'password': 'not-logged'})
+
+    assert response.status_code == 200
+    assert response.json == {'status': 'connected'}
+    assert calls and 'not-logged' not in response.get_data(as_text=True)
 
 
 @pytest.mark.parametrize('query', ['mode=other', 'start=bad', 'start=2026-09-02&end=2026-09-01',

@@ -101,3 +101,17 @@ def test_command_uses_integration_key_and_generates_unique_request_ids():
     assert requests[0].get_header("X-integration-key") == "key"
     assert bodies[0]["requestId"] != bodies[1]["requestId"]
     assert bodies[0]["source"] == "phone" and bodies[1]["source"] == "watch"
+
+
+def test_canonical_vision_command_source_is_supported_without_changing_device_authentication():
+    requests = []
+    def opener(request, timeout):
+        requests.append(request)
+        return FakeResponse(200, {"success": True})
+
+    result = AscendClient("http://127.0.0.1:8000", "key", opener=opener).send_command(
+        "Show my habits", source="ascend_vision", character_id="char")
+
+    assert result.state is AscendConnectionState.CONNECTED
+    assert json.loads(requests[0].data)["source"] == "ascend_vision"
+    assert requests[0].get_header("X-integration-key") == "key"

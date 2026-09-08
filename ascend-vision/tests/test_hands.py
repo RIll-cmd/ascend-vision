@@ -28,6 +28,19 @@ def test_rgb_conversion_pixel_coordinates_and_timestamp_rounding():
         tracker.detect(bgr, 2.)
 
 
+def test_detect_exposes_handedness_alongside_existing_landmarks():
+    model = Mock()
+    model.detect_for_video.return_value = SimpleNamespace(
+        hand_landmarks=[[SimpleNamespace(x=.1, y=.2, z=.0)] * 21],
+        handedness=[[SimpleNamespace(category_name='Left')]],
+    )
+    tracker = HandTracker(HandConfig(), landmarker=model, image_factory=lambda rgb: rgb)
+
+    assert tracker.detect(np.zeros((2, 2, 3), dtype=np.uint8), 1.0)
+    assert tracker.last_handedness == ('Left',)
+    tracker.close()
+
+
 def test_missing_hand_model_has_setup_message(tmp_path):
     with pytest.raises(ValueError, match='download-model'):
         HandTracker(HandConfig(model=tmp_path / 'missing.task'))

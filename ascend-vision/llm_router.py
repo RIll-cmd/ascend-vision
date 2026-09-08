@@ -1,5 +1,7 @@
 """Dual LLM Router supporting Groq and Gemini with bidirectional automatic failover."""
 from __future__ import annotations
+
+import json
 import logging
 import os
 import re
@@ -246,6 +248,63 @@ class LLMRouter:
                 except Exception:
                     pass
             raise
+
+    def _call_gemini_structured(self, prompt: str, system_prompt: str, max_tokens: int) -> dict:
+        """Use the provider's JSON response mode; no conversational fallback is valid here."""
+        from google.genai import types
+        client = self._get_gemini_client()
+        options = types.GenerateContentConfig(
+            system_instruction=system_prompt or None,
+            max_output_tokens=max_tokens,
+            response_mime_type='application/json',
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        )
+        response = client.models.generate_content(model=self.config.gemini_model, contents=prompt, config=options)
+        value = json.loads(response.text or '')
+        if not isinstance(value, dict):
+            raise ValueError('Structured response must be a JSON object')
+        return value
+
+    def _call_openai_compatible_structured(self, client, model: str, prompt: str,
+                                           system_prompt: str, max_tokens: int) -> dict:
+        messages = []
+        if system_prompt:
+            messages.append({'role': 'system', 'content': system_prompt})
+        messages.append({'role': 'user', 'content': prompt})
+        response = client.chat.completions.create(
+            model=model, messages=messages, temperature=0.1, max_tokens=max_tokens,
+            response_format={'type': 'json_object'},
+        )
+        value = json.loads(response.choices[0].message.content or '')
+        if not isinstance(value, dict):
+            raise ValueError('Structured response must be a JSON object')
+        return value
+
+    def generate_structured_response(self, prompt: str, system_prompt: str = '',
+                                     task: str = 'reasoning', max_tokens: int = 500) -> dict:
+        """Return provider-enforced JSON or fail safely; never use text/offline fallbacks."""
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError('Structured prompt must be nonempty')
+        attempts = (
+            lambda: self._call_gemini_structured(prompt, system_prompt, max_tokens),
+            lambda: self._call_openai_compatible_structured(
+                self._get_cerebras_client(), self.config.cerebras_model, prompt, system_prompt, max_tokens),
+            lambda: self._call_openai_compatible_structured(
+                self._get_groq_client(), self.config.groq_model, prompt, system_prompt, max_tokens),
+        ) if task == 'reasoning' else (
+            lambda: self._call_openai_compatible_structured(
+                self._get_groq_client(), self.config.groq_model, prompt, system_prompt, max_tokens),
+            lambda: self._call_openai_compatible_structured(
+                self._get_cerebras_client(), self.config.cerebras_model, prompt, system_prompt, max_tokens),
+            lambda: self._call_gemini_structured(prompt, system_prompt, max_tokens),
+        )
+        last_error = None
+        for attempt in attempts:
+            try:
+                return attempt()
+            except Exception as exc:
+                last_error = exc
+        raise RuntimeError('No structured AI provider is available') from last_error
 
     def generate_response(
         self,

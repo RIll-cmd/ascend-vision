@@ -445,11 +445,12 @@ class FeedbackService:
         self._speaker = speaker
         self._jobs = queue.Queue(maxsize=8)
         self._results = queue.Queue(maxsize=8)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
         self._session = None
         self._generation = 0
+        self._speech_generation = 0
         self._busy = False
         self._chat_busy = False
         self._expression_busy = False
@@ -466,6 +467,7 @@ class FeedbackService:
     def mute(self, duration_seconds: float):
         with self._lock:
             self._muted_until = time.monotonic() + max(1.0, duration_seconds)
+        self.cancel_speech()
 
     def unmute(self):
         with self._lock:
@@ -484,8 +486,25 @@ class FeedbackService:
                 return True
             return False
 
+    def cancel_speech(self):
+        """Cancel active and queued TTS without stopping Vision or its worker."""
+        with self._lock:
+            self._speech_generation += 1
+            self._chat_busy = False
+            self._expression_busy = False
+        while True:
+            try:
+                self._jobs.get_nowait()
+            except queue.Empty:
+                return
+
+    def _speech_cancelled(self, generation: int) -> bool:
+        with self._lock:
+            return (self._stop.is_set() or self._speech_generation != generation
+                    or self.is_muted())
+
     def speak_announcement(self, text: str) -> bool:
-        if not text or not self.enabled or self._stop.is_set():
+        if not text or not self.enabled or self._stop.is_set() or self.is_muted():
             return False
         try:
             self._jobs.put_nowait(_AnnouncementJob(text, time.monotonic()))
@@ -669,15 +688,19 @@ class FeedbackService:
 
                 if isinstance(job, _AnnouncementJob):
                     try:
-                        if not self._stop.is_set():
-                            self._speak_text(job.text, lambda: self._stop.is_set())
+                        with self._lock:
+                            speech_generation = self._speech_generation
+                        if not self._speech_cancelled(speech_generation):
+                            self._speak_text(job.text, lambda: self._speech_cancelled(speech_generation))
                     except Exception as err:
                         LOG.warning('Announcement speech failed: %s', err)
                     continue
 
                 if isinstance(job, _ChatJob):
                     try:
-                        if not self._stop.is_set():
+                        with self._lock:
+                            speech_generation = self._speech_generation
+                        if not self._speech_cancelled(speech_generation):
                             if hasattr(job, 'created') and time.monotonic() - job.created > self.config.max_age_seconds:
                                 object.__setattr__(job, 'created', time.monotonic())
                             if self._generator is None:
@@ -700,8 +723,8 @@ class FeedbackService:
                             if not reply_text:
                                 reply_text = get_fallback_chat_reply(job.user_text, job.context)
                             LOG.info('CONVERSATIONAL_REPLY: "%s"', reply_text)
-                            if reply_text and not self._stop.is_set():
-                                self._speak_text(reply_text, lambda: self._stop.is_set())
+                            if reply_text and not self._speech_cancelled(speech_generation):
+                                self._speak_text(reply_text, lambda: self._speech_cancelled(speech_generation))
                     except Exception as err:
                         LOG.error('Conversational chat generation/speech failed: %s', err)
                     finally:
@@ -711,7 +734,9 @@ class FeedbackService:
 
                 if isinstance(job, _ExpressionJob):
                     try:
-                        if not self._stop.is_set():
+                        with self._lock:
+                            speech_generation = self._speech_generation
+                        if not self._speech_cancelled(speech_generation):
                             if hasattr(job, 'created') and time.monotonic() - job.created > self.config.max_age_seconds:
                                 object.__setattr__(job, 'created', time.monotonic())
                             if self._generator is None:
@@ -734,8 +759,8 @@ class FeedbackService:
                             if not reply_text:
                                 reply_text = get_fallback_expression_reply(job.emotion)
                             LOG.info('EXPRESSION_REPLY (%s): "%s"', job.emotion, reply_text)
-                            if reply_text and not self._stop.is_set():
-                                self._speak_text(reply_text, lambda: self._stop.is_set())
+                            if reply_text and not self._speech_cancelled(speech_generation):
+                                self._speak_text(reply_text, lambda: self._speech_cancelled(speech_generation))
                     except Exception as err:
                         LOG.error('Expression reaction generation/speech failed: %s', err)
                     finally:
@@ -762,7 +787,13 @@ class FeedbackService:
                                 self._generator = LLMRoaster(self.config)
                         text = self._generator.generate(job.context)
                         if not self._cancelled(job):
-                            outcome = self._speak_text(text, lambda: self._cancelled(job, check_age=False))
+                            with self._lock:
+                                speech_generation = self._speech_generation
+                            outcome = self._speak_text(
+                                text,
+                                lambda: (self._cancelled(job, check_age=False)
+                                         or self._speech_cancelled(speech_generation)),
+                            )
                             result = FeedbackResult(job.event_id, text if outcome.started else None,
                                                     outcome.started, outcome.completed, outcome.error)
                 except Exception as exc:

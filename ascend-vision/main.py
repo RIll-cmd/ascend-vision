@@ -27,6 +27,7 @@ from db import Database
 from session_manager import SessionManager
 from controls import DesktopControls
 from feedback import FeedbackService, RoastContext, ConversationContext
+from gesture_controls import GestureAction, GestureController, GestureModeRouter, GestureRecognizer, count_fingers
 from voice_listener import VoiceCommandListener, VoiceCommand
 
 LOG = logging.getLogger('phone_watch')
@@ -138,6 +139,9 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         ascend_client = None
         ascend_character_id = None
         ascend_observations = None
+        automation_proposals = None
+        gesture_recognizer = GestureRecognizer()
+        gesture_controller = GestureController()
         if config.ascend.enabled:
             from integrations.ascend_client import AscendClient
             base_url = os.getenv(config.ascend.base_url_env, '').strip()
@@ -152,6 +156,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     from integrations.ascend_observations import AscendObservationDispatcher
                     ascend_observations = AscendObservationDispatcher(ascend_client, ascend_character_id)
                     resources.callback(ascend_observations.close)
+                    from integrations.automation_llm import StructuredAutomationProposalGenerator
+                    from integrations.automation_proposals import AutomationProposalService
+                    from llm_router import get_router
+                    automation_proposals = AutomationProposalService(
+                        ascend_client, ascend_character_id, StructuredAutomationProposalGenerator(get_router(config.llm)))
 
         screen_auditor = None
         if getattr(config, 'screen_audit', None) and config.screen_audit.enabled:
@@ -163,7 +172,58 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             except Exception as aud_err:
                 LOG.warning("Failed to start screen auditor: %s", aud_err)
 
+        def send_ascend_command(text: str):
+            from integrations.ascend_client import AscendConnectionState
+            if ascend_client is None or not ascend_character_id:
+                LOG.warning('ASCEND_CONFIG_ERROR: command not sent')
+                feedback.speak_announcement('Ascend character configuration is missing.')
+                return
+            result = ascend_client.send_command(text, source='ascend_vision', character_id=ascend_character_id)
+            LOG.info('Ascend command state: %s', result.state.value)
+            if result.state is AscendConnectionState.CONNECTED:
+                feedback.speak_announcement(result.message or 'Ascend completed your request.')
+            else:
+                feedback.speak_announcement('Ascend is unavailable right now.')
+
+        def route_chat(text: str):
+            sid = manager.session_id
+            counts = {}
+            if sid is not None:
+                try:
+                    counts = database.session_event_counts(sid)
+                except Exception as err:
+                    LOG.debug('Database session_event_counts failed: %s', err)
+            ctx = ConversationContext(
+                user_query=text, mode=manager.mode,
+                phone_pickups=counts.get('phone_held', 0),
+                microsleep_events=counts.get('drowsiness_microsleep', 0),
+                yawns=counts.get('yawn', 0), slouch_events=counts.get('slouch', 0),
+                session_duration_minutes=(time.perf_counter() - start) / 60.0 if start else 0.0,
+            )
+            submit_chat = getattr(feedback, 'submit_chat', None)
+            if submit_chat is not None:
+                submit_chat(text, ctx, max_words=config.voice_commands.max_reply_words,
+                            cooldown=config.voice_commands.chat_cooldown_seconds)
+
+        def route_automation(text: str):
+            if automation_proposals is None:
+                feedback.speak_announcement('Automation proposals are unavailable right now.')
+                return
+            result = automation_proposals.propose(text)
+            feedback.speak_announcement(result.message)
+
+        gesture_router = GestureModeRouter(
+            chat=route_chat, automation=route_automation,
+            missions=send_ascend_command, habits=send_ascend_command,
+        )
+
         def on_voice_command(cmd: VoiceCommand):
+            if gesture_controller.muted or feedback.is_muted():
+                LOG.debug("Ignoring voice command while gesture-muted: %s", cmd.action)
+                return
+            selected_mode = gesture_controller.consume_mode()
+            if gesture_router.route(selected_mode, cmd.raw_text):
+                return
             LOG.info("Executing voice command action: %s (from '%s')", cmd.action, cmd.raw_text)
             if cmd.action == 'focus':
                 manager.request('focus')
@@ -194,52 +254,29 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 feedback.speak_announcement(summary_text)
             elif cmd.action == 'mute':
                 feedback.mute(config.voice_commands.mute_duration_seconds)
-                feedback.speak_announcement("Voice alerts muted for 5 minutes.")
             elif cmd.action == 'unmute':
                 feedback.unmute()
                 feedback.speak_announcement("Voice alerts unmuted.")
 
         def on_unmatched_speech(text: str):
-            from integrations.ascend_client import AscendConnectionState
+            if gesture_controller.muted or feedback.is_muted():
+                LOG.debug('Ignoring unmatched speech while gesture-muted')
+                return
+            selected_mode = gesture_controller.consume_mode()
+            if gesture_router.route(selected_mode, text):
+                return
             from integrations.ascend_routing import is_ascend_command
-            if is_ascend_command(text):
-                if ascend_client is None or not ascend_character_id:
-                    LOG.warning('ASCEND_CONFIG_ERROR: command not sent')
-                    feedback.speak_announcement('Ascend character configuration is missing.')
+            if automation_proposals is not None:
+                proposal_result = automation_proposals.handle_utterance(text)
+                if proposal_result is not None:
+                    feedback.speak_announcement(proposal_result.message)
                     return
-                result = ascend_client.send_command(text, source='phone', character_id=ascend_character_id)
-                LOG.info('Ascend command state: %s', result.state.value)
-                if result.state is AscendConnectionState.CONNECTED:
-                    feedback.speak_announcement(result.message or 'Ascend completed your request.')
-                else:
-                    feedback.speak_announcement('Ascend is unavailable right now.')
+            if is_ascend_command(text):
+                send_ascend_command(text)
                 return
             if not getattr(config, 'voice_commands', None) or not config.voice_commands.conversational_mode:
                 return
-            sid = manager.session_id
-            counts = {}
-            if sid is not None:
-                try:
-                    counts = database.session_event_counts(sid)
-                except Exception as err:
-                    LOG.debug('Database session_event_counts failed: %s', err)
-            ctx = ConversationContext(
-                user_query=text,
-                mode=manager.mode,
-                phone_pickups=counts.get('phone_held', 0),
-                microsleep_events=counts.get('drowsiness_microsleep', 0),
-                yawns=counts.get('yawn', 0),
-                slouch_events=counts.get('slouch', 0),
-                session_duration_minutes=(time.perf_counter() - start) / 60.0 if start else 0.0
-            )
-            submit_chat = getattr(feedback, 'submit_chat', None)
-            if submit_chat is not None:
-                submit_chat(
-                    text,
-                    ctx,
-                    max_words=config.voice_commands.max_reply_words,
-                    cooldown=config.voice_commands.chat_cooldown_seconds
-                )
+            route_chat(text)
 
         if voice_listener is None and getattr(config, 'voice_commands', None) and config.voice_commands.enabled:
             voice_listener = VoiceCommandListener(
@@ -292,6 +329,29 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 box = detector.detect(packet.image)
                 hand_landmarks = hand_tracker.detect(packet.image, packet.monotonic_time)
                 hand_frames += bool(hand_landmarks)
+                gesture_count = None
+                if hand_landmarks:
+                    handedness = getattr(hand_tracker, 'last_handedness', ())
+                    gesture_count = count_fingers(
+                        hand_landmarks[0],
+                        handedness=handedness[0] if handedness else None,
+                    )
+                triggered_gesture = gesture_recognizer.update(gesture_count, packet.monotonic_time)
+                if triggered_gesture is not None:
+                    action = gesture_controller.handle(
+                        triggered_gesture,
+                        externally_muted=feedback.is_muted(),
+                    )
+                    if action is GestureAction.MUTE:
+                        # Gesture mute persists until the contextual open-palm unmute.
+                        feedback.mute(315_360_000.0)
+                    elif action is GestureAction.UNMUTE:
+                        feedback.unmute()
+                        feedback.speak_announcement('Voice active.')
+                    elif action is GestureAction.STOP_CANCEL:
+                        feedback.cancel_speech()
+                        if automation_proposals is not None and automation_proposals.pending is not None:
+                            automation_proposals.cancel()
                 if hasattr(face_tracker, 'detect_with_blendshapes'):
                     face_landmarks_list, face_blendshapes_list = face_tracker.detect_with_blendshapes(packet.image, packet.monotonic_time)
                 else:

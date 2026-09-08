@@ -57,6 +57,7 @@ class HandTracker:
             raise ValueError('A supplied landmarker also requires an image_factory')
         self._landmarker = landmarker
         self._image_factory = image_factory
+        self.last_handedness = ()
 
     def detect(self, frame, timestamp_seconds):
         if self._closed:
@@ -68,6 +69,10 @@ class HandTracker:
         self._last_ms = timestamp_ms
         rgb = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         result = self._landmarker.detect_for_video(self._image_factory(rgb), timestamp_ms)
+        self.last_handedness = tuple(
+            categories[0].category_name if categories else None
+            for categories in getattr(result, 'handedness', ())
+        )
         height, width = frame.shape[:2]
         # z uses MediaPipe's width-relative scale; geometry intentionally uses x/y only.
         return [[(lm.x * width, lm.y * height, lm.z * width) for lm in hand]

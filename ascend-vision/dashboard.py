@@ -3,6 +3,7 @@ import argparse
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 import logging
+import os
 from pathlib import Path
 import webbrowser
 
@@ -10,6 +11,7 @@ from flask import Flask, abort, jsonify, render_template, request
 
 from config import load_config
 from dashboard_stats import DashboardError, get_zone, read_stats
+from integrations.ascend_client import AscendClient, AscendConnectionState
 
 LOG = logging.getLogger(__name__)
 
@@ -59,6 +61,25 @@ def create_app(config):
         except DashboardError as exc:
             LOG.warning('Dashboard read failed (%s)', type(exc).__name__)
             return jsonify(error=str(exc)), 503
+
+    @app.post('/api/auth/vision-handoff')
+    def vision_handoff():
+        """Loopback-only sign-in exchange; passwords and web tokens are never persisted or logged."""
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {'identifier', 'password'}:
+            return jsonify(error='Invalid sign-in request.'), 400
+        identifier, password = payload['identifier'], payload['password']
+        if not isinstance(identifier, str) or not identifier.strip() or not isinstance(password, str) or not password:
+            return jsonify(error='Sign-in details are required.'), 400
+        base_url = os.getenv(config.ascend.base_url_env, '').strip()
+        if not base_url:
+            return jsonify(error='Core connection is not configured.'), 503
+        client = AscendClient(base_url, timeout_seconds=config.ascend.timeout_seconds)
+        result = client.login_and_obtain_vision_token(identifier, password)
+        if result.state is not AscendConnectionState.CONNECTED:
+            LOG.warning('Vision sign-in handoff failed: %s', result.state.value)
+            return jsonify(error='Core sign-in could not be completed.'), 401
+        return jsonify(status='connected')
 
     @app.get('/api/camera/status')
     def camera_status():

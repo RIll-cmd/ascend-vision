@@ -117,7 +117,7 @@ voice_commands:
   max_reply_words: 25
   chat_cooldown_seconds: 5.0
 llm:
-  groq_model: "llama-3.1-8b-instant"
+  groq_model: "groq/compound-mini"
   cerebras_model: "llama3.1-8b"
   gemini_model: "gemini-2.5-flash"
   groq_api_key_env: "GROQ_API_KEY"

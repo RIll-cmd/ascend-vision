@@ -173,3 +173,6 @@ if (camBtn) {
 }
 
 load(selection());
+
+const handoffForm=$('vision-handoff');
+if(handoffForm){handoffForm.addEventListener('submit',async event=>{event.preventDefault();const status=$('vision-handoff-status');const data=new FormData(handoffForm);try{const response=await fetch('/api/auth/vision-handoff',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({identifier:data.get('identifier'),password:data.get('password')})});const body=await response.json();if(!response.ok)throw new Error(body.error||'Core sign-in could not be completed.');handoffForm.reset();status.textContent='Automation sign-in enabled for the next 15 minutes.';status.hidden=false;}catch(error){status.textContent=error.message;status.hidden=false;}})}

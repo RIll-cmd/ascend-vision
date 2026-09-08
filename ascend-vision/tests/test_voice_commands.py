@@ -234,6 +234,54 @@ def test_voice_command_listener_transcription_and_callback():
         listener.close()
 
 
+def test_voice_command_listener_routes_unmatched_speech_without_conversational_mode():
+    config = VoiceCommandConfig(
+        enabled=True,
+        conversational_mode=False,
+        energy_threshold=0.05,
+        silence_duration_seconds=0.2,
+        min_speech_duration_seconds=0.1
+    )
+
+    mock_model = Mock()
+    utterance = 'Create an automation that logs my Procrastinating habit whenever phone usage starts.'
+    mock_model.transcribe.return_value = ([MockSegment(utterance)], None)
+
+    unmatched_speech = []
+
+    class MockStream:
+        def __init__(self, callback):
+            self.callback = callback
+        def start(self): pass
+        def stop(self): pass
+        def close(self): pass
+
+    listener = VoiceCommandListener(
+        config,
+        unmatched_callback=unmatched_speech.append,
+        model=mock_model,
+        stream_factory=lambda cb: MockStream(cb)
+    )
+    listener.start()
+
+    try:
+        speech_chunk = np.array([[0.2], [-0.2]] * 800, dtype=np.float32)
+        silence_chunk = np.zeros((1600, 1), dtype=np.float32)
+
+        listener._audio_callback(speech_chunk, 1600, None, None)
+        listener._audio_callback(speech_chunk, 1600, None, None)
+        listener._audio_callback(silence_chunk, 1600, None, None)
+        listener._audio_callback(silence_chunk, 1600, None, None)
+
+        deadline = time.monotonic() + 2.0
+        while not unmatched_speech and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        assert unmatched_speech == [utterance]
+    finally:
+        listener.close()
+
+
 def test_feedback_service_muting():
     generator = Mock()
     speaker = Mock()
@@ -555,5 +603,4 @@ def test_voice_command_config_conversational_schema():
         VoiceCommandConfig(max_reply_words=2)  # too low
     with pytest.raises(ValueError):
         VoiceCommandConfig(chat_cooldown_seconds=0.1)  # too low
-
 

@@ -96,6 +96,17 @@ def test_reasoning_path_routes_to_gemini_first(mock_groq, mock_cerebras, mock_ge
     assert mock_cerebras.chat.completions.create.call_count == 0
 
 
+def test_structured_response_uses_json_mode_and_never_returns_offline_text(mock_groq, mock_cerebras, mock_gemini):
+    mock_gemini.models.generate_content.return_value = SimpleNamespace(text='{"kind":"proposal","draft":{}}')
+    router = LLMRouter(groq_client=mock_groq, cerebras_client=mock_cerebras, gemini_client=mock_gemini)
+
+    result = router.generate_structured_response(prompt='{}', system_prompt='Return JSON', task='reasoning', max_tokens=100)
+
+    assert result == {"kind": "proposal", "draft": {}}
+    options = mock_gemini.models.generate_content.call_args.kwargs['config']
+    assert options.response_mime_type == 'application/json'
+
+
 def test_groq_failure_fails_over_to_cerebras(mock_groq, mock_cerebras, mock_gemini, caplog):
     import groq
     mock_groq.chat.completions.create.side_effect = groq.RateLimitError(

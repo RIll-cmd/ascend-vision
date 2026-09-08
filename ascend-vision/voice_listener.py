@@ -339,7 +339,7 @@ class VoiceCommandListener:
                                     self.callback(cmd)
                                 except Exception as err:
                                     LOG.error('Voice command callback failed: %s', err)
-                        elif getattr(self.config, 'conversational_mode', False) and self.unmatched_callback is not None:
+                        elif self.unmatched_callback is not None:
                             now = time.monotonic()
                             cooldown = getattr(self.config, 'chat_cooldown_seconds', 5.0)
                             if self._last_chat_time is not None and (now - self._last_chat_time) < cooldown:
@@ -367,4 +367,3 @@ class VoiceCommandListener:
 
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=1.5)
-
