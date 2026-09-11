@@ -7,6 +7,7 @@ import pytest
 from config import Config, StorageConfig, DashboardConfig
 from dashboard import create_app, main
 from integrations.ascend_client import AscendConnectionState
+from integrations.chat_ipc import ChatIpcQueue
 from integrations.vision_context import VisionAuthContext
 from integrations.vision_token_store import VisionToken
 
@@ -365,6 +366,96 @@ def test_rebinding_and_cross_site_reads_rejected(client):
     assert client.get('/api/stats', headers={'Origin': 'https://evil.example'}).status_code == 403
     assert client.get('/api/stats', headers={'Sec-Fetch-Site': 'cross-site'}).status_code == 403
     assert 'Access-Control-Allow-Origin' not in client.get('/api/stats').headers
+
+
+def test_chat_message_is_enqueued_and_returns_only_its_safe_id(tmp_path):
+    queue = ChatIpcQueue(tmp_path/'chat.db')
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    chat_client = create_app(cfg, chat_queue=queue).test_client()
+
+    response = chat_client.post('/api/chat/messages', json={'text': '  Help me focus  '})
+
+    assert response.status_code == 202
+    assert set(response.json) == {'messageId'}
+    inbound = queue.receive_inbound()
+    assert inbound['message_id'] == response.json['messageId']
+    assert inbound['source'] == 'dashboard'
+    assert inbound['text'] == 'Help me focus'
+
+
+@pytest.mark.parametrize('payload', [
+    None,
+    {},
+    {'text': ''},
+    {'text': '   '},
+    {'text': 42},
+    {'text': 'hello', 'accessToken': 'must-not-be-accepted'},
+    {'text': 'x' * 4001},
+])
+def test_chat_message_rejects_malformed_empty_or_oversized_input(tmp_path, payload):
+    queue = ChatIpcQueue(tmp_path/'chat.db')
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    chat_client = create_app(cfg, chat_queue=queue).test_client()
+
+    if payload is None:
+        response = chat_client.post('/api/chat/messages', data='not-json', content_type='text/plain')
+    else:
+        response = chat_client.post('/api/chat/messages', json=payload)
+
+    assert response.status_code == 400
+    assert set(response.json) == {'error'}
+    assert queue.receive_inbound() is None
+
+
+def test_chat_replies_are_ordered_mapped_and_advance_a_safe_cursor(tmp_path):
+    queue = ChatIpcQueue(tmp_path/'chat.db')
+    first_id = queue.enqueue('first')
+    second_id = queue.enqueue('second')
+    queue.reply(first_id, 'Waiting for Vision.', 'queued')
+    first_cursor = queue.reply(first_id, 'Please confirm that action.', 'confirmation_required')
+    queue.reply(second_id, 'Ready.', 'reply')
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    chat_client = create_app(cfg, chat_queue=queue).test_client()
+
+    response = chat_client.get(f'/api/chat/messages?after={first_cursor}')
+
+    assert response.status_code == 200
+    assert response.json['cursor'] > first_cursor
+    assert response.json['messages'] == [{
+        'messageId': second_id,
+        'text': 'Ready.',
+        'status': 'reply',
+        'createdAt': response.json['messages'][0]['createdAt'],
+    }]
+    empty = chat_client.get(f"/api/chat/messages?after={response.json['cursor']}")
+    assert empty.json == {'messages': [], 'cursor': response.json['cursor']}
+    serialized = response.get_data(as_text=True)
+    assert 'first' not in serialized
+    assert 'confirmation_required' not in serialized
+
+
+@pytest.mark.parametrize('query', ['after=-1', 'after=wrong', 'after=1&after=2', 'cursor=0'])
+def test_chat_replies_reject_invalid_or_unknown_cursors(tmp_path, query):
+    queue = ChatIpcQueue(tmp_path/'chat.db')
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    response = create_app(cfg, chat_queue=queue).test_client().get('/api/chat/messages?'+query)
+
+    assert response.status_code == 400
+
+
+def test_dashboard_has_accessible_chat_controls_and_safe_live_rendering(client):
+    page = client.get('/').get_data(as_text=True)
+    script = client.get('/static/dashboard.js').get_data(as_text=True)
+
+    assert 'aria-labelledby="chat-heading"' in page
+    assert 'id="chat-messages"' in page
+    assert 'aria-live="polite"' in page
+    assert '<label for="chat-input"' in page
+    assert 'id="chat-send"' in page
+    assert '/api/chat/messages' in script
+    assert 'confirmation_required' in script
+    assert '.textContent=' in script
+    assert 'innerHTML' not in script
 
 
 def test_database_failure_is_not_a_zero_total(tmp_path):

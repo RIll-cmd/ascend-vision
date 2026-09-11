@@ -41,7 +41,7 @@ VISION_VERSION = '1.0.0'
 
 
 
-def run(config: Config, *, duration=None, detector=None, capture=None, hand_tracker=None, face_tracker=None, voice_listener=None):
+def run(config: Config, *, duration=None, detector=None, capture=None, hand_tracker=None, face_tracker=None, voice_listener=None, fairy_ui=False):
     if duration is not None:
         number('duration', duration, .01)
 
@@ -68,6 +68,15 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
     controls = None
     feedback = None
     resources = ExitStack()
+    focus_ui_bridge = None
+    if fairy_ui:
+        from focus_ui import FocusUI
+        focus_ui_bridge = FocusUI()
+        resources.callback(focus_ui_bridge.close)
+        try:
+            focus_ui_bridge.start(open_browser=not config.runtime.preview)
+        except TypeError:
+            focus_ui_bridge.start()
 
     def collect_feedback():
         for result in feedback.drain():
@@ -154,6 +163,17 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         gesture_handedness = None
         gesture_last_action = None
         gesture_last_action_at = float('-inf')
+
+        # Core integration initialization
+        from vision_client.ascend_core_client import AscendCoreVisionClient
+        from integrations.core_async_runner import CoreAsyncRunner
+        from integrations.warning_state_machine import WarningFirstStateMachine, SensoryTriggerType
+        from integrations.habit_voice_handler import HabitVoiceHandler
+        from integrations.core_heartbeat import CoreHeartbeatWorker
+
+        core_async_runner = CoreAsyncRunner()
+        resources.callback(core_async_runner.close)
+
         if config.ascend.enabled:
             from integrations.ascend_client import AscendClient
             base_url = os.getenv(config.ascend.base_url_env, '').strip()
@@ -190,7 +210,48 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     automation_proposals = AutomationProposalService(
                         ascend_client, ascend_character_id, StructuredAutomationProposalGenerator(get_router(config.llm)))
 
-        if ascend_client is not None and ascend_character_id:
+        # Initialize official AscendCoreVisionClient
+        core_base_url = (os.getenv("ASCEND_CORE_BASE_URL") or os.getenv("ASCEND_BASE_URL", "http://localhost:8000")).strip()
+        core_bearer_token = (os.getenv("ASCEND_VISION_TOKEN") or os.getenv("ASCEND_API_TOKEN", "")).strip().strip('"')
+        core_character_id = (os.getenv("ASCEND_CHARACTER_ID") or ascend_character_id or "").strip()
+        core_device_id = (os.getenv("ASCEND_DEVICE_ID", "ascend-vision-desktop")).strip() or "ascend-vision-desktop"
+
+        core_client = AscendCoreVisionClient(
+            base_url=core_base_url,
+            bearer_token=core_bearer_token,
+            character_id=core_character_id,
+            device_id=core_device_id,
+        )
+
+        warning_state_machine = WarningFirstStateMachine(
+            core_client=core_client,
+            feedback_service=feedback,
+            async_runner=core_async_runner,
+        )
+
+        habit_voice_handler = HabitVoiceHandler(
+            core_client=core_client,
+            feedback_service=feedback,
+            async_runner=core_async_runner,
+        )
+
+        # Start Presence Heartbeat (every 25-30s)
+        if core_client is not None and core_character_id:
+            def on_core_heartbeat(result):
+                state = result.get('status') if isinstance(result, dict) else None
+                with core_connection_lock:
+                    vision_presence_state['value'] = state or 'CONNECTED'
+                    core_connection_state['vision'] = 'ASCEND_CONNECTED' if state != 'OFFLINE' else 'ASCEND_OFFLINE'
+
+            core_heartbeat = CoreHeartbeatWorker(
+                core_client,
+                interval_seconds=25.0,
+                callback=on_core_heartbeat,
+                async_runner=core_async_runner,
+            )
+            core_heartbeat.start()
+            resources.callback(core_heartbeat.close)
+        elif ascend_client is not None and ascend_character_id:
             from integrations.vision_heartbeat import VisionHeartbeatWorker
             ascend_device_id = os.getenv(config.ascend.device_id_env, 'ascend-vision').strip() or 'ascend-vision'
 
@@ -288,9 +349,14 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             result = automation_proposals.propose(text)
             feedback.speak_announcement(result.message)
 
+        def handle_habit_command(text: str):
+            if habit_voice_handler is not None and habit_voice_handler.handle_voice_utterance(text):
+                return
+            send_ascend_command(text)
+
         gesture_router = GestureModeRouter(
             chat=route_chat, automation=route_automation,
-            missions=send_ascend_command, habits=send_ascend_command,
+            missions=send_ascend_command, habits=handle_habit_command,
         )
 
         def on_voice_command(cmd: VoiceCommand):
@@ -341,6 +407,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             selected_mode = gesture_controller.consume_mode()
             if gesture_router.route(selected_mode, text):
                 return
+            if habit_voice_handler is not None and habit_voice_handler.handle_voice_utterance(text):
+                return
             from integrations.ascend_routing import is_ascend_command
             if automation_proposals is not None:
                 proposal_result = automation_proposals.handle_utterance(text)
@@ -380,6 +448,13 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 pass
             LOG.info("Camera preview window '%s' created.", WINDOW)
         while duration is None or time.perf_counter() - start < duration:
+            if focus_ui_bridge is not None:
+                for cmd in focus_ui_bridge.drain_commands():
+                    if cmd == 'toggle-focus':
+                        manager.request('toggle')
+                    elif cmd == 'toggle-voice':
+                        if voice_listener is not None and hasattr(voice_listener, 'enabled'):
+                            voice_listener.enabled = not voice_listener.enabled
             manager.process_commands()
             feedback.set_session(manager.session_id if manager.mode == 'focus' and not manager.quit_requested else None)
             collect_feedback()
@@ -472,6 +547,44 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 if fusion_status.posture_status and fusion_status.posture_status.ended:
                     log_end(fusion_status.posture_status.ended, tag='POSTURE_ENDED', event_type='slouch')
 
+                if focus_ui_bridge is not None:
+                    rms = getattr(voice_listener, 'current_rms', 0.0) if voice_listener is not None else 0.0
+                    is_speaking = getattr(feedback, 'is_speaking', lambda: False)()
+                    voice_enabled = getattr(voice_listener, 'enabled', False) if voice_listener is not None else False
+                    focus_ui_bridge.publish(
+                        packet.image,
+                        mode=manager.mode,
+                        audioLevel=rms,
+                        voiceEnabled=voice_enabled,
+                        muted=feedback.is_muted(),
+                        speaking=is_speaking,
+                        elapsedSeconds=int(time.perf_counter() - start)
+                    )
+                    if face_landmarks:
+                        focus_ui_bridge.publish_face(face_landmarks, packet.image.shape[1], packet.image.shape[0])
+                    else:
+                        focus_ui_bridge.publish_face([], 0, 0)
+
+                    last_heard_str = ''
+                    if voice_listener is not None:
+                        lh_text, lh_t = getattr(voice_listener, 'last_heard', ('', 0.0))
+                        if lh_text and (time.monotonic() - lh_t) < 4.0:
+                            last_heard_str = lh_text
+
+                    posture_st = fusion_status.posture_status.state if (fusion_status.posture_status is not None) else None
+                    focus_ui_bridge.publish_telemetry(
+                        phone_box=box,
+                        hands=hand_landmarks,
+                        face_landmarks=face_landmarks,
+                        posture=posture_st,
+                        fatigue=fusion_status.fatigue_level,
+                        gesture=gesture_last_action or (f'{gesture_count} fingers' if gesture_count is not None else None),
+                        emotion=expression_tracker.current_emotion,
+                        last_heard=last_heard_str,
+                        width=packet.image.shape[1],
+                        height=packet.image.shape[0],
+                    )
+
                 if hold_status.started is not None:
                     if ascend_observations is not None:
                         ascend_observations.submit_phone_usage(hold_status.started)
@@ -484,6 +597,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                              'proximity_cooldown_eligible=%s distance_px=%.1f',
                              hold_status.started.id, hold_status.started.started_at.isoformat(),
                              hold_status.started.confidence, hold_status.started.alert_allowed, hold_status.distance_px)
+                    if warning_state_machine is not None and hold_status.started.alert_allowed:
+                        warning_state_machine.handle_trigger(SensoryTriggerType.PHONE)
                     if feedback.enabled and manager.mode == 'focus' and hold_status.started.alert_allowed:
                         session_id, event_mode, metadata = database.feedback_context(saved_id)
                         if event_mode == 'focus':
@@ -494,18 +609,24 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         manager.record_start(drowsiness_status.started, event_type='drowsiness_microsleep', posture='none')
                     except Exception as exc:
                         LOG.debug('Drowsiness record_start: %s', exc)
+                    if warning_state_machine is not None:
+                        warning_state_machine.handle_trigger(SensoryTriggerType.FATIGUE)
 
                 if yawn_status.started is not None:
                     try:
                         manager.record_start(yawn_status.started, event_type='yawn', posture='none')
                     except Exception as exc:
                         LOG.debug('Yawn record_start: %s', exc)
+                    if warning_state_machine is not None:
+                        warning_state_machine.handle_trigger(SensoryTriggerType.FATIGUE)
 
                 if fusion_status.posture_status and fusion_status.posture_status.started is not None:
                     try:
                         manager.record_start(fusion_status.posture_status.started, event_type='slouch', posture='none')
                     except Exception as exc:
                         LOG.debug('Posture record_start: %s', exc)
+                    if warning_state_machine is not None:
+                        warning_state_machine.handle_trigger(SensoryTriggerType.SLOUCH)
 
                 # Multimodal alert feedback (drowsiness, yawn, or slouch)
                 alert = fusion_status.primary_alert
@@ -514,6 +635,13 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         active_rec = manager._active_by_type.get(alert.event_type)
                         if active_rec is not None:
                             saved_id = active_rec[1]
+                            if warning_state_machine is not None:
+                                sm_type = (
+                                    SensoryTriggerType.SLOUCH
+                                    if alert.event_type in ('slouch', 'poor_posture')
+                                    else SensoryTriggerType.FATIGUE
+                                )
+                                warning_state_machine.handle_trigger(sm_type)
                             if feedback.enabled and manager.mode == 'focus':
                                 session_id, event_mode, metadata = database.feedback_context(saved_id)
                                 if event_mode == 'focus':
@@ -828,6 +956,7 @@ def main(argv=None):
     parser.add_argument('--tray', action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument('--hotkey', action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument('--feedback', action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument('--fairy-ui', action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument('--test-speech', nargs='?', const='Phone Watch speech is ready.', type=str, default=None, help='speak an offline diagnostic line (optionally provide custom text), without camera/API/database')
     parser.add_argument('--test-feedback', action='store_true', help='make one real API request with synthetic counts and speak it; no camera/database')
     parser.add_argument('--test-chat', type=str, help='speak a test conversational query to Gemini and speak response via TTS; no camera/database')
@@ -845,8 +974,13 @@ def main(argv=None):
             config = replace(config, camera=replace(config.camera, index=args.camera))
         if args.confidence is not None:
             config = replace(config, detector=replace(config.detector, confidence=args.confidence))
+        fairy_ui_requested = args.fairy_ui
+        if fairy_ui_requested is None:
+            fairy_ui_requested = bool(args.focus)
         if args.preview is not None:
             config = replace(config, runtime=replace(config.runtime, preview=args.preview))
+        elif fairy_ui_requested:
+            config = replace(config, runtime=replace(config.runtime, preview=False))
         if args.duration is not None:
             number('duration', args.duration, .01)
         if args.focus:
@@ -1042,7 +1176,7 @@ def main(argv=None):
             LOG.info('Local hand model ready: %s', download_hand_model(config.hands.model))
             LOG.info('Local face model ready: %s', download_face_model(config.face.model))
             return 0
-        run(config, duration=args.duration)
+        run(config, duration=args.duration, fairy_ui=fairy_ui_requested)
         return 0
     except KeyboardInterrupt:
         LOG.info('Startup interrupted')

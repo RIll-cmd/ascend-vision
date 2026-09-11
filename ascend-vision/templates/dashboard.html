@@ -44,6 +44,24 @@
       {% endif %}
       <p id="vision-handoff-status" class="notice" role="status" aria-live="polite" hidden></p>
     </section>
+    <section class="chat-panel" aria-labelledby="chat-heading">
+      <div class="chat-intro">
+        <p class="eyebrow">TALK TO VISION</p>
+        <h2 id="chat-heading">What would help right now?</h2>
+        <p>Messages stay on this device. Actions that change anything still ask for your confirmation.</p>
+      </div>
+      <div class="chat-console">
+        <ol id="chat-messages" class="chat-messages" role="log" aria-live="polite" aria-relevant="additions text" aria-label="Conversation with Vision"></ol>
+        <p id="chat-live-status" class="chat-live-status" role="status" aria-live="polite">Vision is ready for a message.</p>
+        <form id="chat-form" class="chat-form">
+          <label for="chat-input">Message Vision</label>
+          <div class="chat-compose">
+            <textarea id="chat-input" name="text" rows="2" maxlength="4000" required placeholder="Ask for a focus plan or describe what is distracting you…"></textarea>
+            <button type="submit" id="chat-send">Send <span aria-hidden="true">↗</span></button>
+          </div>
+        </form>
+      </div>
+    </section>
     <form id="filters" class="filters" aria-label="Dashboard filters">
       <div class="field"><label for="start">From</label><input id="start" name="start" type="date" value="{{ start }}" required></div>
       <span class="range-arrow" aria-hidden="true">→</span>

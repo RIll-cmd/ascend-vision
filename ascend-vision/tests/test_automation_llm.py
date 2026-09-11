@@ -19,7 +19,7 @@ def test_structured_generator_uses_router_json_output_and_minimal_core_context_o
 
     result = generator.generate(
         "If I check my phone three times, log Phone Distraction.",
-        capabilities={"version": "2026-09-07", "triggers": ["phone_usage_observed"]},
+        capabilities={"version": "2026-09-09", "triggers": ["phone_usage_observed"]},
         eligible_habits=[{"id": "habit-1", "name": "Phone Distraction"}],
     )
 
@@ -34,4 +34,4 @@ def test_structured_generator_rejects_malformed_provider_output(response):
     generator = StructuredAutomationProposalGenerator(Router(response))
 
     with pytest.raises(ValueError, match="structured"):
-        generator.generate("make an automation", capabilities={"version": "2026-09-07"}, eligible_habits=[])
+        generator.generate("make an automation", capabilities={"version": "2026-09-09"}, eligible_habits=[])

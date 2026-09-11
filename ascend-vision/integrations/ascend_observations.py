@@ -32,6 +32,17 @@ def build_phone_usage_observation(event: HoldEvent) -> dict[str, Any]:
     }
 
 
+def build_habit_observation(trigger_type: str, event: Any) -> dict[str, Any]:
+    """Build a safe detection observation for an automatic habit rule."""
+    timestamp = event.started_at
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("Habit observation timestamp must be timezone-aware")
+    details = {name: getattr(event, name) for name in ("ear", "slouch_score")
+               if isinstance(getattr(event, name, None), (int, float))}
+    return {"source": "vision_cv", "type": trigger_type, "timestamp": timestamp.isoformat(),
+            "eventId": str(uuid4()), "payload": {"state": "started", **details}}
+
+
 class AscendObservationDispatcher:
     """A bounded, best-effort worker which keeps CV inference off the network path."""
 
@@ -51,6 +62,15 @@ class AscendObservationDispatcher:
             return True
         except Full:
             LOG.warning("Ascend observation queue full; dropping phone_usage_observed")
+            return False
+
+    def submit_habit_detection(self, trigger_type: str, event: Any) -> bool:
+        observation = build_habit_observation(trigger_type, event)
+        try:
+            self._queue.put_nowait(observation)
+            return True
+        except Full:
+            LOG.warning("Ascend observation queue full; dropping %s", trigger_type)
             return False
 
     def close(self) -> None:

@@ -207,6 +207,12 @@ class AscendClient:
         path = f"{self.eligible_habits_path}?{urlencode({'characterId': character_id.strip()})}"
         return self._vision_request("GET", path)
 
+    def get_automations(self, character_id: str) -> AscendResult:
+        if not isinstance(character_id, str) or not character_id.strip():
+            return AscendResult(AscendConnectionState.CONFIG_ERROR, error="ASCEND_CHARACTER_ID is not configured")
+        path = f"{self.automations_path}?{urlencode({'characterId': character_id.strip()})}"
+        return self._vision_request("GET", path)
+
     def validate_automation_proposal(self, proposal: dict[str, Any]) -> AscendResult:
         if not isinstance(proposal, dict):
             raise ValueError("Automation proposal must be a dictionary")

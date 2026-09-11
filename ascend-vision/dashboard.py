@@ -14,18 +14,29 @@ from flask import Flask, abort, jsonify, render_template, request
 from config import load_config
 from dashboard_stats import DashboardError, get_zone, read_stats
 from integrations.ascend_client import AscendClient, AscendConnectionState
+from integrations.chat_ipc import ChatIpcQueue
 from integrations.vision_context import VisionAuthContext, VisionContextStore
 from integrations.vision_token_store import VisionToken, VisionTokenStore
 
 LOG = logging.getLogger(__name__)
 
 
-def create_app(config):
+def create_app(config, chat_queue=None):
     app = Flask(__name__)
-    app.config.update(TRUSTED_HOSTS=['127.0.0.1', 'localhost'], MAX_CONTENT_LENGTH=1024)
+    app.config.update(TRUSTED_HOSTS=['127.0.0.1', 'localhost'])
+    queue = chat_queue if chat_queue is not None else ChatIpcQueue(
+        Path(config.storage.database).parent / 'chat_ipc.db')
+
+    @app.errorhandler(413)
+    def request_too_large(_error):
+        return jsonify(error='Request is too large.'), 400
 
     @app.before_request
     def local_requests_only():
+        if request.content_length is not None:
+            max_bytes = 20_000 if request.path.startswith('/api/chat/') else 1_024
+            if request.content_length > max_bytes:
+                abort(413)
         if request.headers.get('Sec-Fetch-Site') == 'cross-site':
             abort(403)
         origin = request.headers.get('Origin')
@@ -72,6 +83,47 @@ def create_app(config):
         except DashboardError as exc:
             LOG.warning('Dashboard read failed (%s)', type(exc).__name__)
             return jsonify(error=str(exc)), 503
+
+    @app.post('/api/chat/messages')
+    def enqueue_chat_message():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {'text'}:
+            return jsonify(error='A message is required.'), 400
+        try:
+            message_id = queue.enqueue(payload['text'], source='dashboard')
+        except ValueError:
+            return jsonify(error='Enter a message between 1 and 4000 characters.'), 400
+        except Exception as exc:
+            LOG.warning('Dashboard chat enqueue failed (%s)', type(exc).__name__)
+            return jsonify(error='Vision chat is temporarily unavailable.'), 503
+        return jsonify(messageId=message_id), 202
+
+    @app.get('/api/chat/messages')
+    def poll_chat_messages():
+        try:
+            if request.args.keys() - {'after'} or any(len(values) != 1 for _, values in request.args.lists()):
+                raise ValueError('Invalid cursor')
+            raw_cursor = request.args.get('after', '0')
+            if not raw_cursor.isascii() or not raw_cursor.isdecimal():
+                raise ValueError('Invalid cursor')
+            cursor = int(raw_cursor)
+            if cursor > 9_223_372_036_854_775_807:
+                raise ValueError('Invalid cursor')
+            replies = queue.replies_after(cursor)
+        except ValueError:
+            return jsonify(error='Cursor must be a non-negative integer.'), 400
+        except Exception as exc:
+            LOG.warning('Dashboard chat polling failed (%s)', type(exc).__name__)
+            return jsonify(error='Vision chat is temporarily unavailable.'), 503
+
+        messages = [{
+            'messageId': row['message_id'],
+            'text': row['text'],
+            'status': row['status'],
+            'createdAt': row['created_at'],
+        } for row in replies]
+        safe_cursor = replies[-1]['cursor'] if replies else cursor
+        return jsonify(messages=messages, cursor=safe_cursor)
 
     @app.get('/api/auth/local-vision-status')
     def local_vision_status():

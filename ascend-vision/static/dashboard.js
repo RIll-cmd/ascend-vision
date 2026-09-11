@@ -252,3 +252,77 @@ if(localAutoConnect){
   $('reconnect-local-vision')?.addEventListener('click',()=>connectLocalCore({forceHandoff:true}));
   connectLocalCore();
 }
+
+const chatForm=$('chat-form');
+const chatInput=$('chat-input');
+const chatMessages=$('chat-messages');
+const chatLiveStatus=$('chat-live-status');
+const chatSend=$('chat-send');
+let chatCursor=0;
+let chatPollActive=false;
+
+function appendChatMessage(text,kind,status=''){
+  const item=document.createElement('li');
+  item.className=`chat-message ${kind}`;
+  if(status==='confirmation_required')item.classList.add('confirmation-required');
+  const speaker=document.createElement('span');
+  speaker.className='chat-speaker';
+  speaker.textContent=kind==='from-user'?'You':'Vision';
+  const content=document.createElement('p');
+  content.textContent=text;
+  item.append(speaker,content);
+  chatMessages.append(item);
+  const nearBottom=chatMessages.scrollHeight-chatMessages.scrollTop-chatMessages.clientHeight<48;
+  if(nearBottom)chatMessages.scrollTop=chatMessages.scrollHeight;
+}
+
+async function pollChatReplies(){
+  if(!chatMessages||chatPollActive)return;
+  chatPollActive=true;
+  try{
+    const response=await fetch(`/api/chat/messages?after=${chatCursor}`,{cache:'no-store'});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok||!payload)throw new Error('Vision replies are unavailable.');
+    for(const message of payload.messages){
+      appendChatMessage(message.text,'from-vision',message.status);
+      chatLiveStatus.textContent=message.status==='confirmation_required'
+        ?`Vision needs your confirmation: ${message.text}`
+        :message.status==='queued'
+          ?'Waiting for Vision to process your message.'
+          :message.status==='error'
+            ?`Vision could not complete the request: ${message.text}`
+            :`Vision: ${message.text}`;
+    }
+    chatCursor=payload.cursor;
+  }catch(error){
+    chatLiveStatus.textContent='Waiting to reconnect to Vision.';
+  }finally{
+    chatPollActive=false;
+  }
+}
+
+if(chatForm){
+  chatForm.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const text=chatInput.value.trim();
+    if(!text)return;
+    chatSend.disabled=true;
+    chatLiveStatus.textContent='Sending to Vision…';
+    try{
+      const response=await fetch('/api/chat/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok)throw new Error((payload&&payload.error)||'Message could not be sent.');
+      appendChatMessage(text,'from-user');
+      chatForm.reset();
+      chatLiveStatus.textContent='Waiting for Vision.';
+      await pollChatReplies();
+    }catch(error){
+      chatLiveStatus.textContent=error.message;
+    }finally{
+      chatSend.disabled=false;
+      chatInput.focus();
+    }
+  });
+  setInterval(pollChatReplies,1500);
+  pollChatReplies();
+}

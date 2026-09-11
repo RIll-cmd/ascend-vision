@@ -8,7 +8,9 @@ import pytest
 from integrations.ascend_client import AscendClient, AscendConnectionState
 from integrations.automation_proposals import (
     AutomationProposalService,
+    HabitAutomationService,
     ProposalStatus,
+    explicit_habit_trigger,
     is_automation_intent,
 )
 from integrations.vision_token_store import VisionToken, VisionTokenStore
@@ -45,7 +47,7 @@ class MemoryKeyring:
 
 def valid_capabilities():
     return {
-        "version": "2026-09-07",
+        "version": "2026-09-09",
         "triggers": ["phone_usage_observed"],
         "matchModes": ["all"],
         "fields": ["event.type", "payload.state"],
@@ -195,6 +197,68 @@ class FakeCore:
     def create_automation(self, draft):
         self.create_calls.append(draft)
         return type("Result", (), {"state": AscendConnectionState.CONNECTED, "payload": {"id": "rule-1", **draft}})()
+
+
+class FakeHabitAutomationCore(FakeCore):
+    def __init__(self, *, automations=None, habits=None):
+        super().__init__(habits=habits)
+        self.automations = automations or []
+
+    def get_automations(self, character_id):
+        assert character_id == "char-1"
+        return type("Result", (), {"state": AscendConnectionState.CONNECTED,
+                                    "payload": {"automations": self.automations}})()
+
+
+def test_detection_automation_warns_then_creates_once_after_repeat():
+    core = FakeHabitAutomationCore()
+    service = HabitAutomationService(core, "char-1", repeat_threshold=2)
+
+    first = service.handle_detection("phone_usage_observed")
+    second = service.handle_detection("phone_usage_observed")
+    third = service.handle_detection("phone_usage_observed")
+
+    assert first.created is False
+    assert second.created is True
+    assert third.created is False
+    assert len(core.create_calls) == 1
+    assert core.create_calls[0]["triggerType"] == "phone_usage_observed"
+
+
+def test_detection_automation_skips_creation_when_matching_rule_exists():
+    core = FakeHabitAutomationCore(automations=[{
+        "triggerType": "drowsiness_observed", "enabled": True,
+    }])
+    service = HabitAutomationService(core, "char-1", repeat_threshold=1)
+
+    result = service.handle_detection("drowsiness_observed")
+
+    assert result.created is False
+    assert result.existing is True
+    assert len(core.create_calls) == 0
+
+
+def test_detection_automation_uses_matching_habit_and_validates_before_create():
+    core = FakeHabitAutomationCore(habits={
+        "characterId": "char-1",
+        "habits": [{"id": "habit-posture", "name": "Bad Posture"}],
+    })
+    service = HabitAutomationService(core, "char-1", repeat_threshold=1)
+
+    result = service.handle_detection("posture_observed")
+
+    assert result.created is True
+    assert core.validation_calls[0]["actions"] == [{"type": "log_bad_habit", "habitId": "habit-posture"}]
+    assert core.create_calls[0]["triggerType"] == "posture_observed"
+
+
+@pytest.mark.parametrize("text, trigger", [
+    ("Create a phone habit automation", "phone_usage_observed"),
+    ("make a drowsiness automation", "drowsiness_observed"),
+    ("set up posture tracking automation", "posture_observed"),
+])
+def test_explicit_habit_requests_map_without_field_questions(text, trigger):
+    assert explicit_habit_trigger(text) == trigger
 
 
 class CapturingGenerator:

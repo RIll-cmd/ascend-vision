@@ -13,3 +13,11 @@
 .camera-btn.camera-running::before{content:"●";display:inline-block;color:#a7f3d0;font-size:10px;margin-right:-2px;animation:pulse-dot 1.8s infinite}
 @keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:0.3}}
 @media(max-width:620px){.masthead-actions{gap:10px}.camera-btn{padding:6px 10px;font-size:11px}}
+.chat-panel{display:grid;grid-template-columns:minmax(220px,.75fr) minmax(0,1.6fr);gap:42px;margin:28px 0 34px;padding:30px;border:1px solid var(--green);background:#eef1e4;box-shadow:7px 7px 0 var(--lime)}
+.chat-intro{padding:5px 18px 5px 0;border-right:1px solid #bdc8b6}.chat-intro h2{font-size:34px;line-height:1.08}.chat-intro>p:last-child{max-width:360px;color:var(--muted);line-height:1.65}
+.chat-console{min-width:0}.chat-messages{display:flex;flex-direction:column;gap:10px;min-height:118px;max-height:280px;overflow-y:auto;margin:0;padding:0 4px 14px;list-style:none}
+.chat-message{align-self:flex-start;max-width:82%;padding:10px 13px;border-left:3px solid #9baa90;background:rgba(255,255,255,.55)}.chat-message.from-user{align-self:flex-end;border-left:0;border-right:3px solid var(--green);background:var(--green);color:var(--paper)}
+.chat-message.confirmation-required{border-color:var(--orange);background:#f5dfd0;color:#6d321a}.chat-speaker{display:block;margin-bottom:4px;font-size:9px;font-weight:bold;letter-spacing:1.4px;text-transform:uppercase}.chat-message p{margin:0;line-height:1.5;overflow-wrap:anywhere}
+.chat-live-status{min-height:18px;margin:0 0 9px;color:var(--muted);font-size:11px}.chat-form label{display:block;margin-bottom:7px;font-size:11px;color:var(--muted)}.chat-compose{display:flex;align-items:stretch;gap:9px}.chat-compose textarea{width:100%;resize:vertical;min-height:54px;padding:11px;border:1px solid #9baa90;border-radius:4px;background:var(--paper);font:inherit;color:inherit}.chat-compose textarea:focus-visible{outline:3px solid var(--orange);outline-offset:3px}.chat-compose button{min-width:88px}
+@media(max-width:760px){.chat-panel{grid-template-columns:1fr;gap:22px;padding:22px}.chat-intro{padding:0 0 18px;border-right:0;border-bottom:1px solid #bdc8b6}.chat-intro h2{font-size:29px}}
+@media(max-width:480px){.chat-panel{margin-left:-8px;margin-right:-8px;padding:18px}.chat-compose{flex-direction:column}.chat-compose button{width:100%}.chat-message{max-width:94%}}

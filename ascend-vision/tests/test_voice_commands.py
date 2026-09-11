@@ -593,7 +593,7 @@ def test_feedback_service_conversational_chat():
 def test_voice_command_config_conversational_schema():
     # Valid default
     cfg = VoiceCommandConfig()
-    assert cfg.model_size == 'base.en'
+    assert cfg.model_size == 'tiny.en'
     assert cfg.conversational_mode is True
     assert cfg.max_reply_words == 25
     assert cfg.chat_cooldown_seconds == 5.0
