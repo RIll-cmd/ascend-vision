@@ -46,4 +46,4 @@ desktop.ini
 !.vscode/extensions.json
 .superpowers/
 **/.superpowers/
-
+.worktrees/
