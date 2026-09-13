@@ -10,6 +10,7 @@ Implements:
 
 import logging
 import uuid
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 import httpx
@@ -21,6 +22,30 @@ class AscendCoreVisionClient:
     """Client for Ascend Vision to communicate deterministically with Ascend Core."""
 
     MAX_EXPIRY_RETRIES = 1
+
+    async def record_discipline_event(
+        self, *, event_id: str, behavior: str, stage: str,
+        reason: str, observed_at: datetime,
+    ) -> Dict[str, Any]:
+        """Record a direct Vision warning or penalty; never create a habit."""
+        if behavior not in {"PHONE_USE", "SLOUCHING", "DROWSINESS"}:
+            raise ValueError("Unsupported Vision discipline behavior")
+        if stage not in {"WARNING", "PENALTY"}:
+            raise ValueError("Unsupported Vision discipline stage")
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise ValueError("observed_at must be timezone-aware")
+        payload = {
+            "eventId": event_id, "characterId": self.character_id,
+            "behavior": behavior, "stage": stage, "deviceId": self.device_id,
+            "observedAt": observed_at.isoformat(), "reason": reason,
+        }
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout) as client:
+            res = await client.post(
+                "/api/integration/vision/discipline-events",
+                headers=self.headers, json=payload,
+            )
+            res.raise_for_status()
+            return res.json()
 
     def __init__(
         self,
