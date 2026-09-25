@@ -23,7 +23,7 @@ _AGENT_NAME = (
 )
 _EXPLICIT_NAMES = (
     re.compile(
-        rf"\b(?i:what\s+is|what's|how\s+is|how's)\s+"
+        rf"\b(?i:what\s+is|what's|how\s+is|how's|show|tell\s+me|check|display)\s+"
         rf"(?P<name>{_AGENT_NAME})['’]s\s+(?i:status|activity|progress)\b"
     ),
     re.compile(r"\b(?P<name>[A-Za-z][A-Za-z0-9_-]*)['’]s\s+(?i:status|activity|progress)\b"),
@@ -52,7 +52,8 @@ _KNOWN_NAMES = {
 _NON_AGENT_SUBJECTS = {
     "my", "your", "our", "his", "her", "their", "the", "a", "an",
     "i", "me", "you", "we", "us", "it", "he", "she", "they", "them", "him",
-    "this", "that", "there",
+    "this", "that", "there", "everyone", "anyone", "someone", "noone",
+    "everybody", "anybody", "somebody", "nobody", "today", "tomorrow", "yesterday",
 }
 _STATE_TEXT = {
     "idle": "idle",
