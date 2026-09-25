@@ -1,8 +1,6 @@
-import importlib
-import importlib.util
-
 import pytest
 
+from assistant.phone_handler import PhoneMessageHandler
 from assistant.service import AssistantReply
 
 
@@ -18,15 +16,9 @@ class RecordingAssistant:
         self.calls.append(("clear", session_key))
 
 
-def _handler_class():
-    if importlib.util.find_spec("assistant.phone_handler") is None:
-        pytest.fail("PhoneMessageHandler module has not been implemented")
-    return importlib.import_module("assistant.phone_handler").PhoneMessageHandler
-
-
 def test_phone_handler_routes_message_with_owner_channel_and_session_scope():
     assistant = RecordingAssistant()
-    handler = _handler_class()(assistant, owner_id="owner-a")
+    handler = PhoneMessageHandler(assistant, owner_id="owner-a")
 
     reply = handler.handle("owner-a", "phone_pwa", "session-1", "What is Hub doing?")
 
@@ -34,6 +26,15 @@ def test_phone_handler_routes_message_with_owner_channel_and_session_scope():
     assert assistant.calls == [
         ("What is Hub doing?", None, 25, ("owner-a", "phone_pwa", "session-1"))
     ]
+
+
+def test_phone_handler_new_chat_clears_only_the_requested_session():
+    assistant = RecordingAssistant()
+    handler = PhoneMessageHandler(assistant, owner_id="owner-a")
+
+    handler.clear_session("owner-a", "phone_pwa", "session-1")
+
+    assert assistant.calls == [("clear", ("owner-a", "phone_pwa", "session-1"))]
 
 
 @pytest.mark.parametrize(
@@ -50,7 +51,7 @@ def test_phone_handler_denies_wrong_owner_or_invalid_request_before_assistant_ca
     owner_id, channel, session_id, text
 ):
     assistant = RecordingAssistant()
-    handler = _handler_class()(assistant, owner_id="owner-a")
+    handler = PhoneMessageHandler(assistant, owner_id="owner-a")
 
     with pytest.raises(ValueError):
         handler.handle(owner_id, channel, session_id, text)
@@ -69,10 +70,9 @@ def test_phone_handler_denies_wrong_owner_or_invalid_request_before_assistant_ca
 )
 def test_phone_handler_blocks_memory_administration_without_calling_assistant(text):
     assistant = RecordingAssistant()
-    handler = _handler_class()(assistant, owner_id="owner-a")
+    handler = PhoneMessageHandler(assistant, owner_id="owner-a")
 
     reply = handler.handle("owner-a", "phone_pwa", "session-1", text)
 
     assert "dashboard" in reply.text.lower()
     assert assistant.calls == []
-

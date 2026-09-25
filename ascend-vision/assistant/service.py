@@ -12,6 +12,7 @@ import threading
 from typing import Literal
 
 from assistant.hub_status import parse_status_intent, render_status_answer
+from assistant.session_store import SessionContextStore, SessionKey
 from assistant.tool_runtime import ToolRuntime
 from feedback import ConversationContext, LLMRoaster, OfflineRoaster, get_fallback_chat_reply
 from llm_router import get_router
@@ -32,18 +33,21 @@ class AssistantService:
     """Returns one answer per request while protecting a shared generator."""
 
     def __init__(self, feedback_config, llm_config=None, *, generator=None, memory_store=None,
-                 tool_runtime: ToolRuntime | None = None):
+                 tool_runtime: ToolRuntime | None = None,
+                 session_store: SessionContextStore | None = None):
         self._feedback_config = feedback_config
         self._llm_config = llm_config
         self._generator = generator
         self._generator_source: Literal["model", "offline"] = "model"
         self._memory_store = memory_store
         self._tool_runtime = tool_runtime
+        self._session_store = session_store or SessionContextStore()
         self._turns: deque[tuple[str, str]] = deque(maxlen=12)
         self._suppress_session = False
         self._lock = threading.RLock()
 
-    def respond(self, user_text, context=None, *, max_words=25) -> AssistantReply:
+    def respond(self, user_text, context=None, *, max_words=25,
+                session_key: SessionKey | None = None) -> AssistantReply:
         if not isinstance(user_text, str) or not user_text.strip():
             raise ValueError("user_text must be nonempty")
         if len(user_text) > 4_000:
@@ -56,7 +60,11 @@ class AssistantService:
             memory_enabled = self._memory_enabled()
             if not memory_enabled:
                 self._turns.clear()
-            command_reply = self._memory_command(text, memory_enabled, max_words)
+                if session_key is not None:
+                    self._session_store.clear(session_key)
+            command_reply = self._memory_command(
+                text, memory_enabled, max_words, session_key=session_key,
+            )
             if command_reply is not None:
                 return command_reply
             status_intent = parse_status_intent(text)
@@ -69,13 +77,17 @@ class AssistantService:
                 except Exception as exc:
                     LOG.warning("Hub status unavailable (%s)", type(exc).__name__)
                     return AssistantReply(STATUS_UNAVAILABLE_TEXT, "offline")
-            prompt_context, memory_ready = self._with_memory_context(text, context, memory_enabled)
+            prompt_context, memory_ready = self._with_memory_context(
+                text, context, memory_enabled, session_key=session_key,
+            )
             try:
                 generator = self._get_generator()
                 answer = generator.generate_chat(text, prompt_context, max_words=max_words)
                 if isinstance(answer, str) and answer.strip():
                     reply = AssistantReply(answer.strip(), self._generator_source)
-                    self._record_turn(text, reply.text, memory_enabled and memory_ready)
+                    self._record_turn(
+                        text, reply.text, memory_enabled and memory_ready, session_key=session_key,
+                    )
                     return reply
             except Exception as exc:
                 LOG.warning("Assistant generation failed (%s); using offline reply", type(exc).__name__)
@@ -84,8 +96,14 @@ class AssistantService:
             if not isinstance(fallback, str) or not fallback.strip():
                 raise RuntimeError("Assistant could not produce a reply")
             reply = AssistantReply(fallback.strip(), "offline")
-            self._record_turn(text, reply.text, memory_enabled and memory_ready)
+            self._record_turn(
+                text, reply.text, memory_enabled and memory_ready, session_key=session_key,
+            )
             return reply
+
+    def clear_session(self, session_key: SessionKey) -> None:
+        """Forget the temporary turns for one owner/channel/session tuple."""
+        self._session_store.clear(session_key)
 
     def _memory_enabled(self) -> bool:
         if self._memory_store is None:
@@ -96,7 +114,8 @@ class AssistantService:
             LOG.warning("Memory unavailable (%s); using stateless chat", type(exc).__name__)
             return False
 
-    def _memory_command(self, text: str, enabled: bool, max_words: int) -> AssistantReply | None:
+    def _memory_command(self, text: str, enabled: bool, max_words: int, *,
+                        session_key: SessionKey | None = None) -> AssistantReply | None:
         def fixed(message: str, compact: str) -> AssistantReply:
             return AssistantReply(message if len(message.split()) <= max_words else compact, "offline")
 
@@ -114,7 +133,7 @@ class AssistantService:
 
         match = re.fullmatch(r"remember that\s+(.+)", text, re.I | re.S)
         if match:
-            if self._suppress_session:
+            if session_key is None and self._suppress_session:
                 return fixed("I cannot save a memory from this conversation now.", "Not-saved")
             if not enabled or self._memory_store is None:
                 return fixed("Memory is unavailable or disabled, so I did not save that.", "Not-saved")
@@ -167,7 +186,7 @@ class AssistantService:
             return fixed("Please edit the exact approved memory in the dashboard; I won't overwrite it silently.", "Edit-in-dashboard")
         return None
 
-    def _with_memory_context(self, text, context, enabled):
+    def _with_memory_context(self, text, context, enabled, *, session_key=None):
         if not enabled:
             return context, False
         memories: list[dict] = []
@@ -176,9 +195,16 @@ class AssistantService:
                 memories = self._memory_store.search(text, limit=3)
             except Exception as exc:
                 LOG.warning("Memory retrieval failed (%s); using stateless chat", type(exc).__name__)
-                self._turns.clear()
+                if session_key is None:
+                    self._turns.clear()
+                else:
+                    self._session_store.clear(session_key)
                 return context, False
-        turns = list(self._turns) if not self._suppress_session else []
+        if session_key is None:
+            turns = list(self._turns) if not self._suppress_session else []
+        else:
+            turns, _context_expired = self._session_store.get(session_key)
+            turns = list(turns)
         facts = [(row["id"], row["text"]) for row in memories]
         while turns or facts:
             payload = {
@@ -196,8 +222,11 @@ class AssistantService:
         base = context if isinstance(context, ConversationContext) else ConversationContext(user_query=text)
         return replace(base, recent_turns=tuple(turns), approved_memories=tuple(facts)), True
 
-    def _record_turn(self, text, answer, enabled):
-        if enabled and not self._suppress_session:
+    def _record_turn(self, text, answer, enabled, *, session_key=None):
+        if enabled and (session_key is not None or not self._suppress_session):
+            if session_key is not None:
+                self._session_store.record(session_key, text, answer)
+                return
             self._turns.append((text, answer))
             while self._turns:
                 payload = {"recent_turns": [
