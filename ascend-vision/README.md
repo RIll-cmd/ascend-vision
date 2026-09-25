@@ -46,6 +46,13 @@ only the dashboard. Detection, Gemini feedback and SQLite logging run separately
 The dashboard itself needs no camera, model downloads or Gemini credentials.
 It can also inspect existing history while detection is stopped.
 
+The dashboard's chat panel needs both processes running. Start `main.py` in the
+first window and `dashboard.py` in the second, using the same `--config` file if
+you override the default. Typed messages wait in the local queue while Vision
+is stopped; once Vision runs, the chat panel displays its generated text reply.
+Without a configured model provider, ordinary dashboard chat uses the existing
+offline reply. The dashboard remains available for statistics when Vision is off.
+
 ```powershell
 # Select a port and print the URL without opening a browser:
 .\.venv\Scripts\python.exe dashboard.py --port 8766 --no-open-browser
