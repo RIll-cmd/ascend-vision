@@ -442,6 +442,7 @@ class FeedbackService:
         self.config = config
         self.cooldown_seconds = cooldown_seconds
         self._generator = generator
+        self._assistant_service = None
         self._speaker = speaker
         self._jobs = queue.Queue(maxsize=8)
         self._results = queue.Queue(maxsize=8)
@@ -463,6 +464,13 @@ class FeedbackService:
         self._is_speaking = False
         self._speech_ended_at: float | None = None
         self.enabled = False
+
+    def bind_assistant(self, assistant_service) -> None:
+        """Use the shared answer service for future conversational speech jobs."""
+        if not callable(getattr(assistant_service, "respond", None)):
+            raise TypeError("assistant_service must provide respond")
+        with self._lock:
+            self._assistant_service = assistant_service
 
     def mute(self, duration_seconds: float):
         with self._lock:
@@ -703,7 +711,7 @@ class FeedbackService:
                         if not self._speech_cancelled(speech_generation):
                             if hasattr(job, 'created') and time.monotonic() - job.created > self.config.max_age_seconds:
                                 object.__setattr__(job, 'created', time.monotonic())
-                            if self._generator is None:
+                            if self._assistant_service is None and self._generator is None:
                                 has_keys = (
                                     bool(os.environ.get(self.config.api_key_env, '').strip())
                                     or bool(os.environ.get('GROQ_API_KEY', '').strip())
@@ -715,7 +723,11 @@ class FeedbackService:
                                     self._generator = LLMRoaster(self.config)
                             reply_text = None
                             try:
-                                if hasattr(self._generator, 'generate_chat'):
+                                if self._assistant_service is not None:
+                                    reply_text = self._assistant_service.respond(
+                                        job.user_text, job.context, max_words=job.max_words,
+                                    ).text
+                                elif hasattr(self._generator, 'generate_chat'):
                                     reply_text = self._generator.generate_chat(job.user_text, job.context, max_words=job.max_words)
                             except Exception as api_err:
                                 LOG.warning('Chat request failed (%s); using witty offline banter fallback', type(api_err).__name__)

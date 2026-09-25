@@ -590,6 +590,36 @@ def test_feedback_service_conversational_chat():
         service.close()
 
 
+def test_feedback_service_speaks_reply_from_bound_assistant():
+    from assistant.service import AssistantReply
+
+    class Assistant:
+        def respond(self, user_text, context, *, max_words):
+            assert user_text == "How is focus going?"
+            assert context.mode == "focus"
+            assert max_words == 25
+            return AssistantReply("Shared answer.", "model")
+
+    speaker = Mock()
+    speaker.speak.return_value = Mock(started=True, completed=True, error=None)
+    service = FeedbackService(
+        FeedbackConfig(enabled=True), cooldown_seconds=0.0,
+        generator=Mock(), speaker=speaker,
+    )
+    service.bind_assistant(Assistant())
+    service.start()
+    try:
+        context = ConversationContext("How is focus going?", mode="focus")
+        assert service.submit_chat("How is focus going?", context, cooldown=5.0)
+        deadline = time.monotonic() + 2.0
+        while not speaker.speak.called and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert speaker.speak.call_args.args[0] == "Shared answer."
+        assert not service.submit_chat("Again?", context, cooldown=5.0)
+    finally:
+        service.close()
+
+
 def test_voice_command_config_conversational_schema():
     # Valid default
     cfg = VoiceCommandConfig()
