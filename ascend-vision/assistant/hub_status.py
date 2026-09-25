@@ -26,6 +26,7 @@ _EXPLICIT_NAMES = (
         rf"\b(?i:what\s+is|what's|how\s+is|how's)\s+"
         rf"(?P<name>{_AGENT_NAME})['’]s\s+(?i:status|activity|progress)\b"
     ),
+    re.compile(r"\b(?P<name>[A-Za-z][A-Za-z0-9_-]*)['’]s\s+(?i:status|activity|progress)\b"),
     re.compile(
         rf"\b(?i:what\s+is|what's|how\s+is|how's|is|are|has|have|did)\s+"
         rf"(?P<name>{_AGENT_NAME})\s+(?:(?i:still|currently|now)\s+)?"
@@ -47,6 +48,11 @@ _KNOWN_NAMES = {
     "codex": "Codex",
     "ascend core": "Ascend Core",
     "ascend vision": "Ascend Vision",
+}
+_NON_AGENT_SUBJECTS = {
+    "my", "your", "our", "his", "her", "their", "the", "a", "an",
+    "i", "me", "you", "we", "us", "it", "he", "she", "they", "them", "him",
+    "this", "that", "there",
 }
 _STATE_TEXT = {
     "idle": "idle",
@@ -76,9 +82,9 @@ def parse_status_intent(text: str) -> StatusIntent | None:
         for match in pattern.finditer(text):
             start, end = match.span("name")
             name = _normalized(match.group("name"))
-            if name not in {"ascend hub", "ai", "ais", "agent", "agents"} and name.split()[0] not in {
-                "my", "your", "our", "his", "her", "their", "the", "a", "an"
-            } and not any(
+            if name not in {"ascend hub", "ai", "ais", "agent", "agents"} and name.split()[0] not in _NON_AGENT_SUBJECTS and not re.search(
+                r"\b(?:my|your|our|his|her|their)\s+$", text[:start], re.I
+            ) and not any(
                 start < existing_end and end > existing_start
                 for existing_start, existing_end, _ in matches
             ):
