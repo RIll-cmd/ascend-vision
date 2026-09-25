@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import threading
@@ -20,6 +20,7 @@ ALLOWED_REPLY_STATUSES = frozenset({
 TERMINAL_REPLY_STATUSES = ALLOWED_REPLY_STATUSES - {"queued"}
 _INITIALIZE_LOCK = threading.Lock()
 _INITIALIZE_RETRY_SECONDS = 5.0
+_TRANSIENT_LIFETIME = timedelta(hours=24)
 
 
 def _utc_now() -> str:
@@ -61,6 +62,7 @@ class ChatIpcQueue:
     def receive_inbound(self) -> dict | None:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._cleanup(connection)
             row = connection.execute(
                 """
                 SELECT sequence, message_id, source, text, created_at
@@ -110,6 +112,7 @@ class ChatIpcQueue:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
         with self._connection() as connection:
+            self._cleanup(connection)
             rows = connection.execute(
                 """
                 SELECT sequence, message_id, text, status, created_at
@@ -120,6 +123,11 @@ class ChatIpcQueue:
                 """,
                 (cursor, limit),
             ).fetchall()
+            if rows:
+                connection.execute(
+                    "UPDATE chat_delivery SET max_sequence=MAX(max_sequence, ?) WHERE id=1",
+                    (int(rows[-1]["sequence"]),),
+                )
         return [
             {
                 "cursor": row["sequence"],
@@ -130,6 +138,27 @@ class ChatIpcQueue:
             }
             for row in rows
         ]
+
+    def acknowledge_through(self, cursor: int) -> None:
+        """Remove rendered reply text and the matching completed inbox text."""
+        if type(cursor) is not int or cursor < 0:
+            raise ValueError("cursor must be a non-negative integer")
+        with self._connection() as connection:
+            delivered = connection.execute(
+                "SELECT max_sequence FROM chat_delivery WHERE id=1"
+            ).fetchone()[0]
+            if cursor > delivered:
+                raise ValueError("cursor exceeds the highest delivered reply")
+            connection.execute("DELETE FROM chat_outbox WHERE sequence <= ?", (cursor,))
+            connection.execute(
+                """DELETE FROM chat_inbox
+                   WHERE completed_at IS NOT NULL
+                     AND NOT EXISTS (
+                         SELECT 1 FROM chat_outbox
+                         WHERE chat_outbox.message_id = chat_inbox.message_id
+                     )"""
+            )
+            self._cleanup(connection)
 
     def _initialize(self) -> None:
         deadline = time.monotonic() + _INITIALIZE_RETRY_SECONDS
@@ -158,6 +187,11 @@ class ChatIpcQueue:
                                 status TEXT NOT NULL,
                                 created_at TEXT NOT NULL
                             );
+                            CREATE TABLE IF NOT EXISTS chat_delivery (
+                                id INTEGER PRIMARY KEY CHECK (id=1),
+                                max_sequence INTEGER NOT NULL DEFAULT 0
+                            );
+                            INSERT OR IGNORE INTO chat_delivery(id, max_sequence) VALUES (1, 0);
                             """
                         )
                         inbox_columns = {
@@ -199,6 +233,11 @@ class ChatIpcQueue:
         return value.strip()
 
     def _cleanup(self, connection: sqlite3.Connection) -> None:
+        cutoff = (datetime.now(timezone.utc) - _TRANSIENT_LIFETIME).isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z")
+        connection.execute("DELETE FROM chat_inbox WHERE created_at < ?", (cutoff,))
+        connection.execute("DELETE FROM chat_outbox WHERE created_at < ?", (cutoff,))
         connection.execute(
             """
             DELETE FROM chat_inbox

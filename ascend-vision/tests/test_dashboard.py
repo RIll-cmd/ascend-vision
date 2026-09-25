@@ -8,6 +8,7 @@ from config import Config, StorageConfig, DashboardConfig
 from dashboard import create_app, main
 from integrations.ascend_client import AscendConnectionState
 from integrations.chat_ipc import ChatIpcQueue
+from assistant.memory import MemoryStore
 from integrations.vision_context import VisionAuthContext
 from integrations.vision_token_store import VisionToken
 
@@ -456,6 +457,149 @@ def test_dashboard_has_accessible_chat_controls_and_safe_live_rendering(client):
     assert 'confirmation_required' in script
     assert '.textContent=' in script
     assert 'innerHTML' not in script
+
+
+def test_dashboard_memory_approval_edit_delete_and_export(tmp_path):
+    store = MemoryStore(tmp_path / 'assistant_memory.db')
+    proposal_id = store.propose('I prefer green tea')
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    memory_client = create_app(cfg, memory_store=store).test_client()
+
+    pending = memory_client.get('/api/memory')
+    assert pending.status_code == 200
+    assert pending.json['pending'][0]['text'] == 'I prefer green tea'
+    assert pending.json['active'] == []
+
+    approved = memory_client.post(f'/api/memory/proposals/{proposal_id}/approve')
+    assert approved.status_code == 200
+    memory_id = approved.json['memory']['id']
+    assert memory_client.get('/api/memory?q=green').json['active'][0]['id'] == memory_id
+
+    edited = memory_client.patch(f'/api/memory/{memory_id}', json={'text': 'I prefer black coffee'})
+    assert edited.status_code == 200
+    assert memory_client.get('/api/memory?q=green').json['active'] == []
+    exported = memory_client.get('/api/memory/export')
+    assert exported.status_code == 200
+    assert [row['text'] for row in exported.json['memories']] == ['I prefer black coffee']
+
+    assert memory_client.delete(f'/api/memory/{memory_id}').status_code == 200
+    assert memory_client.get('/api/memory').json['active'] == []
+
+
+def test_dashboard_memory_export_includes_all_approved_facts(tmp_path):
+    store = MemoryStore(tmp_path / 'assistant_memory.db')
+    for index in range(101):
+        store.approve(store.propose(f'Favorite item {index}'))
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    memory_client = create_app(cfg, memory_store=store).test_client()
+
+    exported = memory_client.get('/api/memory/export')
+
+    assert exported.status_code == 200
+    assert len(exported.json['memories']) == 101
+
+
+def test_dashboard_memory_reject_and_disable_do_not_delete_approved_facts(tmp_path):
+    store = MemoryStore(tmp_path / 'assistant_memory.db')
+    active = store.approve(store.propose('I prefer tea'))
+    rejected = store.propose('I like mango')
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    memory_client = create_app(cfg, memory_store=store).test_client()
+
+    assert memory_client.post(f'/api/memory/proposals/{rejected}/reject').status_code == 200
+    changed = memory_client.put('/api/memory/settings', json={'enabled': False})
+
+    assert changed.status_code == 200
+    assert memory_client.get('/api/memory').json['enabled'] is False
+    assert memory_client.get('/api/memory').json['pending'] == []
+    assert memory_client.get('/api/memory').json['active'][0]['id'] == active['id']
+
+
+@pytest.mark.parametrize('method,path,payload', [
+    ('patch', '/api/memory/1', {'text': 'my password is secret'}),
+    ('patch', '/api/memory/1', {'text': 'tea', 'extra': 'x'}),
+    ('put', '/api/memory/settings', {'enabled': 'false'}),
+    ('put', '/api/memory/settings', {'enabled': False, 'extra': 1}),
+])
+def test_dashboard_memory_rejects_malformed_or_sensitive_mutation(tmp_path, method, path, payload):
+    store = MemoryStore(tmp_path / 'assistant_memory.db')
+    store.approve(store.propose('I prefer tea'))
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    memory_client = create_app(cfg, memory_store=store).test_client()
+
+    response = getattr(memory_client, method)(path, json=payload)
+
+    assert response.status_code == 400
+    assert store.active()[0]['text'] == 'I prefer tea'
+
+
+def test_chat_acknowledgement_removes_rendered_reply_text(tmp_path):
+    queue = ChatIpcQueue(tmp_path/'chat.db')
+    message_id = queue.enqueue('temporary message')
+    queue.receive_inbound()
+    cursor = queue.reply(message_id, 'temporary reply', 'reply')
+    queue.replies_after()
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    chat_client = create_app(cfg, chat_queue=queue).test_client()
+
+    response = chat_client.post('/api/chat/ack', json={'cursor': cursor})
+
+    assert response.status_code == 200
+    assert queue.replies_after() == []
+
+
+@pytest.mark.parametrize('payload', [None, {}, {'cursor': -1}, {'cursor': True},
+                                    {'cursor': '1'}, {'cursor': 1, 'extra': 2}])
+def test_chat_acknowledgement_rejects_malformed_cursor(tmp_path, payload):
+    queue = ChatIpcQueue(tmp_path/'chat.db')
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    chat_client = create_app(cfg, chat_queue=queue).test_client()
+
+    response = chat_client.post('/api/chat/ack', json=payload)
+
+    assert response.status_code == 400
+
+
+def test_chat_acknowledgement_rejects_undelivered_cursor(tmp_path):
+    queue = ChatIpcQueue(tmp_path/'chat.db')
+    message_id = queue.enqueue('temporary message')
+    queue.receive_inbound()
+    cursor = queue.reply(message_id, 'temporary reply', 'reply')
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    chat_client = create_app(cfg, chat_queue=queue).test_client()
+
+    response = chat_client.post('/api/chat/ack', json={'cursor': cursor + 1})
+
+    assert response.status_code == 400
+    assert queue.replies_after()[0]['cursor'] == cursor
+
+
+def test_dashboard_memory_mutation_keeps_local_origin_protection(tmp_path):
+    store = MemoryStore(tmp_path / 'assistant_memory.db')
+    proposal = store.propose('I prefer tea')
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    memory_client = create_app(cfg, memory_store=store).test_client()
+
+    response = memory_client.post(
+        f'/api/memory/proposals/{proposal}/approve',
+        headers={'Origin': 'https://evil.example'},
+    )
+
+    assert response.status_code == 403
+    assert store.active() == []
+
+
+def test_dashboard_memory_panel_has_labeled_controls(tmp_path):
+    store = MemoryStore(tmp_path / 'assistant_memory.db')
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    page = create_app(cfg, memory_store=store).test_client().get('/').get_data(as_text=True)
+
+    assert 'id="memory-panel"' in page
+    assert 'id="memory-enabled"' in page
+    assert 'id="memory-pending"' in page
+    assert 'id="memory-active"' in page
+    assert 'id="memory-search"' in page
+    assert 'href="/api/memory/export"' in page
 
 
 def test_database_failure_is_not_a_zero_total(tmp_path):

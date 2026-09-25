@@ -60,6 +60,25 @@
             <button type="submit" id="chat-send">Send <span aria-hidden="true">↗</span></button>
           </div>
         </form>
+        <details id="memory-panel" class="memory-panel">
+          <summary>What Vision remembers</summary>
+          <p class="memory-note">Chat history lasts only while Vision is running. Only facts you approve stay saved.</p>
+          <label class="memory-toggle" for="memory-enabled"><input id="memory-enabled" type="checkbox"> Use approved memories in chat</label>
+          <label class="memory-search-label" for="memory-search">Find a saved fact</label>
+          <input id="memory-search" type="search" maxlength="500" placeholder="Search approved memories">
+          <div class="memory-columns">
+            <section aria-labelledby="memory-pending-heading">
+              <h3 id="memory-pending-heading">Waiting for approval</h3>
+              <ul id="memory-pending" class="memory-list"></ul>
+            </section>
+            <section aria-labelledby="memory-active-heading">
+              <h3 id="memory-active-heading">Approved facts</h3>
+              <ul id="memory-active" class="memory-list"></ul>
+            </section>
+          </div>
+          <a class="memory-export" href="/api/memory/export" download="vision-memories.json">Export approved memories</a>
+          <p id="memory-status" class="memory-status" role="status" aria-live="polite"></p>
+        </details>
       </div>
     </section>
     <form id="filters" class="filters" aria-label="Dashboard filters">

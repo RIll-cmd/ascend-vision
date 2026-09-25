@@ -1,5 +1,8 @@
 import logging
+import threading
+from dataclasses import replace
 from datetime import datetime, timezone
+import time
 
 import numpy as np
 import pytest
@@ -191,3 +194,249 @@ def test_feedback_result_persists_to_original_event_at_shutdown(monkeypatch, mod
     with sqlite3.connect('data/phone_watch.db') as db:
         rows = db.execute('SELECT mode, roast_text FROM phone_events').fetchall()
         assert rows == [(mode, 'Your phone can wait.' if mode == 'focus' else None)]
+
+
+def test_dashboard_queue_receives_the_shared_assistant_answer(tmp_path):
+    from assistant.service import AssistantReply
+    from dashboard import create_app
+    from integrations.chat_ipc import ChatIpcQueue
+
+    database_path = tmp_path / "session.db"
+    config = Config(runtime=RuntimeConfig(preview=False))
+    config = replace(
+        config,
+        storage=replace(config.storage, database=database_path),
+        ascend=replace(config.ascend, enabled=False),
+        feedback=replace(config.feedback, enabled=False),
+    )
+    app = create_app(config, chat_queue=ChatIpcQueue(tmp_path / "chat_ipc.db"))
+    client = app.test_client()
+    submission = client.post('/api/chat/messages', json={'text': 'How is focus going?'})
+    assert submission.status_code == 202
+    message_id = submission.json['messageId']
+
+    class Assistant:
+        def respond(self, user_text, context, *, max_words):
+            assert user_text == "How is focus going?"
+            assert context.user_query == user_text
+            assert max_words == 25
+            return AssistantReply("Your focus is steady.", "model")
+
+    class WaitingStream(Stream):
+        def read(self, after_sequence, timeout):
+            deadline = time.monotonic() + 2.0
+            while not client.get('/api/chat/messages?after=0').json['messages'] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not client.get('/api/chat/messages?after=0').json['messages']:
+                raise AssertionError("Vision did not answer the queued dashboard message")
+            raise KeyboardInterrupt
+
+    class Face:
+        def close(self):
+            pass
+
+    run(
+        config, detector=Detector(), capture=WaitingStream(),
+        hand_tracker=Hands(), face_tracker=Face(), voice_listener=False,
+        assistant_service=Assistant(),
+    )
+
+    replies = client.get('/api/chat/messages?after=0').json['messages']
+    assert len(replies) == 1
+    assert replies[0]["messageId"] == message_id
+    assert replies[0]["status"] == "reply"
+    assert replies[0]["text"] == "Your focus is steady."
+
+
+def test_dashboard_chat_uses_stable_session_start_time(tmp_path, monkeypatch):
+    from assistant.service import AssistantReply
+    from dashboard import create_app
+    from integrations.chat_ipc import ChatIpcQueue
+    from integrations.chat_runtime import ChatRuntimeBridge
+
+    config = replace(
+        Config(runtime=RuntimeConfig(preview=False)),
+        storage=replace(Config().storage, database=tmp_path / "session.db"),
+        ascend=replace(Config().ascend, enabled=False),
+        feedback=replace(Config().feedback, enabled=False),
+    )
+    queue = ChatIpcQueue(tmp_path / "chat_ipc.db")
+    client = create_app(config, chat_queue=queue).test_client()
+    assert client.post('/api/chat/messages', json={'text': 'early chat'}).status_code == 202
+    first_seen = threading.Event()
+    second_seen = threading.Event()
+    observed = []
+
+    class Assistant:
+        def respond(self, user_text, context, *, max_words):
+            observed.append((context.session_duration_minutes, time.perf_counter()))
+            (first_seen if user_text == 'early chat' else second_seen).set()
+            return AssistantReply('Acknowledged.', 'offline')
+
+    class DelayedBridge(ChatRuntimeBridge):
+        def __init__(self, queue, handler):
+            super().__init__(queue, handler, poll_seconds=0.01)
+
+        def start(self):
+            time.sleep(0.25)
+            super().start()
+            assert first_seen.wait(2), 'queued chat was not handled before timer reset'
+
+    monkeypatch.setattr('integrations.chat_runtime.ChatRuntimeBridge', DelayedBridge)
+
+    class SecondChatStream(Stream):
+        def read(self, after_sequence, timeout):
+            assert client.post('/api/chat/messages', json={'text': 'later chat'}).status_code == 202
+            assert second_seen.wait(2), 'chat was not handled after timer reset'
+            raise KeyboardInterrupt
+
+    class Face:
+        def close(self):
+            pass
+
+    run(config, detector=Detector(), capture=SecondChatStream(), hand_tracker=Hands(),
+        face_tracker=Face(), voice_listener=False, assistant_service=Assistant())
+
+    assert len(observed) == 2
+    first_minutes, first_time = observed[0]
+    later_minutes, later_time = observed[1]
+    assert later_minutes >= first_minutes
+    assert (later_minutes - first_minutes) * 60 == pytest.approx(later_time - first_time, abs=0.02)
+
+
+def test_camera_runtime_continues_when_dashboard_queue_is_unavailable(tmp_path, monkeypatch):
+    def unavailable(_path):
+        raise OSError("private storage path")
+
+    monkeypatch.setattr('integrations.chat_ipc.ChatIpcQueue', unavailable)
+
+    class Face:
+        def detect(self, _frame, _timestamp):
+            return []
+
+        def close(self):
+            pass
+
+    config = Config(runtime=RuntimeConfig(preview=False))
+    config = replace(
+        config,
+        storage=replace(config.storage, database=tmp_path / 'session.db'),
+        ascend=replace(config.ascend, enabled=False),
+        feedback=replace(config.feedback, enabled=False),
+    )
+    stream = Stream()
+
+    run(config, detector=Detector(), capture=stream, hand_tracker=Hands(),
+        face_tracker=Face(), voice_listener=False)
+
+    assert stream.closed
+    assert stream.captured_count >= 4
+
+
+def test_runtime_discards_old_proposals_but_keeps_approved_memories(tmp_path):
+    from assistant.memory import MemoryStore
+    from dashboard import create_app
+    from integrations.chat_ipc import ChatIpcQueue
+
+    database_path = tmp_path / 'session.db'
+    memory_path = tmp_path / 'assistant_memory.db'
+    memory = MemoryStore(memory_path)
+    memory.propose('I like mango')
+    memory.approve(memory.propose('I prefer green tea'))
+    queue = ChatIpcQueue(tmp_path / 'chat_ipc.db')
+    config = replace(
+        Config(runtime=RuntimeConfig(preview=False)),
+        storage=replace(Config().storage, database=database_path),
+        ascend=replace(Config().ascend, enabled=False),
+        feedback=replace(Config().feedback, enabled=False),
+    )
+    app = create_app(config, chat_queue=queue, memory_store=memory)
+    client = app.test_client()
+    submission = client.post('/api/chat/messages', json={'text': 'What do you remember about me?'})
+    message_id = submission.json['messageId']
+
+    class WaitingStream(Stream):
+        def read(self, after_sequence, timeout):
+            frame = super().read(after_sequence, timeout)
+            if self.sequence == 1:
+                return frame
+            deadline = time.monotonic() + 2.0
+            while not client.get('/api/chat/messages?after=0').json['messages'] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not client.get('/api/chat/messages?after=0').json['messages']:
+                raise AssertionError('Vision did not answer the memory query')
+            raise KeyboardInterrupt
+
+    processed = []
+
+    class Face:
+        def detect(self, _frame, _timestamp):
+            processed.append(_frame)
+            return []
+
+        def close(self):
+            pass
+
+    run(config, detector=Detector(), capture=WaitingStream(), hand_tracker=Hands(),
+        face_tracker=Face(), voice_listener=False)
+
+    assert memory.pending() == []
+    assert [item['text'] for item in memory.active()] == ['I prefer green tea']
+    assert len(processed) == 1
+    reply = client.get('/api/chat/messages?after=0').json['messages'][0]
+    assert reply['messageId'] == message_id
+    assert 'green tea' in reply['text'].lower()
+
+
+def test_memory_storage_failure_keeps_camera_and_dashboard_chat_available(tmp_path, monkeypatch):
+    from dashboard import create_app
+    from integrations.chat_ipc import ChatIpcQueue
+
+    def unavailable(_path):
+        raise OSError('private memory path')
+
+    monkeypatch.setattr('main.MemoryStore', unavailable)
+    queue = ChatIpcQueue(tmp_path / 'chat_ipc.db')
+    database_path = tmp_path / 'session.db'
+    config = Config(runtime=RuntimeConfig(preview=False))
+    config = replace(
+        config,
+        storage=replace(config.storage, database=database_path),
+        ascend=replace(config.ascend, enabled=False),
+        feedback=replace(config.feedback, enabled=False),
+    )
+    app = create_app(config, chat_queue=queue)
+    client = app.test_client()
+    submission = client.post('/api/chat/messages', json={'text': 'hello'})
+
+    class WaitingStream(Stream):
+        def read(self, after_sequence, timeout):
+            frame = super().read(after_sequence, timeout)
+            if self.sequence == 1:
+                return frame
+            deadline = time.monotonic() + 2.0
+            while not client.get('/api/chat/messages?after=0').json['messages'] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not client.get('/api/chat/messages?after=0').json['messages']:
+                raise AssertionError('Chat stopped when memory storage failed')
+            raise KeyboardInterrupt
+
+    processed = []
+
+    class Face:
+        def detect(self, _frame, _timestamp):
+            processed.append(_frame)
+            return []
+
+        def close(self):
+            pass
+
+    stream = WaitingStream()
+    run(config, detector=Detector(), capture=stream, hand_tracker=Hands(),
+        face_tracker=Face(), voice_listener=False)
+
+    replies = client.get('/api/chat/messages?after=0').json['messages']
+    assert stream.closed and stream.captured_count >= 2
+    assert len(processed) == 1
+    assert replies[0]['messageId'] == submission.json['messageId']
+    assert replies[0]['status'] == 'reply'
