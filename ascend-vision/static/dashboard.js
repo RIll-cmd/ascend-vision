@@ -326,3 +326,95 @@ if(chatForm){
   setInterval(pollChatReplies,1500);
   pollChatReplies();
 }
+
+const memoryPanel=$('memory-panel');
+const memoryEnabled=$('memory-enabled');
+const memorySearch=$('memory-search');
+const memoryPending=$('memory-pending');
+const memoryActive=$('memory-active');
+const memoryStatus=$('memory-status');
+
+async function memoryRequest(path,method='GET',body){
+  const options={method,cache:'no-store'};
+  if(body!==undefined){
+    options.headers={'Content-Type':'application/json'};
+    options.body=JSON.stringify(body);
+  }
+  const response=await fetch(path,options);
+  const payload=await response.json().catch(()=>null);
+  if(!response.ok)throw new Error((payload&&payload.error)||'Memory is temporarily unavailable.');
+  return payload;
+}
+
+function memoryRow(item,actions){
+  const row=document.createElement('li');
+  const text=document.createElement('span');
+  text.textContent=item.text;
+  row.append(text);
+  const controls=document.createElement('div');
+  controls.className='memory-actions';
+  for(const [label,action] of actions){
+    const button=document.createElement('button');
+    button.type='button';
+    button.className='secondary';
+    button.textContent=label;
+    button.addEventListener('click',action);
+    controls.append(button);
+  }
+  row.append(controls);
+  return row;
+}
+
+async function updateMemory(path,method,body,success){
+  try{
+    await memoryRequest(path,method,body);
+    memoryStatus.textContent=success;
+    await refreshMemory();
+  }catch(error){
+    memoryStatus.textContent=error.message;
+  }
+}
+
+async function refreshMemory(){
+  if(!memoryPanel||!memoryPanel.open)return;
+  try{
+    const query=encodeURIComponent(memorySearch.value.trim());
+    const data=await memoryRequest(`/api/memory?q=${query}`);
+    memoryEnabled.checked=data.enabled;
+    memoryPending.replaceChildren();
+    memoryActive.replaceChildren();
+    for(const proposal of data.pending){
+      memoryPending.append(memoryRow(proposal,[
+        ['Approve',()=>updateMemory(`/api/memory/proposals/${proposal.id}/approve`,'POST',undefined,'Memory approved.')],
+        ['Reject',()=>updateMemory(`/api/memory/proposals/${proposal.id}/reject`,'POST',undefined,'Proposal rejected.')],
+      ]));
+    }
+    for(const fact of data.active){
+      memoryActive.append(memoryRow(fact,[
+        ['Edit',()=>{
+          const text=window.prompt('Edit approved memory',fact.text);
+          if(text!==null)updateMemory(`/api/memory/${fact.id}`,'PATCH',{text},'Memory updated.');
+        }],
+        ['Delete',()=>{
+          if(window.confirm('Delete this approved memory?')){
+            updateMemory(`/api/memory/${fact.id}`,'DELETE',undefined,'Memory deleted.');
+          }
+        }],
+      ]));
+    }
+    if(!data.pending.length)memoryPending.append(memoryRow({text:'No memories waiting for approval.'},[]));
+    if(!data.active.length)memoryActive.append(memoryRow({text:'No approved facts match this search.'},[]));
+  }catch(error){
+    memoryStatus.textContent=error.message;
+  }
+}
+
+if(memoryPanel){
+  memoryPanel.addEventListener('toggle',refreshMemory);
+  memorySearch.addEventListener('input',refreshMemory);
+  memoryEnabled.addEventListener('change',async()=>{
+    const desired=memoryEnabled.checked;
+    await updateMemory('/api/memory/settings','PUT',{enabled:desired},desired?'Memory enabled.':'Memory disabled.');
+  });
+  setInterval(()=>{if(memoryPanel.open)refreshMemory();},5000);
+}

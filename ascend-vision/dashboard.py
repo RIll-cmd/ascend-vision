@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, render_template, request
 
 from config import load_config
+from assistant.memory import MemoryStore
 from dashboard_stats import DashboardError, get_zone, read_stats
 from integrations.ascend_client import AscendClient, AscendConnectionState
 from integrations.chat_ipc import ChatIpcQueue
@@ -21,11 +22,22 @@ from integrations.vision_token_store import VisionToken, VisionTokenStore
 LOG = logging.getLogger(__name__)
 
 
-def create_app(config, chat_queue=None):
+def create_app(config, chat_queue=None, memory_store=None):
     app = Flask(__name__)
     app.config.update(TRUSTED_HOSTS=['127.0.0.1', 'localhost'])
     queue = chat_queue if chat_queue is not None else ChatIpcQueue(
         Path(config.storage.database).parent / 'chat_ipc.db')
+    if memory_store is None:
+        try:
+            memory_store = MemoryStore(Path(config.storage.database).parent / 'assistant_memory.db')
+        except Exception as exc:
+            LOG.warning('Dashboard memory unavailable (%s)', type(exc).__name__)
+
+    def memory_error(exc):
+        if isinstance(exc, ValueError):
+            return jsonify(error=str(exc)), 400
+        LOG.warning('Dashboard memory request failed (%s)', type(exc).__name__)
+        return jsonify(error='Vision memory is temporarily unavailable.'), 503
 
     @app.errorhandler(413)
     def request_too_large(_error):
@@ -124,6 +136,81 @@ def create_app(config, chat_queue=None):
         } for row in replies]
         safe_cursor = replies[-1]['cursor'] if replies else cursor
         return jsonify(messages=messages, cursor=safe_cursor)
+
+    @app.get('/api/memory')
+    def list_memory():
+        if memory_store is None:
+            return jsonify(error='Vision memory is temporarily unavailable.'), 503
+        try:
+            if request.args.keys() - {'q'} or any(len(values) != 1 for _, values in request.args.lists()):
+                raise ValueError('Invalid memory search')
+            return jsonify(enabled=memory_store.enabled(), pending=memory_store.pending(),
+                           active=memory_store.active(request.args.get('q', '')))
+        except Exception as exc:
+            return memory_error(exc)
+
+    @app.get('/api/memory/export')
+    def export_memory():
+        if memory_store is None:
+            return jsonify(error='Vision memory is temporarily unavailable.'), 503
+        try:
+            response = jsonify(memories=memory_store.active())
+            response.headers['Content-Disposition'] = 'attachment; filename="vision-memories.json"'
+            return response
+        except Exception as exc:
+            return memory_error(exc)
+
+    @app.post('/api/memory/proposals/<int:proposal_id>/approve')
+    def approve_memory(proposal_id):
+        if memory_store is None:
+            return jsonify(error='Vision memory is temporarily unavailable.'), 503
+        try:
+            return jsonify(memory=memory_store.approve(proposal_id))
+        except Exception as exc:
+            return memory_error(exc)
+
+    @app.post('/api/memory/proposals/<int:proposal_id>/reject')
+    def reject_memory(proposal_id):
+        if memory_store is None:
+            return jsonify(error='Vision memory is temporarily unavailable.'), 503
+        try:
+            return jsonify(rejected=memory_store.reject(proposal_id))
+        except Exception as exc:
+            return memory_error(exc)
+
+    @app.patch('/api/memory/<int:memory_id>')
+    def edit_memory(memory_id):
+        if memory_store is None:
+            return jsonify(error='Vision memory is temporarily unavailable.'), 503
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {'text'}:
+            return jsonify(error='Enter one memory text.'), 400
+        try:
+            return jsonify(memory=memory_store.edit(memory_id, payload['text']))
+        except Exception as exc:
+            return memory_error(exc)
+
+    @app.delete('/api/memory/<int:memory_id>')
+    def delete_memory(memory_id):
+        if memory_store is None:
+            return jsonify(error='Vision memory is temporarily unavailable.'), 503
+        try:
+            return jsonify(deleted=memory_store.delete(memory_id))
+        except Exception as exc:
+            return memory_error(exc)
+
+    @app.put('/api/memory/settings')
+    def set_memory_enabled():
+        if memory_store is None:
+            return jsonify(error='Vision memory is temporarily unavailable.'), 503
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {'enabled'} or type(payload['enabled']) is not bool:
+            return jsonify(error='enabled must be a boolean.'), 400
+        try:
+            memory_store.set_enabled(payload['enabled'])
+            return jsonify(enabled=memory_store.enabled())
+        except Exception as exc:
+            return memory_error(exc)
 
     @app.get('/api/auth/local-vision-status')
     def local_vision_status():
