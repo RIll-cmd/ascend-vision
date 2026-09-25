@@ -65,8 +65,24 @@ def test_status_intents_are_recognized(question):
     assert parse_status_intent(question) is not None
 
 
+@pytest.mark.parametrize("question, target, asks_completion", [
+    ("What is Claude's status?", "claude", False),
+    ("What is Claude doing?", "claude", False),
+    ("Is Claude running?", "claude", False),
+    ("Is Claude active?", "claude", False),
+    ("Did Claude finish its work?", "claude", True),
+])
+def test_explicit_unknown_agent_status_targets_the_named_agent(question, target, asks_completion):
+    intent = parse_status_intent(question)
+
+    assert intent is not None
+    assert intent.targets == (target,)
+    assert intent.asks_completion is asks_completion
+
+
 @pytest.mark.parametrize("question", [
     "What is my focus status?",
+    "Is my focus active?",
     "How is my vision?",
     "What is my vision status?",
     "Tell me about my memory",
@@ -127,6 +143,14 @@ def test_missing_named_agent_is_not_invented():
     result = render_status_answer(intent, snapshot(service("codex-cli", "working")))
 
     assert "couldn't find Antigravity" in result
+
+
+def test_unknown_named_agent_is_explicitly_missing_from_shelf():
+    intent = parse_status_intent("What is Claude's status?")
+
+    assert render_status_answer(intent, snapshot(service("codex-cli", "working"))) == (
+        "I couldn't find Claude in Ascend Hub's status shelf."
+    )
 
 
 def test_idle_does_not_claim_an_agent_finished():

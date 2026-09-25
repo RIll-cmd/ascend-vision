@@ -9,7 +9,7 @@ from integrations.status_shelf import ShelfService, ShelfSnapshot
 
 
 _STATUS_WORDS = re.compile(
-    r"\b(?:status|statuses|doing|working|idle|online|offline|available|finish|finished|complete|completed|done|blocked|stuck|progress)\b",
+    r"\b(?:status|statuses|doing|working|running|active|idle|online|offline|available|finish|finished|complete|completed|done|blocked|stuck|progress)\b",
     re.I,
 )
 _SUBJECT_WORDS = re.compile(
@@ -17,6 +17,15 @@ _SUBJECT_WORDS = re.compile(
     re.I,
 )
 _COMPLETION_WORDS = re.compile(r"\b(?:finish|finished|done|completed|complete)\b", re.I)
+_AGENT_NAME = r"[A-Z][A-Za-z0-9_-]*(?:\s+[A-Z][A-Za-z0-9_-]*)*"
+_EXPLICIT_NAMES = (
+    re.compile(rf"\b(?P<name>{_AGENT_NAME})['’]s\s+(?:status|activity|progress)\b"),
+    re.compile(
+        rf"\b(?i:what\s+is|what's|how\s+is|how's|is|are|has|have|did)\s+"
+        rf"(?P<name>{_AGENT_NAME})\s+"
+        r"(?i:doing|working|running|active|idle|online|offline|available|finish|finished|complete|completed|done|blocked|stuck)\b",
+    ),
+)
 _TARGETS = (
     (re.compile(r"\bantigravity\b", re.I), "antigravity"),
     (re.compile(r"\bcodex\s+cli\b", re.I), "codex cli"),
@@ -48,7 +57,7 @@ class StatusIntent:
 
 
 def parse_status_intent(text: str) -> StatusIntent | None:
-    if not isinstance(text, str) or not _STATUS_WORDS.search(text) or not _SUBJECT_WORDS.search(text):
+    if not isinstance(text, str) or not _STATUS_WORDS.search(text):
         return None
     if re.search(r"\bmy\s+vision\b", text, re.I):
         return None
@@ -57,6 +66,17 @@ def parse_status_intent(text: str) -> StatusIntent | None:
         for match in pattern.finditer(text):
             if not any(match.start() < end and match.end() > start for start, end, _ in matches):
                 matches.append((match.start(), match.end(), name))
+    for pattern in _EXPLICIT_NAMES:
+        for match in pattern.finditer(text):
+            start, end = match.span("name")
+            name = _normalized(match.group("name"))
+            if name not in {"ascend hub", "ai", "ais", "agent", "agents"} and not any(
+                start < existing_end and end > existing_start
+                for existing_start, existing_end, _ in matches
+            ):
+                matches.append((start, end, name))
+    if not matches and not _SUBJECT_WORDS.search(text):
+        return None
     targets = tuple(dict.fromkeys(name for _, _, name in sorted(matches)))
     return StatusIntent(targets, bool(_COMPLETION_WORDS.search(text)))
 

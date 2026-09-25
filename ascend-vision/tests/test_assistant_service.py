@@ -182,6 +182,18 @@ def test_assistant_answers_hub_status_without_model_or_stale_session_history():
     assert generator.calls[0][1] is None
 
 
+def test_assistant_reports_unknown_named_agent_from_shelf_without_model():
+    generator = Generator("I guess Claude is working")
+    service = AssistantService(FeedbackConfig(), generator=generator,
+                               tool_runtime=status_runtime())
+
+    reply = service.respond("What is Claude's status?")
+
+    assert reply.text == "I couldn't find Claude in Ascend Hub's status shelf."
+    assert reply.source == "tool"
+    assert generator.calls == []
+
+
 def test_assistant_fails_closed_when_hub_status_tool_is_unavailable():
     generator = Generator("I guess it is finished")
     service = AssistantService(FeedbackConfig(), generator=generator)
