@@ -294,6 +294,17 @@ async function pollChatReplies(){
             :`Vision: ${message.text}`;
     }
     chatCursor=payload.cursor;
+    if(payload.messages.length){
+      try{
+        await fetch('/api/chat/ack',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({cursor:chatCursor}),
+        });
+      }catch(_error){
+        // The queue's age limit also removes replies if acknowledgement is interrupted.
+      }
+    }
   }catch(error){
     chatLiveStatus.textContent='Waiting to reconnect to Vision.';
   }finally{

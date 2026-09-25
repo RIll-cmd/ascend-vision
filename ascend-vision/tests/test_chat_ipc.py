@@ -133,3 +133,50 @@ def test_retention_preserves_claimed_messages_until_a_terminal_reply(tmp_path):
             "SELECT message_id FROM chat_inbox ORDER BY sequence"
         )]
     assert retained_ids == [second_id, third_id]
+
+
+def test_acknowledgement_removes_delivered_inbox_and_outbox_text(tmp_path):
+    path = tmp_path / "chat.db"
+    queue = ChatIpcQueue(path)
+    message_id = queue.enqueue("temporary transcript")
+    queue.receive_inbound()
+    cursor = queue.reply(message_id, "temporary answer", "reply")
+
+    queue.acknowledge_through(cursor)
+
+    assert queue.replies_after() == []
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT count(*) FROM chat_inbox").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM chat_outbox").fetchone()[0] == 0
+
+
+def test_acknowledgement_does_not_remove_unfinished_or_newer_messages(tmp_path):
+    path = tmp_path / "chat.db"
+    queue = ChatIpcQueue(path)
+    finished_id = queue.enqueue("finished")
+    pending_id = queue.enqueue("pending")
+    queue.receive_inbound()
+    queue.receive_inbound()
+    old_cursor = queue.reply(finished_id, "done", "reply")
+    newer_cursor = queue.reply(pending_id, "waiting", "queued")
+
+    queue.acknowledge_through(old_cursor)
+
+    assert queue.replies_after()[0]["cursor"] == newer_cursor
+    with sqlite3.connect(path) as db:
+        assert [row[0] for row in db.execute("SELECT message_id FROM chat_inbox")] == [pending_id]
+
+
+def test_older_than_one_day_chat_rows_expire_but_fresh_pending_survives(tmp_path):
+    path = tmp_path / "chat.db"
+    queue = ChatIpcQueue(path)
+    old_id = queue.enqueue("old private text")
+    fresh_id = queue.enqueue("new message")
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE chat_inbox SET created_at='2020-01-01T00:00:00.000Z' WHERE message_id=?", (old_id,))
+
+    inbound = queue.receive_inbound()
+
+    assert inbound["message_id"] == fresh_id
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT count(*) FROM chat_inbox WHERE message_id=?", (old_id,)).fetchone()[0] == 0

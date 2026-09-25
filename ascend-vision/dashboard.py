@@ -137,6 +137,21 @@ def create_app(config, chat_queue=None, memory_store=None):
         safe_cursor = replies[-1]['cursor'] if replies else cursor
         return jsonify(messages=messages, cursor=safe_cursor)
 
+    @app.post('/api/chat/ack')
+    def acknowledge_chat_replies():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {'cursor'}:
+            return jsonify(error='A non-negative cursor is required.'), 400
+        cursor = payload['cursor']
+        if type(cursor) is not int or cursor < 0:
+            return jsonify(error='A non-negative cursor is required.'), 400
+        try:
+            queue.acknowledge_through(cursor)
+        except Exception as exc:
+            LOG.warning('Dashboard chat acknowledgement failed (%s)', type(exc).__name__)
+            return jsonify(error='Vision chat is temporarily unavailable.'), 503
+        return jsonify(acknowledged=cursor)
+
     @app.get('/api/memory')
     def list_memory():
         if memory_store is None:

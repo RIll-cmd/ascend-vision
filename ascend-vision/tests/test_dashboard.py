@@ -520,6 +520,32 @@ def test_dashboard_memory_rejects_malformed_or_sensitive_mutation(tmp_path, meth
     assert store.active()[0]['text'] == 'I prefer tea'
 
 
+def test_chat_acknowledgement_removes_rendered_reply_text(tmp_path):
+    queue = ChatIpcQueue(tmp_path/'chat.db')
+    message_id = queue.enqueue('temporary message')
+    queue.receive_inbound()
+    cursor = queue.reply(message_id, 'temporary reply', 'reply')
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    chat_client = create_app(cfg, chat_queue=queue).test_client()
+
+    response = chat_client.post('/api/chat/ack', json={'cursor': cursor})
+
+    assert response.status_code == 200
+    assert queue.replies_after() == []
+
+
+@pytest.mark.parametrize('payload', [None, {}, {'cursor': -1}, {'cursor': True},
+                                    {'cursor': '1'}, {'cursor': 1, 'extra': 2}])
+def test_chat_acknowledgement_rejects_malformed_cursor(tmp_path, payload):
+    queue = ChatIpcQueue(tmp_path/'chat.db')
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    chat_client = create_app(cfg, chat_queue=queue).test_client()
+
+    response = chat_client.post('/api/chat/ack', json=payload)
+
+    assert response.status_code == 400
+
+
 def test_dashboard_memory_mutation_keeps_local_origin_protection(tmp_path):
     store = MemoryStore(tmp_path / 'assistant_memory.db')
     proposal = store.propose('I prefer tea')
