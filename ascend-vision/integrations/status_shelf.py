@@ -74,12 +74,16 @@ def _service(row: object, generated_at: datetime, now: datetime) -> ShelfService
         raise ValueError("Invalid shelf stale threshold")
     heartbeat_value = row.get("lastHeartbeatAt")
     heartbeat = _aware_datetime(heartbeat_value) if heartbeat_value is not None else None
+    if heartbeat is not None and heartbeat - generated_at > timedelta(seconds=5):
+        raise ValueError("Shelf heartbeat is in the future")
     if state != "offline" and heartbeat is None:
         raise ValueError("Current shelf state has no heartbeat")
     stale_at_source = heartbeat is None or generated_at - heartbeat >= timedelta(seconds=stale_after)
     if state == "offline" and not stale_at_source:
         raise ValueError("Contradictory shelf state")
-    if state != "offline" and heartbeat is not None and now - heartbeat >= timedelta(seconds=stale_after):
+    if state != "offline" and heartbeat is not None and (
+        stale_at_source or now - heartbeat >= timedelta(seconds=stale_after)
+    ):
         state = "offline"
     activity = row.get("activity")
     if activity is not None and not isinstance(activity, dict):

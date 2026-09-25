@@ -645,6 +645,27 @@ def test_feedback_service_speaks_reply_from_bound_assistant():
         service.close()
 
 
+def test_bound_assistant_enables_voice_without_model_api_key(monkeypatch):
+    from assistant.service import AssistantReply
+
+    for key in ('GEMINI_API_KEY', 'GROQ_API_KEY', 'CEREBRAS_API_KEY'):
+        monkeypatch.delenv(key, raising=False)
+
+    class Assistant:
+        def respond(self, user_text, context, *, max_words):
+            return AssistantReply('Antigravity is idle.', 'tool')
+
+    service = FeedbackService(
+        FeedbackConfig(enabled=True, tts_engine='pyttsx3'), cooldown_seconds=0.0,
+    )
+    service.bind_assistant(Assistant())
+    service.start()
+    try:
+        assert service.enabled
+    finally:
+        service.close()
+
+
 def test_voice_chat_speaks_verified_hub_status_without_model_call():
     from assistant.service import AssistantService
     from assistant.tool_runtime import ToolRuntime, ToolSpec

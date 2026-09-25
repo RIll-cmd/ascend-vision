@@ -57,6 +57,9 @@ def test_tool_runtime_does_not_log_failed_tool_payload_or_credential(caplog):
     "What is Antigravity's status?",
     "Which AIs are online?",
     "Did Antigravity finish its work?",
+    "Has Codex CLI completed its task?",
+    "Is Core working?",
+    "What is Vision's status?",
 ])
 def test_status_intents_are_recognized(question):
     assert parse_status_intent(question) is not None
@@ -65,6 +68,7 @@ def test_status_intents_are_recognized(question):
 @pytest.mark.parametrize("question", [
     "What is my focus status?",
     "How is my vision?",
+    "What is my vision status?",
     "Tell me about my memory",
     "Hello",
 ])
@@ -81,6 +85,24 @@ def test_targeted_status_is_derived_from_shelf_state():
 
     assert result == "Codex CLI is working."
     assert "Antigravity" not in result
+
+
+def test_multiple_named_agents_are_all_reported():
+    intent = parse_status_intent("Are Antigravity and Codex CLI working?")
+    result = render_status_answer(intent, snapshot(
+        service("antigravity", "idle"),
+        service("codex-cli", "working"),
+    ))
+
+    assert result == "Antigravity is idle; Codex CLI is working."
+
+
+def test_missing_agent_in_multiple_targets_is_explicit():
+    intent = parse_status_intent("Are Antigravity and Codex CLI working?")
+    result = render_status_answer(intent, snapshot(service("antigravity", "idle")))
+
+    assert "Antigravity is idle" in result
+    assert "couldn't find Codex CLI" in result
 
 
 def test_general_status_reports_multiple_instances_and_blocked_offline_states():
@@ -113,6 +135,24 @@ def test_idle_does_not_claim_an_agent_finished():
 
     assert "idle" in result
     assert "does not confirm whether its last task finished" in result
+
+
+def test_completed_wording_uses_shelf_and_does_not_guess_completion():
+    intent = parse_status_intent("Has Codex CLI completed its task?")
+    result = render_status_answer(intent, snapshot(service("codex-cli", "idle")))
+
+    assert "Codex CLI is idle" in result
+    assert "does not confirm whether its last task finished" in result
+
+
+def test_multiple_agent_completion_question_does_not_guess_task_outcomes():
+    intent = parse_status_intent("Have Antigravity and Codex CLI finished?")
+    result = render_status_answer(intent, snapshot(
+        service("antigravity", "idle"), service("codex-cli", "working"),
+    ))
+
+    assert "Antigravity is idle; Codex CLI is working." in result
+    assert "does not confirm whether their last tasks finished" in result
 
 
 def test_empty_shelf_reports_no_registered_ai_agents():

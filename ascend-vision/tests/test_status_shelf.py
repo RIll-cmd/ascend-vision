@@ -95,6 +95,7 @@ def test_reader_rejects_remote_plain_http_and_embedded_url_credentials():
     shelf(agent(state="confused")),
     shelf(agent(service_id="<script>")),
     shelf(agent(heartbeat=None, state="working")),
+    shelf(agent(heartbeat=NOW + timedelta(seconds=10))),
 ])
 def test_reader_rejects_malformed_or_contradictory_shelf(payload):
     reader = StatusShelfReader("https://core.local", "reader.secret", opener=lambda *_args, **_kwargs: FakeResponse(payload))
@@ -116,6 +117,14 @@ def test_reader_rejects_old_snapshot_and_treats_stale_heartbeat_as_offline():
         opener=lambda *_args, **_kwargs: FakeResponse(shelf(agent(heartbeat=NOW-timedelta(seconds=31)))),
     ).read(now=NOW)
     assert stale.services[0].state == "offline"
+
+    # Core's generatedAt and heartbeat share a clock; a slow Vision clock must
+    # not turn an already-stale source heartbeat back into "working".
+    skewed = StatusShelfReader(
+        "https://core.local", "reader.secret",
+        opener=lambda *_args, **_kwargs: FakeResponse(shelf(agent(heartbeat=NOW-timedelta(seconds=31)))),
+    ).read(now=NOW-timedelta(seconds=20))
+    assert skewed.services[0].state == "offline"
 
 
 def test_reader_rejects_unauthorized_network_and_oversized_responses():

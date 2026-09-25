@@ -67,7 +67,8 @@ forensic erasure from filesystem snapshots or backups. Only approved facts
 persist across Vision restarts.
 
 Vision can answer “What is Ascend Hub doing?”, “Is Codex CLI still working?”,
-and “What is Antigravity's status?” from Core's live status shelf. This requires
+and “What is Antigravity's status?” by voice or dashboard chat from Core's live
+status shelf. These read-only answers do not require a model API key, but do require
 `ascend.enabled: true`, a reachable `ASCEND_CORE_BASE_URL` (or `ASCEND_BASE_URL`),
 and the dedicated `ASCEND_STATUS_READ_CREDENTIAL` environment variable in the
 Vision process. In Ascend Core's `server` environment, an operator can create

@@ -389,6 +389,86 @@ def test_runtime_answers_dashboard_hub_status_with_dedicated_credential(tmp_path
     assert opened == [('http://localhost:8000', 'reader-id.reader-secret', 3.0)]
 
 
+def test_microphone_hub_status_reaches_assistant_without_replacing_session_status(tmp_path, monkeypatch):
+    from voice_listener import VoiceCommandParser
+
+    chats = []
+    announcements = []
+
+    class Feedback:
+        enabled = False
+
+        def __init__(self, *_args):
+            pass
+
+        def start(self):
+            assert hasattr(self, 'assistant')
+
+        def set_session(self, _session):
+            pass
+
+        def bind_assistant(self, assistant):
+            self.assistant = assistant
+
+        def submit_chat(self, text, _context, **_kwargs):
+            chats.append(text)
+            return True
+
+        def speak_announcement(self, text):
+            announcements.append(text)
+            return True
+
+        def is_muted(self):
+            return False
+
+        def is_speaking(self):
+            return False
+
+        def drain(self):
+            return []
+
+        def close(self):
+            pass
+
+    class Listener:
+        def __init__(self, _config, *, callback, unmatched_callback, is_speaking):
+            self.callback = callback
+            self.unmatched_callback = unmatched_callback
+
+        def start(self):
+            parser = VoiceCommandParser()
+            self.callback(parser.parse("What is Antigravity's status?"))
+            self.unmatched_callback("Is Codex CLI still working?")
+            self.callback(parser.parse("status report"))
+
+        def close(self):
+            pass
+
+    class Face:
+        def detect(self, _frame, _timestamp):
+            return []
+
+        def close(self):
+            pass
+
+    config = Config(runtime=RuntimeConfig(preview=False))
+    config = replace(
+        config,
+        storage=replace(config.storage, database=tmp_path / 'session.db'),
+        ascend=replace(config.ascend, enabled=False),
+        feedback=replace(config.feedback, enabled=False),
+        voice_commands=replace(config.voice_commands, enabled=True),
+    )
+    monkeypatch.setattr('main.FeedbackService', Feedback)
+    monkeypatch.setattr('main.VoiceCommandListener', Listener)
+
+    run(config, detector=Detector(), capture=Stream(), hand_tracker=Hands(), face_tracker=Face())
+
+    assert chats == ["What is Antigravity's status?", "Is Codex CLI still working?"]
+    assert len(announcements) == 1
+    assert announcements[0].startswith('Session status:')
+
+
 def test_memory_storage_failure_keeps_camera_and_dashboard_chat_available(tmp_path, monkeypatch):
     from dashboard import create_app
     from integrations.chat_ipc import ChatIpcQueue

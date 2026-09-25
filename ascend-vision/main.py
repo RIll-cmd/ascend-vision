@@ -15,6 +15,7 @@ import cv2
 
 from capture import CameraCapture, CaptureError
 from assistant.context import build_conversation_context
+from assistant.hub_status import parse_status_intent
 from assistant.memory import MemoryStore, UnavailableMemoryStore
 from assistant.service import AssistantService
 from assistant.tool_runtime import ToolRuntime, ToolSpec
@@ -154,7 +155,6 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         controls.start()
         feedback = FeedbackService(config.feedback, config.hold.cooldown_seconds)
         resources.callback(close_feedback)
-        feedback.start()
         feedback.set_session(manager.session_id if manager.mode == 'focus' else None)
         try:
             memory_store = MemoryStore(Path(config.storage.database).parent / 'assistant_memory.db')
@@ -186,6 +186,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         bind_assistant = getattr(feedback, 'bind_assistant', None)
         if callable(bind_assistant):
             bind_assistant(assistant_service)
+        feedback.start()
         expression_tracker = ExpressionTracker(cooldown_seconds=45.0)
         ascend_client = None
         ascend_character_id = None
@@ -396,9 +397,12 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 LOG.debug("Ignoring voice command while gesture-muted: %s", cmd.action)
                 return
             selected_mode = gesture_controller.consume_mode()
+            if parse_status_intent(cmd.raw_text) is not None:
+                route_chat(cmd.raw_text)
+                return
             if gesture_router.route(selected_mode, cmd.raw_text):
                 return
-            LOG.info("Executing voice command action: %s (from '%s')", cmd.action, cmd.raw_text)
+            LOG.info("Executing voice command action: %s", cmd.action)
             if cmd.action == 'focus':
                 manager.request('focus')
                 feedback.speak_announcement("Focus mode enabled. Put your distractions away.")
@@ -437,6 +441,9 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 LOG.debug('Ignoring unmatched speech while gesture-muted')
                 return
             selected_mode = gesture_controller.consume_mode()
+            if parse_status_intent(text) is not None:
+                route_chat(text)
+                return
             if gesture_router.route(selected_mode, text):
                 return
             if habit_voice_handler is not None and habit_voice_handler.handle_voice_utterance(text):
