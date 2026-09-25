@@ -274,3 +274,112 @@ def test_camera_runtime_continues_when_dashboard_queue_is_unavailable(tmp_path, 
 
     assert stream.closed
     assert stream.captured_count >= 4
+
+
+def test_runtime_discards_old_proposals_but_keeps_approved_memories(tmp_path):
+    from assistant.memory import MemoryStore
+    from dashboard import create_app
+    from integrations.chat_ipc import ChatIpcQueue
+
+    database_path = tmp_path / 'session.db'
+    memory_path = tmp_path / 'assistant_memory.db'
+    memory = MemoryStore(memory_path)
+    memory.propose('I like mango')
+    memory.approve(memory.propose('I prefer green tea'))
+    queue = ChatIpcQueue(tmp_path / 'chat_ipc.db')
+    config = replace(
+        Config(runtime=RuntimeConfig(preview=False)),
+        storage=replace(Config().storage, database=database_path),
+        ascend=replace(Config().ascend, enabled=False),
+        feedback=replace(Config().feedback, enabled=False),
+    )
+    app = create_app(config, chat_queue=queue, memory_store=memory)
+    client = app.test_client()
+    submission = client.post('/api/chat/messages', json={'text': 'What do you remember about me?'})
+    message_id = submission.json['messageId']
+
+    class WaitingStream(Stream):
+        def read(self, after_sequence, timeout):
+            frame = super().read(after_sequence, timeout)
+            if self.sequence == 1:
+                return frame
+            deadline = time.monotonic() + 2.0
+            while not client.get('/api/chat/messages?after=0').json['messages'] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not client.get('/api/chat/messages?after=0').json['messages']:
+                raise AssertionError('Vision did not answer the memory query')
+            raise KeyboardInterrupt
+
+    processed = []
+
+    class Face:
+        def detect(self, _frame, _timestamp):
+            processed.append(_frame)
+            return []
+
+        def close(self):
+            pass
+
+    run(config, detector=Detector(), capture=WaitingStream(), hand_tracker=Hands(),
+        face_tracker=Face(), voice_listener=False)
+
+    assert memory.pending() == []
+    assert [item['text'] for item in memory.active()] == ['I prefer green tea']
+    assert len(processed) == 1
+    reply = client.get('/api/chat/messages?after=0').json['messages'][0]
+    assert reply['messageId'] == message_id
+    assert 'green tea' in reply['text'].lower()
+
+
+def test_memory_storage_failure_keeps_camera_and_dashboard_chat_available(tmp_path, monkeypatch):
+    from dashboard import create_app
+    from integrations.chat_ipc import ChatIpcQueue
+
+    def unavailable(_path):
+        raise OSError('private memory path')
+
+    monkeypatch.setattr('main.MemoryStore', unavailable)
+    queue = ChatIpcQueue(tmp_path / 'chat_ipc.db')
+    database_path = tmp_path / 'session.db'
+    config = Config(runtime=RuntimeConfig(preview=False))
+    config = replace(
+        config,
+        storage=replace(config.storage, database=database_path),
+        ascend=replace(config.ascend, enabled=False),
+        feedback=replace(config.feedback, enabled=False),
+    )
+    app = create_app(config, chat_queue=queue)
+    client = app.test_client()
+    submission = client.post('/api/chat/messages', json={'text': 'hello'})
+
+    class WaitingStream(Stream):
+        def read(self, after_sequence, timeout):
+            frame = super().read(after_sequence, timeout)
+            if self.sequence == 1:
+                return frame
+            deadline = time.monotonic() + 2.0
+            while not client.get('/api/chat/messages?after=0').json['messages'] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not client.get('/api/chat/messages?after=0').json['messages']:
+                raise AssertionError('Chat stopped when memory storage failed')
+            raise KeyboardInterrupt
+
+    processed = []
+
+    class Face:
+        def detect(self, _frame, _timestamp):
+            processed.append(_frame)
+            return []
+
+        def close(self):
+            pass
+
+    stream = WaitingStream()
+    run(config, detector=Detector(), capture=stream, hand_tracker=Hands(),
+        face_tracker=Face(), voice_listener=False)
+
+    replies = client.get('/api/chat/messages?after=0').json['messages']
+    assert stream.closed and stream.captured_count >= 2
+    assert len(processed) == 1
+    assert replies[0]['messageId'] == submission.json['messageId']
+    assert replies[0]['status'] == 'reply'

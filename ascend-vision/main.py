@@ -15,6 +15,7 @@ import cv2
 
 from capture import CameraCapture, CaptureError
 from assistant.context import build_conversation_context
+from assistant.memory import MemoryStore, UnavailableMemoryStore
 from assistant.service import AssistantService
 from config import Config, load_config, number
 from detector import PhoneDetector, download_model
@@ -153,8 +154,14 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         resources.callback(close_feedback)
         feedback.start()
         feedback.set_session(manager.session_id if manager.mode == 'focus' else None)
+        try:
+            memory_store = MemoryStore(Path(config.storage.database).parent / 'assistant_memory.db')
+            memory_store.discard_proposals()
+        except (OSError, sqlite3.Error, RuntimeError) as exc:
+            LOG.warning('Assistant memory unavailable (%s); chat remains stateless', type(exc).__name__)
+            memory_store = UnavailableMemoryStore()
         if assistant_service is None:
-            assistant_service = AssistantService(config.feedback, config.llm)
+            assistant_service = AssistantService(config.feedback, config.llm, memory_store=memory_store)
         bind_assistant = getattr(feedback, 'bind_assistant', None)
         if callable(bind_assistant):
             bind_assistant(assistant_service)

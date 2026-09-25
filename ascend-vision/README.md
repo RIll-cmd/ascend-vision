@@ -53,6 +53,19 @@ is stopped; once Vision runs, the chat panel displays its generated text reply.
 Without a configured model provider, ordinary dashboard chat uses the existing
 offline reply. The dashboard remains available for statistics when Vision is off.
 
+The chat panel's **What Vision remembers** section lets you review proposed
+facts, approve or reject them, edit or delete approved facts, search, export,
+and turn memory on or off. Say “Remember that …” to propose a fact; Vision
+uses it only after dashboard approval. “What do you remember about me?” lists
+approved facts, and “Forget …” deletes one unambiguous match. “Do not remember
+this conversation” clears the current in-memory turn window and pending
+proposals until Vision restarts. Ordinary chat turns are kept only in Vision's
+RAM while it runs. The dashboard's SQLite queue temporarily holds undelivered
+messages and replies; the browser acknowledges displayed replies and queue
+maintenance removes old rows after 24 hours. This is logical cleanup, not
+forensic erasure from filesystem snapshots or backups. Only approved facts
+persist across Vision restarts.
+
 ```powershell
 # Select a port and print the URL without opening a browser:
 .\.venv\Scripts\python.exe dashboard.py --port 8766 --no-open-browser
@@ -318,6 +331,7 @@ rejection is not claimed. Phase 4 adds feedback and retains the existing classif
 ```text
 dashboard.py            Independent loopback dashboard and HTTP API
 dashboard_stats.py      Read-only statistics and monitored-time streaks
+assistant/memory.py     Local approved facts and short-lived memory proposals
 templates/ / static/    Local HTML, CSS, JavaScript and SVG charts
 main.py                 Runtime, preview, persistence wiring and CLI
 feedback.py             Gemini metadata adapter and bounded feedback worker

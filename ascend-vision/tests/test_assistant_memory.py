@@ -90,6 +90,7 @@ def test_enabled_setting_survives_restart_without_deleting_facts(tmp_path):
     "my bank account number is 123456789",
     "I have diabetes",
     "my home address is 123 Main Street",
+    "my address is 123 Main Street",
 ])
 def test_sensitive_memory_candidate_is_rejected_before_disk_write(tmp_path, text):
     path = tmp_path / "memory.db"

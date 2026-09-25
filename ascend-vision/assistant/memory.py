@@ -14,7 +14,7 @@ SENSITIVE_PATTERNS = (
     re.compile(r"\b(?:password|passphrase|api\s*key|access\s*token|secret|recovery\s*code|cookie)\b", re.I),
     re.compile(r"\b(?:credit\s*card|debit\s*card|payment\s*card|bank\s*account|account\s*number|routing\s*number|iban)\b", re.I),
     re.compile(r"\b(?:diagnos(?:is|ed)|diabetes|cancer|hiv|medication|prescription)\b", re.I),
-    re.compile(r"\b(?:home\s*address|live\s+at\s+\d+\b)\b", re.I),
+    re.compile(r"\b(?:home\s*address|my\s+address|live\s+at\s+\d+\b)\b", re.I),
 )
 
 
@@ -35,6 +35,13 @@ class MemoryPolicy:
         if any(pattern.search(text) for pattern in SENSITIVE_PATTERNS):
             raise ValueError("Sensitive details cannot be saved as memory")
         return text
+
+
+class UnavailableMemoryStore:
+    """Assistant sentinel that keeps chat stateless when SQLite cannot open."""
+
+    def enabled(self) -> bool:
+        return False
 
 
 class MemoryStore:
