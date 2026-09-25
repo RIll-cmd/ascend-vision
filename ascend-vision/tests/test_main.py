@@ -245,3 +245,32 @@ def test_dashboard_queue_receives_the_shared_assistant_answer(tmp_path):
     assert replies[0]["messageId"] == message_id
     assert replies[0]["status"] == "reply"
     assert replies[0]["text"] == "Your focus is steady."
+
+
+def test_camera_runtime_continues_when_dashboard_queue_is_unavailable(tmp_path, monkeypatch):
+    def unavailable(_path):
+        raise OSError("private storage path")
+
+    monkeypatch.setattr('integrations.chat_ipc.ChatIpcQueue', unavailable)
+
+    class Face:
+        def detect(self, _frame, _timestamp):
+            return []
+
+        def close(self):
+            pass
+
+    config = Config(runtime=RuntimeConfig(preview=False))
+    config = replace(
+        config,
+        storage=replace(config.storage, database=tmp_path / 'session.db'),
+        ascend=replace(config.ascend, enabled=False),
+        feedback=replace(config.feedback, enabled=False),
+    )
+    stream = Stream()
+
+    run(config, detector=Detector(), capture=stream, hand_tracker=Hands(),
+        face_tracker=Face(), voice_listener=False)
+
+    assert stream.closed
+    assert stream.captured_count >= 4

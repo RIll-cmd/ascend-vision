@@ -6,6 +6,7 @@ import math
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import threading
 import time
 from contextlib import ExitStack
@@ -445,10 +446,13 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 text, chat_context(text), max_words=config.voice_commands.max_reply_words,
             ).text
 
-        chat_queue = ChatIpcQueue(Path(config.storage.database).parent / 'chat_ipc.db')
-        chat_bridge = ChatRuntimeBridge(chat_queue, handle_dashboard_chat)
-        resources.callback(chat_bridge.stop)
-        chat_bridge.start()
+        try:
+            chat_queue = ChatIpcQueue(Path(config.storage.database).parent / 'chat_ipc.db')
+            chat_bridge = ChatRuntimeBridge(chat_queue, handle_dashboard_chat)
+            resources.callback(chat_bridge.stop)
+            chat_bridge.start()
+        except (OSError, sqlite3.Error, RuntimeError) as exc:
+            LOG.warning('Dashboard chat unavailable (%s); monitoring continues', type(exc).__name__)
 
         # Both model initializations are excluded from throughput and duration.
         start = time.perf_counter()
