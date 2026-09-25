@@ -1,4 +1,5 @@
 import logging
+import threading
 from dataclasses import replace
 from datetime import datetime, timezone
 import time
@@ -245,6 +246,62 @@ def test_dashboard_queue_receives_the_shared_assistant_answer(tmp_path):
     assert replies[0]["messageId"] == message_id
     assert replies[0]["status"] == "reply"
     assert replies[0]["text"] == "Your focus is steady."
+
+
+def test_dashboard_chat_uses_stable_session_start_time(tmp_path, monkeypatch):
+    from assistant.service import AssistantReply
+    from dashboard import create_app
+    from integrations.chat_ipc import ChatIpcQueue
+    from integrations.chat_runtime import ChatRuntimeBridge
+
+    config = replace(
+        Config(runtime=RuntimeConfig(preview=False)),
+        storage=replace(Config().storage, database=tmp_path / "session.db"),
+        ascend=replace(Config().ascend, enabled=False),
+        feedback=replace(Config().feedback, enabled=False),
+    )
+    queue = ChatIpcQueue(tmp_path / "chat_ipc.db")
+    client = create_app(config, chat_queue=queue).test_client()
+    assert client.post('/api/chat/messages', json={'text': 'early chat'}).status_code == 202
+    first_seen = threading.Event()
+    second_seen = threading.Event()
+    observed = []
+
+    class Assistant:
+        def respond(self, user_text, context, *, max_words):
+            observed.append((context.session_duration_minutes, time.perf_counter()))
+            (first_seen if user_text == 'early chat' else second_seen).set()
+            return AssistantReply('Acknowledged.', 'offline')
+
+    class DelayedBridge(ChatRuntimeBridge):
+        def __init__(self, queue, handler):
+            super().__init__(queue, handler, poll_seconds=0.01)
+
+        def start(self):
+            time.sleep(0.25)
+            super().start()
+            assert first_seen.wait(2), 'queued chat was not handled before timer reset'
+
+    monkeypatch.setattr('integrations.chat_runtime.ChatRuntimeBridge', DelayedBridge)
+
+    class SecondChatStream(Stream):
+        def read(self, after_sequence, timeout):
+            assert client.post('/api/chat/messages', json={'text': 'later chat'}).status_code == 202
+            assert second_seen.wait(2), 'chat was not handled after timer reset'
+            raise KeyboardInterrupt
+
+    class Face:
+        def close(self):
+            pass
+
+    run(config, detector=Detector(), capture=SecondChatStream(), hand_tracker=Hands(),
+        face_tracker=Face(), voice_listener=False, assistant_service=Assistant())
+
+    assert len(observed) == 2
+    first_minutes, first_time = observed[0]
+    later_minutes, later_time = observed[1]
+    assert later_minutes >= first_minutes
+    assert (later_minutes - first_minutes) * 60 == pytest.approx(later_time - first_time, abs=0.02)
 
 
 def test_camera_runtime_continues_when_dashboard_queue_is_unavailable(tmp_path, monkeypatch):

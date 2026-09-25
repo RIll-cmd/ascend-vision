@@ -51,7 +51,7 @@ class AssistantService:
             memory_enabled = self._memory_enabled()
             if not memory_enabled:
                 self._turns.clear()
-            command_reply = self._memory_command(text, memory_enabled)
+            command_reply = self._memory_command(text, memory_enabled, max_words)
             if command_reply is not None:
                 return command_reply
             prompt_context, memory_ready = self._with_memory_context(text, context, memory_enabled)
@@ -81,7 +81,7 @@ class AssistantService:
             LOG.warning("Memory unavailable (%s); using stateless chat", type(exc).__name__)
             return False
 
-    def _memory_command(self, text: str, enabled: bool) -> AssistantReply | None:
+    def _memory_command(self, text: str, enabled: bool, max_words: int) -> AssistantReply | None:
         normalized = text.lower().rstrip(".!? ")
         if normalized == "do not remember this conversation":
             self._turns.clear()
@@ -119,7 +119,16 @@ class AssistantService:
                 return AssistantReply("I cannot check memories right now.", "offline")
             if not memories:
                 return AssistantReply("I have no approved memories about you yet.", "offline")
-            return AssistantReply("Approved memories: " + "; ".join(row["text"] for row in memories), "offline")
+            answer = "Approved memories: " + "; ".join(row["text"] for row in memories)
+            words = answer.split()
+            if len(words) > max_words:
+                if max_words == 1:
+                    answer = "Approved-memories:"
+                elif max_words == 2:
+                    answer = "Approved-memories: …"
+                else:
+                    answer = " ".join(words[:max_words - 1] + ["…"])
+            return AssistantReply(answer, "offline")
 
         match = re.fullmatch(r"forget\s+(.+)", text, re.I | re.S)
         if match:

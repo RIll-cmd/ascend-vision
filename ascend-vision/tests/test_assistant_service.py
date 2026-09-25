@@ -5,6 +5,7 @@ import time
 import pytest
 
 from assistant.service import AssistantService
+from assistant.memory import MemoryStore
 from config import FeedbackConfig, LLMConfig
 
 
@@ -27,6 +28,26 @@ def test_assistant_returns_the_provider_answer():
     assert reply.text == "The task is moving."
     assert reply.source == "model"
     assert generator.calls == [("Status?", None, 18)]
+
+
+def test_approved_memory_recall_obeys_requested_word_budget(tmp_path):
+    store = MemoryStore(tmp_path / "memory.db")
+    facts = [
+        "I prefer green tea every morning",
+        "I play tennis on weekends",
+        "I avoid loud crowded places",
+        "I study French after work",
+        "I enjoy long mountain hikes",
+    ]
+    for fact in facts:
+        store.approve(store.propose(fact))
+    service = AssistantService(FeedbackConfig(), memory_store=store)
+
+    reply = service.respond("What do you remember about me?", max_words=9)
+
+    assert len(reply.text.split()) <= 9
+    assert "approved memor" in reply.text.lower()
+    assert {row["text"] for row in store.active()} == set(facts)
 
 
 def test_assistant_uses_safe_offline_answer_when_provider_fails():
