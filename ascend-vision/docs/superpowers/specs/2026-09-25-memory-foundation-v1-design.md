@@ -38,7 +38,7 @@ existing LLMRoaster / OfflineRoaster
 - The local dashboard has a Memories panel: pending proposals with approve/reject, active memories with search/edit/delete, an enable/disable switch, and JSON export of active memories. Editing an active memory is an explicit approval of the replacement text after policy validation.
 - `What do you remember about me?` returns a deterministic, bounded list of active memories, or says memory is off/empty. It never asks the model to invent a list.
 - `Forget <phrase>` selects a unique matching active memory for deletion; ambiguity asks the user to choose in the dashboard. `Correct that memory ...` directs the user to dashboard editing unless it can identify exactly one active memory. No hidden overwrite is allowed.
-- `Do not remember this conversation` clears the RAM window and suppresses recording new turns or proposing facts until Vision restarts. Existing approved memories remain readable; the global dashboard switch disables retrieval and all memory commands, clears the RAM window on the next request, and keeps chat working statelessly.
+- `Do not remember this conversation` clears the RAM window and pending proposals, then suppresses recording new turns or proposing facts until Vision restarts. Existing approved memories remain readable; the global dashboard switch disables retrieval and all memory commands, clears the RAM window on the next request, and keeps chat working statelessly.
 
 ## Retrieval and prompt safety
 

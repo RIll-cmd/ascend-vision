@@ -72,7 +72,7 @@ rows = db.execute('SELECT m.id,m.text,m.category FROM memory_fts f '
 
 **Interfaces:** `AssistantService(..., memory_store=None)` remains callable through `respond(text, context, max_words=25)`. `ConversationContext` gains optional `recent_turns` and `approved_memories` tuples; `payload()` includes only bounded, allowlisted text when present.
 
-- [ ] **Step 1: Write failing assistant tests.** With a fake generator that records `context.payload()`, assert a second turn sees the first user/assistant pair; a newly constructed service does not. An approved relevant fact is present, an irrelevant one is absent, and a proposal is absent. Turn 13 evicts turn 1. Disabling memory clears the window and sends no history/facts. Force a store exception and verify a normal reply still returns. Test `remember that`, `what do you remember`, `forget`, `correct that memory`, and `do not remember this conversation` without calling the model for deterministic commands.
+- [ ] **Step 1: Write failing assistant tests.** With a fake generator that records `context.payload()`, assert a second turn sees the first user/assistant pair; a newly constructed service does not. An approved relevant fact is present, an irrelevant one is absent, and a proposal is absent. Turn 13 evicts turn 1. Disabling memory clears the window and sends no history/facts. Force a store exception and verify a normal reply still returns. Test `remember that`, `what do you remember`, `forget`, `correct that memory`, and `do not remember this conversation` without calling the model for deterministic commands. The privacy command also deletes pending proposals and blocks new proposals for the process lifetime.
 
 ```python
 def test_recent_turns_are_process_local(tmp_path):
