@@ -82,6 +82,9 @@ class AssistantService:
             return False
 
     def _memory_command(self, text: str, enabled: bool, max_words: int) -> AssistantReply | None:
+        def fixed(message: str, compact: str) -> AssistantReply:
+            return AssistantReply(message if len(message.split()) <= max_words else compact, "offline")
+
         normalized = text.lower().rstrip(".!? ")
         if normalized == "do not remember this conversation":
             self._turns.clear()
@@ -91,34 +94,34 @@ class AssistantService:
                     self._memory_store.discard_proposals()
                 except Exception as exc:
                     LOG.warning("Could not clear memory proposals (%s)", type(exc).__name__)
-                    return AssistantReply("I stopped keeping this chat in memory, but could not clear pending proposals. Check the dashboard.", "offline")
-            return AssistantReply("I won't keep new turns or memory proposals from this conversation.", "offline")
+                    return fixed("I stopped keeping this chat in memory, but could not clear pending proposals. Check the dashboard.", "Proposals-uncleared")
+            return fixed("I won't keep new turns or memory proposals from this conversation.", "Memory-stopped")
 
         match = re.fullmatch(r"remember that\s+(.+)", text, re.I | re.S)
         if match:
             if self._suppress_session:
-                return AssistantReply("I cannot save a memory from this conversation now.", "offline")
+                return fixed("I cannot save a memory from this conversation now.", "Not-saved")
             if not enabled or self._memory_store is None:
-                return AssistantReply("Memory is unavailable or disabled, so I did not save that.", "offline")
+                return fixed("Memory is unavailable or disabled, so I did not save that.", "Not-saved")
             try:
                 self._memory_store.propose(match.group(1))
             except ValueError:
-                return AssistantReply("I cannot save that detail as memory. No memory was created.", "offline")
+                return fixed("I cannot save that detail as memory. No memory was created.", "Not-saved")
             except Exception as exc:
                 LOG.warning("Memory proposal failed (%s)", type(exc).__name__)
-                return AssistantReply("Memory is unavailable, so I did not save that.", "offline")
-            return AssistantReply("I prepared that memory. Please approve it in the dashboard before I use it.", "offline")
+                return fixed("Memory is unavailable, so I did not save that.", "Not-saved")
+            return fixed("I prepared that memory. Please approve it in the dashboard before I use it.", "Pending-approval")
 
         if normalized == "what do you remember about me":
             if not enabled or self._memory_store is None:
-                return AssistantReply("Memory is unavailable or disabled right now.", "offline")
+                return fixed("Memory is unavailable or disabled right now.", "Memory-unavailable")
             try:
                 memories = self._memory_store.active()[:5]
             except Exception as exc:
                 LOG.warning("Memory list failed (%s)", type(exc).__name__)
-                return AssistantReply("I cannot check memories right now.", "offline")
+                return fixed("I cannot check memories right now.", "Memory-unavailable")
             if not memories:
-                return AssistantReply("I have no approved memories about you yet.", "offline")
+                return fixed("I have no approved memories about you yet.", "No-approved-memories")
             answer = "Approved memories: " + "; ".join(row["text"] for row in memories)
             words = answer.split()
             if len(words) > max_words:
@@ -133,20 +136,20 @@ class AssistantService:
         match = re.fullmatch(r"forget\s+(.+)", text, re.I | re.S)
         if match:
             if not enabled or self._memory_store is None:
-                return AssistantReply("Memory is unavailable or disabled right now.", "offline")
+                return fixed("Memory is unavailable or disabled right now.", "Memory-unavailable")
             try:
                 matches = self._memory_store.active(match.group(1).strip().rstrip(".!?"), limit=None)
                 if len(matches) == 1 and self._memory_store.delete(matches[0]["id"]):
-                    return AssistantReply("I forgot that approved memory.", "offline")
+                    return fixed("I forgot that approved memory.", "Forgotten")
             except Exception as exc:
                 LOG.warning("Memory forget failed (%s)", type(exc).__name__)
-                return AssistantReply("I could not forget that memory right now.", "offline")
+                return fixed("I could not forget that memory right now.", "Not-forgotten")
             if len(matches) > 1:
-                return AssistantReply("Several memories match. Please choose one to delete in the dashboard.", "offline")
-            return AssistantReply("I could not find an approved memory matching that phrase.", "offline")
+                return fixed("Several memories match. Please choose one to delete in the dashboard.", "Choose-in-dashboard")
+            return fixed("I could not find an approved memory matching that phrase.", "Not-found")
 
         if normalized.startswith("correct that memory"):
-            return AssistantReply("Please edit the exact approved memory in the dashboard; I won't overwrite it silently.", "offline")
+            return fixed("Please edit the exact approved memory in the dashboard; I won't overwrite it silently.", "Edit-in-dashboard")
         return None
 
     def _with_memory_context(self, text, context, enabled):
