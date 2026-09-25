@@ -17,6 +17,7 @@ from capture import CameraCapture, CaptureError
 from assistant.context import build_conversation_context
 from assistant.memory import MemoryStore, UnavailableMemoryStore
 from assistant.service import AssistantService
+from assistant.tool_runtime import ToolRuntime, ToolSpec
 from config import Config, load_config, number
 from detector import PhoneDetector, download_model
 from hands import HandTracker, download_hand_model
@@ -32,6 +33,7 @@ from db import Database
 from session_manager import SessionManager
 from controls import DesktopControls
 from feedback import FeedbackService, RoastContext, ConversationContext
+from integrations.status_shelf import ShelfSnapshot, StatusShelfReader
 from gesture_controls import (GestureAction, GestureController, GestureModeRouter,
                               GestureRecognizer, core_status_indicator, count_fingers,
                               effective_core_connection_state, gesture_overlay_lines,
@@ -160,8 +162,27 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         except (OSError, sqlite3.Error, RuntimeError) as exc:
             LOG.warning('Assistant memory unavailable (%s); chat remains stateless', type(exc).__name__)
             memory_store = UnavailableMemoryStore()
+        core_base_url = (os.getenv("ASCEND_CORE_BASE_URL") or os.getenv("ASCEND_BASE_URL", "http://localhost:8000")).strip()
         if assistant_service is None:
-            assistant_service = AssistantService(config.feedback, config.llm, memory_store=memory_store)
+            status_runtime = None
+            status_credential = os.getenv("ASCEND_STATUS_READ_CREDENTIAL", "").strip()
+            if config.ascend.enabled and status_credential:
+                try:
+                    reader = StatusShelfReader(
+                        core_base_url, status_credential,
+                        timeout_seconds=min(config.ascend.timeout_seconds, 3.0),
+                    )
+                    status_runtime = ToolRuntime()
+                    status_runtime.register(
+                        ToolSpec("hub_status", 1, "read-only", frozenset(), ShelfSnapshot),
+                        reader.read,
+                    )
+                except ValueError as exc:
+                    LOG.warning('Hub status tool unavailable (%s)', type(exc).__name__)
+            assistant_service = AssistantService(
+                config.feedback, config.llm, memory_store=memory_store,
+                tool_runtime=status_runtime,
+            )
         bind_assistant = getattr(feedback, 'bind_assistant', None)
         if callable(bind_assistant):
             bind_assistant(assistant_service)
@@ -227,7 +248,6 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         ascend_client, ascend_character_id, StructuredAutomationProposalGenerator(get_router(config.llm)))
 
         # Initialize official AscendCoreVisionClient
-        core_base_url = (os.getenv("ASCEND_CORE_BASE_URL") or os.getenv("ASCEND_BASE_URL", "http://localhost:8000")).strip()
         core_bearer_token = (os.getenv("ASCEND_VISION_TOKEN") or os.getenv("ASCEND_API_TOKEN", "")).strip().strip('"')
         core_character_id = (os.getenv("ASCEND_CHARACTER_ID") or ascend_character_id or "").strip()
         core_device_id = (os.getenv("ASCEND_DEVICE_ID", "ascend-vision-desktop")).strip() or "ascend-vision-desktop"

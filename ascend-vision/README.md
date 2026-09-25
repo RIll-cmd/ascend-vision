@@ -66,6 +66,19 @@ maintenance removes old rows after 24 hours. This is logical cleanup, not
 forensic erasure from filesystem snapshots or backups. Only approved facts
 persist across Vision restarts.
 
+Vision can answer “What is Ascend Hub doing?”, “Is Codex CLI still working?”,
+and “What is Antigravity's status?” from Core's live status shelf. This requires
+`ascend.enabled: true`, a reachable `ASCEND_CORE_BASE_URL` (or `ASCEND_BASE_URL`),
+and the dedicated `ASCEND_STATUS_READ_CREDENTIAL` environment variable in the
+Vision process. In Ascend Core's `server` environment, an operator can create
+that credential with `python -m cli.status_read_credentials create`; store the
+returned `credential-id.secret` in your local secret manager and supply it to
+Vision. The status tool never uses Vision's bearer token or the status producer
+credential. Remote Core URLs must use HTTPS; local loopback HTTP is allowed.
+Without a current authenticated shelf, Vision says it cannot verify AI status.
+An `idle` status does not prove that an agent finished its last task; completion
+reports require a later Core completion-history feature.
+
 ```powershell
 # Select a port and print the URL without opening a browser:
 .\.venv\Scripts\python.exe dashboard.py --port 8766 --no-open-browser
