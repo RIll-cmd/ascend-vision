@@ -24,9 +24,13 @@ _AGENT_NAME = (
 _EXPLICIT_NAMES = (
     re.compile(
         rf"\b(?i:what\s+is|what's|how\s+is|how's|show|tell\s+me|check|display)\s+"
+        rf"(?:(?i:about|on)\s+)?"
         rf"(?P<name>{_AGENT_NAME})['’]s\s+(?i:status|activity|progress)\b"
     ),
-    re.compile(r"\b(?P<name>[A-Za-z][A-Za-z0-9_-]*)['’]s\s+(?i:status|activity|progress)\b"),
+    re.compile(
+        r"\b(?P<name>(?:[A-Z][A-Za-z0-9_-]*\s+){0,2}[A-Za-z][A-Za-z0-9_-]*)"
+        r"['’]s\s+(?i:status|activity|progress)\b"
+    ),
     re.compile(
         rf"\b(?i:what\s+is|what's|how\s+is|how's|is|are|has|have|did)\s+"
         rf"(?P<name>{_AGENT_NAME})\s+(?:(?i:still|currently|now)\s+)?"
@@ -84,6 +88,8 @@ def parse_status_intent(text: str) -> StatusIntent | None:
             start, end = match.span("name")
             name = _normalized(match.group("name"))
             if name not in {"ascend hub", "ai", "ais", "agent", "agents"} and name.split()[0] not in _NON_AGENT_SUBJECTS and not re.search(
+                r"\b(?:my|your|our|his|her|their)\b", name, re.I
+            ) and not re.search(
                 r"\b(?:my|your|our|his|her|their)\s+$", text[:start], re.I
             ) and not any(
                 start < existing_end and end > existing_start
