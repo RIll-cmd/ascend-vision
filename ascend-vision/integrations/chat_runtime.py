@@ -10,7 +10,6 @@ from integrations.chat_ipc import ChatIpcQueue
 
 
 LOG = logging.getLogger(__name__)
-DEFAULT_REPLY = "Vision received your message."
 ERROR_REPLY = "Vision could not process that message right now."
 
 
@@ -47,7 +46,9 @@ class ChatRuntimeBridge:
                 continue
             try:
                 result = self._handler(message["text"])
-                text = result.strip() if isinstance(result, str) and result.strip() else DEFAULT_REPLY
+                if not isinstance(result, str) or not result.strip():
+                    raise ValueError("Chat handler returned no answer")
+                text = result.strip()
                 self._queue.reply(message["message_id"], text, "reply")
             except Exception:
                 LOG.exception("Dashboard chat message handler failed")

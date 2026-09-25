@@ -1,5 +1,7 @@
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
+import time
 
 import numpy as np
 import pytest
@@ -191,3 +193,55 @@ def test_feedback_result_persists_to_original_event_at_shutdown(monkeypatch, mod
     with sqlite3.connect('data/phone_watch.db') as db:
         rows = db.execute('SELECT mode, roast_text FROM phone_events').fetchall()
         assert rows == [(mode, 'Your phone can wait.' if mode == 'focus' else None)]
+
+
+def test_dashboard_queue_receives_the_shared_assistant_answer(tmp_path):
+    from assistant.service import AssistantReply
+    from dashboard import create_app
+    from integrations.chat_ipc import ChatIpcQueue
+
+    database_path = tmp_path / "session.db"
+    config = Config(runtime=RuntimeConfig(preview=False))
+    config = replace(
+        config,
+        storage=replace(config.storage, database=database_path),
+        ascend=replace(config.ascend, enabled=False),
+        feedback=replace(config.feedback, enabled=False),
+    )
+    app = create_app(config, chat_queue=ChatIpcQueue(tmp_path / "chat_ipc.db"))
+    client = app.test_client()
+    submission = client.post('/api/chat/messages', json={'text': 'How is focus going?'})
+    assert submission.status_code == 202
+    message_id = submission.json['messageId']
+
+    class Assistant:
+        def respond(self, user_text, context, *, max_words):
+            assert user_text == "How is focus going?"
+            assert context.user_query == user_text
+            assert max_words == 25
+            return AssistantReply("Your focus is steady.", "model")
+
+    class WaitingStream(Stream):
+        def read(self, after_sequence, timeout):
+            deadline = time.monotonic() + 2.0
+            while not client.get('/api/chat/messages?after=0').json['messages'] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not client.get('/api/chat/messages?after=0').json['messages']:
+                raise AssertionError("Vision did not answer the queued dashboard message")
+            raise KeyboardInterrupt
+
+    class Face:
+        def close(self):
+            pass
+
+    run(
+        config, detector=Detector(), capture=WaitingStream(),
+        hand_tracker=Hands(), face_tracker=Face(), voice_listener=False,
+        assistant_service=Assistant(),
+    )
+
+    replies = client.get('/api/chat/messages?after=0').json['messages']
+    assert len(replies) == 1
+    assert replies[0]["messageId"] == message_id
+    assert replies[0]["status"] == "reply"
+    assert replies[0]["text"] == "Your focus is steady."

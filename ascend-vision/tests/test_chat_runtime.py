@@ -55,3 +55,21 @@ def test_runtime_converts_handler_failures_to_safe_errors(tmp_path):
         assert "private" not in reply["text"]
     finally:
         bridge.stop()
+
+
+def test_runtime_does_not_report_success_when_handler_returns_no_answer(tmp_path):
+    queue = ChatIpcQueue(tmp_path / "chat.db")
+    message_id = queue.enqueue("Can you answer me?")
+    bridge = ChatRuntimeBridge(queue, lambda _text: None, poll_seconds=0.01)
+    bridge.start()
+    try:
+        deadline = time.monotonic() + 1.0
+        while not queue.replies_after() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        replies = queue.replies_after()
+        assert len(replies) == 1
+        assert replies[0]["message_id"] == message_id
+        assert replies[0]["status"] == "error"
+        assert replies[0]["text"] == "Vision could not process that message right now."
+    finally:
+        bridge.stop()

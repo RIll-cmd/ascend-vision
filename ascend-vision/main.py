@@ -13,6 +13,8 @@ from contextlib import ExitStack
 import cv2
 
 from capture import CameraCapture, CaptureError
+from assistant.context import build_conversation_context
+from assistant.service import AssistantService
 from config import Config, load_config, number
 from detector import PhoneDetector, download_model
 from hands import HandTracker, download_hand_model
@@ -41,7 +43,8 @@ VISION_VERSION = '1.0.0'
 
 
 
-def run(config: Config, *, duration=None, detector=None, capture=None, hand_tracker=None, face_tracker=None, voice_listener=None, fairy_ui=False):
+def run(config: Config, *, duration=None, detector=None, capture=None, hand_tracker=None,
+        face_tracker=None, voice_listener=None, fairy_ui=False, assistant_service=None):
     if duration is not None:
         number('duration', duration, .01)
 
@@ -149,6 +152,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         resources.callback(close_feedback)
         feedback.start()
         feedback.set_session(manager.session_id if manager.mode == 'focus' else None)
+        if assistant_service is None:
+            assistant_service = AssistantService(config.feedback, config.llm)
+        bind_assistant = getattr(feedback, 'bind_assistant', None)
+        if callable(bind_assistant):
+            bind_assistant(assistant_service)
         expression_tracker = ExpressionTracker(cooldown_seconds=45.0)
         ascend_client = None
         ascend_character_id = None
@@ -322,25 +330,21 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             else:
                 feedback.speak_announcement('Ascend is unavailable right now.')
 
-        def route_chat(text: str):
-            sid = manager.session_id
-            counts = {}
-            if sid is not None:
-                try:
-                    counts = database.session_event_counts(sid)
-                except Exception as err:
-                    LOG.debug('Database session_event_counts failed: %s', err)
-            ctx = ConversationContext(
-                user_query=text, mode=manager.mode,
-                phone_pickups=counts.get('phone_held', 0),
-                microsleep_events=counts.get('drowsiness_microsleep', 0),
-                yawns=counts.get('yawn', 0), slouch_events=counts.get('slouch', 0),
-                session_duration_minutes=(time.perf_counter() - start) / 60.0 if start else 0.0,
+        def chat_context(text: str) -> ConversationContext:
+            return build_conversation_context(
+                text,
+                session_id=manager.session_id,
+                mode=manager.mode,
+                database_path=config.storage.database,
+                started_at=start,
             )
+
+        def route_chat(text: str):
+            ctx = chat_context(text)
             submit_chat = getattr(feedback, 'submit_chat', None)
             if submit_chat is not None:
                 submit_chat(text, ctx, max_words=config.voice_commands.max_reply_words,
-                            cooldown=config.voice_commands.chat_cooldown_seconds)
+                             cooldown=config.voice_commands.chat_cooldown_seconds)
 
         def route_automation(text: str):
             if automation_proposals is None:
@@ -432,6 +436,19 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         if voice_listener is not False and voice_listener is not None:
             resources.callback(voice_listener.close)
             voice_listener.start()
+
+        from integrations.chat_ipc import ChatIpcQueue
+        from integrations.chat_runtime import ChatRuntimeBridge
+
+        def handle_dashboard_chat(text: str) -> str:
+            return assistant_service.respond(
+                text, chat_context(text), max_words=config.voice_commands.max_reply_words,
+            ).text
+
+        chat_queue = ChatIpcQueue(Path(config.storage.database).parent / 'chat_ipc.db')
+        chat_bridge = ChatRuntimeBridge(chat_queue, handle_dashboard_chat)
+        resources.callback(chat_bridge.stop)
+        chat_bridge.start()
 
         # Both model initializations are excluded from throughput and duration.
         start = time.perf_counter()
