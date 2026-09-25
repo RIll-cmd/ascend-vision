@@ -141,6 +141,7 @@ def test_acknowledgement_removes_delivered_inbox_and_outbox_text(tmp_path):
     message_id = queue.enqueue("temporary transcript")
     queue.receive_inbound()
     cursor = queue.reply(message_id, "temporary answer", "reply")
+    queue.replies_after()
 
     queue.acknowledge_through(cursor)
 
@@ -148,6 +149,18 @@ def test_acknowledgement_removes_delivered_inbox_and_outbox_text(tmp_path):
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT count(*) FROM chat_inbox").fetchone()[0] == 0
         assert db.execute("SELECT count(*) FROM chat_outbox").fetchone()[0] == 0
+
+
+def test_acknowledgement_rejects_cursor_beyond_delivered_replies(tmp_path):
+    queue = ChatIpcQueue(tmp_path / "chat.db")
+    message_id = queue.enqueue("temporary transcript")
+    queue.receive_inbound()
+    cursor = queue.reply(message_id, "temporary answer", "reply")
+
+    with pytest.raises(ValueError):
+        queue.acknowledge_through(cursor + 1)
+
+    assert [reply["cursor"] for reply in queue.replies_after()] == [cursor]
 
 
 def test_acknowledgement_does_not_remove_unfinished_or_newer_messages(tmp_path):
@@ -159,6 +172,7 @@ def test_acknowledgement_does_not_remove_unfinished_or_newer_messages(tmp_path):
     queue.receive_inbound()
     old_cursor = queue.reply(finished_id, "done", "reply")
     newer_cursor = queue.reply(pending_id, "waiting", "queued")
+    queue.replies_after()
 
     queue.acknowledge_through(old_cursor)
 

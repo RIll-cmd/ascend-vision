@@ -126,7 +126,7 @@ class AssistantService:
             if not enabled or self._memory_store is None:
                 return AssistantReply("Memory is unavailable or disabled right now.", "offline")
             try:
-                matches = self._memory_store.active(match.group(1).strip().rstrip(".!?"))
+                matches = self._memory_store.active(match.group(1).strip().rstrip(".!?"), limit=None)
                 if len(matches) == 1 and self._memory_store.delete(matches[0]["id"]):
                     return AssistantReply("I forgot that approved memory.", "offline")
             except Exception as exc:
@@ -172,6 +172,13 @@ class AssistantService:
     def _record_turn(self, text, answer, enabled):
         if enabled and not self._suppress_session:
             self._turns.append((text, answer))
+            while self._turns:
+                payload = {"recent_turns": [
+                    {"user": user, "assistant": reply} for user, reply in self._turns
+                ]}
+                if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) <= CONTEXT_TEXT_BUDGET:
+                    break
+                self._turns.popleft()
 
     def _get_generator(self):
         if self._generator is not None:

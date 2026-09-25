@@ -123,6 +123,11 @@ class ChatIpcQueue:
                 """,
                 (cursor, limit),
             ).fetchall()
+            if rows:
+                connection.execute(
+                    "UPDATE chat_delivery SET max_sequence=MAX(max_sequence, ?) WHERE id=1",
+                    (int(rows[-1]["sequence"]),),
+                )
         return [
             {
                 "cursor": row["sequence"],
@@ -139,6 +144,11 @@ class ChatIpcQueue:
         if type(cursor) is not int or cursor < 0:
             raise ValueError("cursor must be a non-negative integer")
         with self._connection() as connection:
+            delivered = connection.execute(
+                "SELECT max_sequence FROM chat_delivery WHERE id=1"
+            ).fetchone()[0]
+            if cursor > delivered:
+                raise ValueError("cursor exceeds the highest delivered reply")
             connection.execute("DELETE FROM chat_outbox WHERE sequence <= ?", (cursor,))
             connection.execute(
                 """DELETE FROM chat_inbox
@@ -177,6 +187,11 @@ class ChatIpcQueue:
                                 status TEXT NOT NULL,
                                 created_at TEXT NOT NULL
                             );
+                            CREATE TABLE IF NOT EXISTS chat_delivery (
+                                id INTEGER PRIMARY KEY CHECK (id=1),
+                                max_sequence INTEGER NOT NULL DEFAULT 0
+                            );
+                            INSERT OR IGNORE INTO chat_delivery(id, max_sequence) VALUES (1, 0);
                             """
                         )
                         inbox_columns = {

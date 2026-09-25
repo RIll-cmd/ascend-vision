@@ -590,6 +590,31 @@ def test_feedback_service_conversational_chat():
         service.close()
 
 
+def test_feedback_service_does_not_log_chat_transcript(caplog):
+    caplog.set_level("INFO")
+    user_text = "my private phrase 91b3"
+    reply_text = "private assistant reply 72c4"
+    generator = Mock()
+    generator.generate_chat.return_value = reply_text
+    speaker = Mock()
+    speaker.speak.return_value = Mock(started=True, completed=True, error=None)
+    service = FeedbackService(
+        FeedbackConfig(enabled=True), cooldown_seconds=0.0,
+        generator=generator, speaker=speaker,
+    )
+    service.start()
+    try:
+        assert service.submit_chat(user_text, ConversationContext(user_text), cooldown=0.0)
+        deadline = time.monotonic() + 2.0
+        while not speaker.speak.called and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert speaker.speak.called
+        assert user_text not in caplog.text
+        assert reply_text not in caplog.text
+    finally:
+        service.close()
+
+
 def test_feedback_service_speaks_reply_from_bound_assistant():
     from assistant.service import AssistantReply
 

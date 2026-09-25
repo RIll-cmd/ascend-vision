@@ -12,10 +12,23 @@ PROPOSAL_LIFETIME = timedelta(hours=24)
 MAX_MEMORY_LENGTH = 500
 SENSITIVE_PATTERNS = (
     re.compile(r"\b(?:password|passphrase|api\s*key|access\s*token|secret|recovery\s*code|cookie)\b", re.I),
+    re.compile(r"\b(?:pin|passcode|security\s+code)\b.{0,16}\b\d{4,8}\b", re.I),
     re.compile(r"\b(?:credit\s*card|debit\s*card|payment\s*card|bank\s*account|account\s*number|routing\s*number|iban)\b", re.I),
+    re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)"),
     re.compile(r"\b(?:diagnos(?:is|ed)|diabetes|cancer|hiv|medication|prescription)\b", re.I),
     re.compile(r"\b(?:home\s*address|my\s+address|live\s+at\s+\d+\b)\b", re.I),
+    re.compile(r"\b\d{1,6}\s+(?:[\w.'-]+\s+){0,4}(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|way)\b", re.I),
 )
+SEARCH_STOPWORDS = frozenset({
+    "about", "after", "again", "all", "also", "and", "any", "are", "being", "but",
+    "can", "could", "did", "does", "for", "from", "get", "got", "had", "has",
+    "have", "her", "him", "his", "how", "into", "its", "just", "let", "may",
+    "me", "more", "most", "my", "not", "now", "off", "only", "other", "our",
+    "out", "over", "per", "same", "say", "see", "she", "some", "such", "than",
+    "that", "the", "their", "them", "then", "there", "these", "they", "this",
+    "those", "use", "via", "was", "way", "were", "what", "when", "where", "which",
+    "while", "who", "why", "will", "with", "would", "you", "your",
+})
 
 
 def _now() -> str:
@@ -141,20 +154,24 @@ class MemoryStore:
         with self._connection() as db:
             db.execute("DELETE FROM proposals")
 
-    def active(self, query: str = "") -> list[dict]:
+    def active(self, query: str = "", *, limit: int | None = 100) -> list[dict]:
         if not isinstance(query, str) or len(query) > 500:
             raise ValueError("Invalid memory query")
+        if limit is not None and (type(limit) is not int or limit < 1):
+            raise ValueError("Invalid memory limit")
         with self._connection() as db:
+            suffix = " LIMIT ?" if limit is not None else ""
             if query.strip():
                 rows = db.execute(
                     "SELECT id, category, text, created_at, updated_at FROM memories "
-                    "WHERE status='active' AND text LIKE ? ORDER BY id DESC LIMIT 100",
-                    ("%" + query.strip() + "%",),
+                    "WHERE status='active' AND instr(lower(text), lower(?)) > 0 ORDER BY id DESC" + suffix,
+                    (query.strip(), limit) if limit is not None else (query.strip(),),
                 ).fetchall()
             else:
                 rows = db.execute(
                     "SELECT id, category, text, created_at, updated_at FROM memories "
-                    "WHERE status='active' ORDER BY id DESC LIMIT 100"
+                    "WHERE status='active' ORDER BY id DESC" + suffix,
+                    (limit,) if limit is not None else (),
                 ).fetchall()
             return [dict(row) for row in rows]
 
@@ -191,7 +208,8 @@ class MemoryStore:
     def search(self, query: str, limit: int = 3) -> list[dict]:
         if not isinstance(query, str) or type(limit) is not int or not 1 <= limit <= 20:
             raise ValueError("Invalid memory search")
-        words = [word for word in re.findall(r"\w+", query.lower()) if len(word) > 2][:8]
+        words = [word for word in re.findall(r"\w+", query.lower())
+                 if len(word) > 2 and word not in SEARCH_STOPWORDS][:8]
         if not words:
             return []
         if not self.enabled():

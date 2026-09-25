@@ -564,7 +564,7 @@ class FeedbackService:
             self._last_chat_attempt = now
             try:
                 self._jobs.put_nowait(_ChatJob(user_text.strip(), context, max_words, now))
-                LOG.info('Chat job queued for: "%s"', user_text.strip())
+                LOG.info('Chat job queued')
                 return True
             except queue.Full:
                 self._chat_busy = False
@@ -747,11 +747,11 @@ class FeedbackService:
                                 reply_text = get_fallback_chat_reply(job.user_text, job.context)
                             if not reply_text:
                                 reply_text = get_fallback_chat_reply(job.user_text, job.context)
-                            LOG.info('CONVERSATIONAL_REPLY: "%s"', reply_text)
+                            LOG.info('Conversational reply generated')
                             if reply_text and not self._speech_cancelled(speech_generation):
                                 self._speak_text(reply_text, lambda: self._speech_cancelled(speech_generation))
                     except Exception as err:
-                        LOG.error('Conversational chat generation/speech failed: %s', err)
+                        LOG.error('Conversational chat generation/speech failed (%s)', type(err).__name__)
                     finally:
                         with self._lock:
                             self._chat_busy = False

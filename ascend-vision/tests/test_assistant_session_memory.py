@@ -59,6 +59,15 @@ def test_recent_window_drops_old_turns_and_respects_byte_budget(tmp_path):
     assert len(json.dumps(turns).encode("utf-8")) <= 3000
 
 
+def test_retained_session_turns_obey_byte_budget_even_for_long_model_output(tmp_path):
+    generator = RecordingGenerator(reply="reply " + "y" * 4_000)
+    assistant = AssistantService(FeedbackConfig(), generator=generator)
+
+    assistant.respond("user " + "x" * 1_900)
+
+    assert len(assistant._turns) == 0
+
+
 def test_remember_command_creates_only_a_proposal(tmp_path):
     store = MemoryStore(tmp_path / "memory.db")
     generator = RecordingGenerator()
@@ -85,6 +94,17 @@ def test_memory_list_and_forget_commands_are_deterministic(tmp_path):
     assert "forgot" in forgotten.text.lower()
     assert store.active() == []
     assert generator.payloads == []
+
+
+def test_forget_treats_percent_as_literal_text(tmp_path):
+    store = MemoryStore(tmp_path / "memory.db")
+    store.approve(store.propose("I prefer green tea"))
+    assistant = AssistantService(FeedbackConfig(), generator=RecordingGenerator(), memory_store=store)
+
+    reply = assistant.respond("Forget %")
+
+    assert "could not find" in reply.text.lower()
+    assert store.active()[0]["text"] == "I prefer green tea"
 
 
 def test_do_not_remember_clears_window_and_proposals(tmp_path):

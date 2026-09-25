@@ -147,6 +147,8 @@ def create_app(config, chat_queue=None, memory_store=None):
             return jsonify(error='A non-negative cursor is required.'), 400
         try:
             queue.acknowledge_through(cursor)
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
         except Exception as exc:
             LOG.warning('Dashboard chat acknowledgement failed (%s)', type(exc).__name__)
             return jsonify(error='Vision chat is temporarily unavailable.'), 503
@@ -169,7 +171,7 @@ def create_app(config, chat_queue=None, memory_store=None):
         if memory_store is None:
             return jsonify(error='Vision memory is temporarily unavailable.'), 503
         try:
-            response = jsonify(memories=memory_store.active())
+            response = jsonify(memories=memory_store.active(limit=None))
             response.headers['Content-Disposition'] = 'attachment; filename="vision-memories.json"'
             return response
         except Exception as exc:

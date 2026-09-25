@@ -486,6 +486,19 @@ def test_dashboard_memory_approval_edit_delete_and_export(tmp_path):
     assert memory_client.get('/api/memory').json['active'] == []
 
 
+def test_dashboard_memory_export_includes_all_approved_facts(tmp_path):
+    store = MemoryStore(tmp_path / 'assistant_memory.db')
+    for index in range(101):
+        store.approve(store.propose(f'Favorite item {index}'))
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    memory_client = create_app(cfg, memory_store=store).test_client()
+
+    exported = memory_client.get('/api/memory/export')
+
+    assert exported.status_code == 200
+    assert len(exported.json['memories']) == 101
+
+
 def test_dashboard_memory_reject_and_disable_do_not_delete_approved_facts(tmp_path):
     store = MemoryStore(tmp_path / 'assistant_memory.db')
     active = store.approve(store.propose('I prefer tea'))
@@ -525,6 +538,7 @@ def test_chat_acknowledgement_removes_rendered_reply_text(tmp_path):
     message_id = queue.enqueue('temporary message')
     queue.receive_inbound()
     cursor = queue.reply(message_id, 'temporary reply', 'reply')
+    queue.replies_after()
     cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
     chat_client = create_app(cfg, chat_queue=queue).test_client()
 
@@ -544,6 +558,20 @@ def test_chat_acknowledgement_rejects_malformed_cursor(tmp_path, payload):
     response = chat_client.post('/api/chat/ack', json=payload)
 
     assert response.status_code == 400
+
+
+def test_chat_acknowledgement_rejects_undelivered_cursor(tmp_path):
+    queue = ChatIpcQueue(tmp_path/'chat.db')
+    message_id = queue.enqueue('temporary message')
+    queue.receive_inbound()
+    cursor = queue.reply(message_id, 'temporary reply', 'reply')
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    chat_client = create_app(cfg, chat_queue=queue).test_client()
+
+    response = chat_client.post('/api/chat/ack', json={'cursor': cursor + 1})
+
+    assert response.status_code == 400
+    assert queue.replies_after()[0]['cursor'] == cursor
 
 
 def test_dashboard_memory_mutation_keeps_local_origin_protection(tmp_path):

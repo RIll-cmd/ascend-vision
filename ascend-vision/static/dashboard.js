@@ -259,6 +259,7 @@ const chatMessages=$('chat-messages');
 const chatLiveStatus=$('chat-live-status');
 const chatSend=$('chat-send');
 let chatCursor=0;
+let chatPendingAckCursor=0;
 let chatPollActive=false;
 
 function appendChatMessage(text,kind,status=''){
@@ -280,6 +281,15 @@ async function pollChatReplies(){
   if(!chatMessages||chatPollActive)return;
   chatPollActive=true;
   try{
+    if(chatPendingAckCursor){
+      try{
+        const ack=await fetch('/api/chat/ack',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({cursor:chatPendingAckCursor}),
+        });
+        if(ack.ok)chatPendingAckCursor=0;
+      }catch(_error){ /* Retry on the next poll. */ }
+    }
     const response=await fetch(`/api/chat/messages?after=${chatCursor}`,{cache:'no-store'});
     const payload=await response.json().catch(()=>null);
     if(!response.ok||!payload)throw new Error('Vision replies are unavailable.');
@@ -293,16 +303,18 @@ async function pollChatReplies(){
             ?`Vision could not complete the request: ${message.text}`
             :`Vision: ${message.text}`;
     }
-    chatCursor=payload.cursor;
     if(payload.messages.length){
+      chatCursor=payload.cursor;
+      chatPendingAckCursor=chatCursor;
       try{
-        await fetch('/api/chat/ack',{
+        const ack=await fetch('/api/chat/ack',{
           method:'POST',
           headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({cursor:chatCursor}),
+          body:JSON.stringify({cursor:chatPendingAckCursor}),
         });
+        if(ack.ok)chatPendingAckCursor=0;
       }catch(_error){
-        // The queue's age limit also removes replies if acknowledgement is interrupted.
+        // Retry acknowledgement on the next poll; the replies were already rendered.
       }
     }
   }catch(error){
