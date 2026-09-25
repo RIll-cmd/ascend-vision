@@ -150,6 +150,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                                  update_seconds=config.storage.update_seconds)
         resources.callback(manager.close)
         manager.start(config.sessions.initial_mode)
+        chat_session_started_at = time.perf_counter()
         controls = DesktopControls(config.sessions, manager)
         resources.callback(controls.close)
         controls.start()
@@ -365,7 +366,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 session_id=manager.session_id,
                 mode=manager.mode,
                 database_path=config.storage.database,
-                started_at=start,
+                started_at=chat_session_started_at,
             )
 
         def route_chat(text: str):
