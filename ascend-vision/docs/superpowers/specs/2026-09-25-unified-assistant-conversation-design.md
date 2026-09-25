@@ -1,6 +1,6 @@
 # Unified Assistant Conversation Design
 
-**Date:** 2026-09-25  
+**Date:** 2026-09-25
 **Milestone:** First deliverable in the AI Assistant Future Features Audit and Implementation Roadmap
 
 ## Goal
@@ -56,13 +56,15 @@ The context contains counts and mode only. No frames, microphone audio, provider
 ## Failure and lifecycle behavior
 
 - No provider key: use `OfflineRoaster`; dashboard receives its text.
+- The existing voice feedback worker still requires its normal startup prerequisites. With no provider key and no injected speaker, it remains disabled, so this milestone does not add spoken offline chat.
 - Provider error or empty answer: use the existing offline chat fallback and log only the exception class.
 - Empty input to the service: raise `ValueError`; dashboard route already rejects empty text at enqueue.
 - Assistant handler raises: the bridge writes its existing safe `error` reply.
 - Handler returns no text: the bridge writes a safe `error` reply.
+- A transient SQLite queue read failure: the bridge logs it, waits, and retries without ending the consumer thread.
 - Vision runtime is absent: the dashboard message stays queued and its UI continues to show “Waiting for Vision.”
 - Dashboard queue cannot open: Vision logs the error class and continues camera monitoring; dashboard chat is unavailable for that run.
-- Vision shutdown: stop the bridge before closing the session database and feedback service.
+- Vision shutdown: stop the bridge before closing the session database and feedback service. An in-flight synchronous provider call may finish after the stop request, but its late result is discarded rather than published.
 - Repeated start of a bridge remains an error; one runtime process owns the consumer.
 
 ## Security and scope
@@ -71,6 +73,7 @@ The context contains counts and mode only. No frames, microphone audio, provider
 - No token, API key, raw model payload, camera frame, or audio recording is persisted in the IPC queue.
 - The local dashboard remains restricted to loopback.
 - This milestone adds no conversational persistence or long-term memory.
+- Claimed dashboard messages interrupted by a process exit are not yet reclaimed automatically; durable claim recovery is a separate queue-hardening follow-up.
 - Hub status, Core mutations, MCP, skills, and phone chat remain separate milestones.
 
 ## Acceptance criteria

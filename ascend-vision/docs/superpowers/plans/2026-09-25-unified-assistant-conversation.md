@@ -29,12 +29,12 @@
 | `assistant/service.py` | Validate chat input, select existing online/offline generator, serialize calls, return `AssistantReply`. |
 | `assistant/context.py` | Build `ConversationContext` using a separate SQLite count reader. |
 | `feedback.py` | Bind the assistant service and use it in `_ChatJob` speech handling. |
-| `integrations/chat_runtime.py` | Convert a missing handler result into a safe error. |
+| `integrations/chat_runtime.py` | Convert a missing handler result into a safe error, retry transient queue reads, and discard late answers after shutdown. |
 | `main.py` | Instantiate and bind the service, share context creation, start and stop the dashboard bridge. |
 | `tests/test_assistant_service.py` | Unit tests for real service behavior with controlled generator input. |
 | `tests/test_assistant_context.py` | Context count and database failure tests. |
 | `tests/test_voice_commands.py` | Bound assistant to spoken reply test. |
-| `tests/test_chat_runtime.py` | Missing-answer status test. |
+| `tests/test_chat_runtime.py` | Missing-answer status, queue-read retry, and shutdown race tests. |
 | `tests/test_main.py` | Synthetic queue-to-reply runtime test. |
 
 ### Task 1: Synchronous assistant reply service
@@ -187,10 +187,10 @@ Only initialize the legacy generator when no assistant is bound. Preserve the ex
 - Consumes: `AssistantService`, `build_conversation_context`, `ChatIpcQueue`, and `ChatRuntimeBridge`.
 - Produces: `run(..., assistant_service=None)` for controlled integration testing; dashboard IPC retains its existing `messageId`, `text`, and `status` contract.
 
-- [ ] **Step 1: Write failing bridge behavior test.** Queue a message, run `ChatRuntimeBridge` with a handler returning `None`, and assert the outbox contains `status == 'error'` and its text is the safe `ERROR_REPLY`. This catches the current false success acknowledgement.
+- [ ] **Step 1: Write failing bridge behavior tests.** Queue a message, run `ChatRuntimeBridge` with a handler returning `None`, and assert the outbox contains `status == 'error'` and its text is the safe `ERROR_REPLY`. This catches the current false success acknowledgement. Also inject one transient `sqlite3.OperationalError` from `receive_inbound()` and verify the bridge recovers, and block an in-flight handler until after `stop()` to verify its late reply is not published.
 - [ ] **Step 2: Write failing runtime integration tests.** POST `"How is focus going?"` through `dashboard.create_app(config, chat_queue=ChatIpcQueue(tmp_path / 'chat_ipc.db')).test_client()`. Use the existing synthetic camera fakes, a temporary storage database, disabled Core integration, and a fake assistant returning `AssistantReply("Your focus is steady.", "model")`. Let the synthetic capture wait briefly for the dashboard GET response, then stop. Assert the polled `messageId`, `text`, and `status` match the submitted message and answer. In a second test, replace `integrations.chat_ipc.ChatIpcQueue` with a callable that raises `OSError('private storage path')`; assert `run()` still processes synthetic camera frames and closes capture.
 - [ ] **Step 3: Run both tests to verify red.** Run `D:\ascend-vision\ascend-vision\.venv\Scripts\python.exe -m pytest tests/test_chat_runtime.py tests/test_main.py -q`; expect the missing-answer test to fail on `reply`, and the runtime test to fail because `run` has no `assistant_service` parameter or does not start a bridge.
-- [ ] **Step 4: Implement the runtime connection.** Make `ChatRuntimeBridge` reject empty/None handler results as safe errors. In `main.py`, build one service after feedback setup, bind it, and use this handler and startup sequence before the camera loop:
+- [ ] **Step 4: Implement the runtime connection.** Make `ChatRuntimeBridge` reject empty/None handler results as safe errors, retry transient queue reads, and synchronize stop with publishing so late in-flight answers are discarded. In `main.py`, build one service after feedback setup, bind it, and use this handler and startup sequence before the camera loop:
 
 ```python
 def chat_context(text):
