@@ -67,9 +67,13 @@ def test_status_intents_are_recognized(question):
 
 @pytest.mark.parametrize("question, target, asks_completion", [
     ("What is Claude's status?", "claude", False),
+    ("what is claude's status?", "claude", False),
+    ("What is Claude's activity?", "claude", False),
     ("What is Claude doing?", "claude", False),
     ("Is Claude running?", "claude", False),
     ("Is Claude active?", "claude", False),
+    ("Is Claude still working?", "claude", False),
+    ("is claude still active?", "claude", False),
     ("Did Claude finish its work?", "claude", True),
 ])
 def test_explicit_unknown_agent_status_targets_the_named_agent(question, target, asks_completion):
@@ -82,7 +86,10 @@ def test_explicit_unknown_agent_status_targets_the_named_agent(question, target,
 
 @pytest.mark.parametrize("question", [
     "What is my focus status?",
+    "What is My Focus's status?",
+    "what is my focus's status?",
     "Is my focus active?",
+    "Is My Focus still active?",
     "How is my vision?",
     "What is my vision status?",
     "Tell me about my memory",

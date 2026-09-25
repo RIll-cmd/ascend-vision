@@ -9,7 +9,7 @@ from integrations.status_shelf import ShelfService, ShelfSnapshot
 
 
 _STATUS_WORDS = re.compile(
-    r"\b(?:status|statuses|doing|working|running|active|idle|online|offline|available|finish|finished|complete|completed|done|blocked|stuck|progress)\b",
+    r"\b(?:status|statuses|activity|doing|working|running|active|idle|online|offline|available|finish|finished|complete|completed|done|blocked|stuck|progress)\b",
     re.I,
 )
 _SUBJECT_WORDS = re.compile(
@@ -17,12 +17,18 @@ _SUBJECT_WORDS = re.compile(
     re.I,
 )
 _COMPLETION_WORDS = re.compile(r"\b(?:finish|finished|done|completed|complete)\b", re.I)
-_AGENT_NAME = r"[A-Z][A-Za-z0-9_-]*(?:\s+[A-Z][A-Za-z0-9_-]*)*"
+_AGENT_NAME = (
+    r"[A-Za-z][A-Za-z0-9_-]*"
+    r"(?:\s+(?!(?i:still|currently|now)\b)[A-Za-z][A-Za-z0-9_-]*){0,2}"
+)
 _EXPLICIT_NAMES = (
-    re.compile(rf"\b(?P<name>{_AGENT_NAME})['’]s\s+(?:status|activity|progress)\b"),
+    re.compile(
+        rf"\b(?i:what\s+is|what's|how\s+is|how's)\s+"
+        rf"(?P<name>{_AGENT_NAME})['’]s\s+(?i:status|activity|progress)\b"
+    ),
     re.compile(
         rf"\b(?i:what\s+is|what's|how\s+is|how's|is|are|has|have|did)\s+"
-        rf"(?P<name>{_AGENT_NAME})\s+"
+        rf"(?P<name>{_AGENT_NAME})\s+(?:(?i:still|currently|now)\s+)?"
         r"(?i:doing|working|running|active|idle|online|offline|available|finish|finished|complete|completed|done|blocked|stuck)\b",
     ),
 )
@@ -70,7 +76,9 @@ def parse_status_intent(text: str) -> StatusIntent | None:
         for match in pattern.finditer(text):
             start, end = match.span("name")
             name = _normalized(match.group("name"))
-            if name not in {"ascend hub", "ai", "ais", "agent", "agents"} and not any(
+            if name not in {"ascend hub", "ai", "ais", "agent", "agents"} and name.split()[0] not in {
+                "my", "your", "our", "his", "her", "their", "the", "a", "an"
+            } and not any(
                 start < existing_end and end > existing_start
                 for existing_start, existing_end, _ in matches
             ):
