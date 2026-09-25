@@ -645,6 +645,59 @@ def test_feedback_service_speaks_reply_from_bound_assistant():
         service.close()
 
 
+def test_bound_assistant_enables_voice_without_model_api_key(monkeypatch):
+    from assistant.service import AssistantReply
+
+    for key in ('GEMINI_API_KEY', 'GROQ_API_KEY', 'CEREBRAS_API_KEY'):
+        monkeypatch.delenv(key, raising=False)
+
+    class Assistant:
+        def respond(self, user_text, context, *, max_words):
+            return AssistantReply('Antigravity is idle.', 'tool')
+
+    service = FeedbackService(
+        FeedbackConfig(enabled=True, tts_engine='pyttsx3'), cooldown_seconds=0.0,
+    )
+    service.bind_assistant(Assistant())
+    service.start()
+    try:
+        assert service.enabled
+    finally:
+        service.close()
+
+
+def test_voice_chat_speaks_verified_hub_status_without_model_call():
+    from assistant.service import AssistantService
+    from assistant.tool_runtime import ToolRuntime, ToolSpec
+    from integrations.status_shelf import ShelfService, ShelfSnapshot
+
+    moment = datetime.now(timezone.utc)
+    snapshot = ShelfSnapshot(moment, (
+        ShelfService('antigravity', 'desktop', 'agent', 'idle', moment, moment, 30),
+    ))
+    runtime = ToolRuntime()
+    runtime.register(ToolSpec('hub_status', 1, 'read-only', frozenset(), ShelfSnapshot),
+                     lambda: snapshot)
+    generator = Mock()
+    assistant = AssistantService(FeedbackConfig(), generator=generator, tool_runtime=runtime)
+    speaker = Mock()
+    speaker.speak.return_value = Mock(started=True, completed=True, error=None)
+    service = FeedbackService(FeedbackConfig(enabled=True), cooldown_seconds=0.0,
+                              generator=Mock(), speaker=speaker)
+    service.bind_assistant(assistant)
+    service.start()
+    try:
+        question = "What is Antigravity's status?"
+        assert service.submit_chat(question, ConversationContext(question), cooldown=0.0)
+        deadline = time.monotonic() + 2.0
+        while not speaker.speak.called and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert speaker.speak.call_args.args[0] == 'Antigravity is idle.'
+        generator.generate_chat.assert_not_called()
+    finally:
+        service.close()
+
+
 def test_voice_command_config_conversational_schema():
     # Valid default
     cfg = VoiceCommandConfig()

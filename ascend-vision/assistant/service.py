@@ -11,29 +11,34 @@ import re
 import threading
 from typing import Literal
 
+from assistant.hub_status import parse_status_intent, render_status_answer
+from assistant.tool_runtime import ToolRuntime
 from feedback import ConversationContext, LLMRoaster, OfflineRoaster, get_fallback_chat_reply
 from llm_router import get_router
 
 
 LOG = logging.getLogger(__name__)
 CONTEXT_TEXT_BUDGET = 3_000
+STATUS_UNAVAILABLE_TEXT = "I cannot verify Ascend Hub AI status right now."
 
 
 @dataclass(frozen=True)
 class AssistantReply:
     text: str
-    source: Literal["model", "offline"]
+    source: Literal["model", "offline", "tool"]
 
 
 class AssistantService:
     """Returns one answer per request while protecting a shared generator."""
 
-    def __init__(self, feedback_config, llm_config=None, *, generator=None, memory_store=None):
+    def __init__(self, feedback_config, llm_config=None, *, generator=None, memory_store=None,
+                 tool_runtime: ToolRuntime | None = None):
         self._feedback_config = feedback_config
         self._llm_config = llm_config
         self._generator = generator
         self._generator_source: Literal["model", "offline"] = "model"
         self._memory_store = memory_store
+        self._tool_runtime = tool_runtime
         self._turns: deque[tuple[str, str]] = deque(maxlen=12)
         self._suppress_session = False
         self._lock = threading.RLock()
@@ -54,6 +59,16 @@ class AssistantService:
             command_reply = self._memory_command(text, memory_enabled, max_words)
             if command_reply is not None:
                 return command_reply
+            status_intent = parse_status_intent(text)
+            if status_intent is not None:
+                if self._tool_runtime is None:
+                    return AssistantReply(STATUS_UNAVAILABLE_TEXT, "offline")
+                try:
+                    snapshot = self._tool_runtime.start_request().call("hub_status", {})
+                    return AssistantReply(render_status_answer(status_intent, snapshot), "tool")
+                except Exception as exc:
+                    LOG.warning("Hub status unavailable (%s)", type(exc).__name__)
+                    return AssistantReply(STATUS_UNAVAILABLE_TEXT, "offline")
             prompt_context, memory_ready = self._with_memory_context(text, context, memory_enabled)
             try:
                 generator = self._get_generator()

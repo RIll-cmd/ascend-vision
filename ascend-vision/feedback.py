@@ -621,8 +621,8 @@ class FeedbackService:
             or bool(os.environ.get('GROQ_API_KEY', '').strip())
             or bool(os.environ.get('CEREBRAS_API_KEY', '').strip())
         )
-        if self._generator is None and self._speaker is None and not has_keys:
-            LOG.warning('Feedback unavailable: set %s, GROQ_API_KEY, or CEREBRAS_API_KEY. Detection and logging remain active.', self.config.api_key_env)
+        if self._generator is None and self._speaker is None and not has_keys and self._assistant_service is None:
+            LOG.warning('Feedback unavailable: set %s, GROQ_API_KEY, or CEREBRAS_API_KEY, or bind an assistant. Detection and logging remain active.', self.config.api_key_env)
             return
         if self._thread is not None or self._stop.is_set():
             raise RuntimeError('FeedbackService is single-use')

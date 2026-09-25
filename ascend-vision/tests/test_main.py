@@ -388,6 +388,144 @@ def test_runtime_discards_old_proposals_but_keeps_approved_memories(tmp_path):
     assert 'green tea' in reply['text'].lower()
 
 
+def test_runtime_answers_dashboard_hub_status_with_dedicated_credential(tmp_path, monkeypatch):
+    from dashboard import create_app
+    from integrations.chat_ipc import ChatIpcQueue
+    from integrations.status_shelf import ShelfService, ShelfSnapshot
+
+    now = datetime.now(timezone.utc)
+    opened = []
+
+    class Reader:
+        def __init__(self, base_url, credential, *, timeout_seconds):
+            opened.append((base_url, credential, timeout_seconds))
+
+        def read(self):
+            return ShelfSnapshot(now, (
+                ShelfService('codex-cli', 'desktop', 'agent', 'working', now, now, 30),
+            ))
+
+    monkeypatch.setattr('main.StatusShelfReader', Reader, raising=False)
+    monkeypatch.setenv('ASCEND_CORE_BASE_URL', 'http://localhost:8000')
+    monkeypatch.setenv('ASCEND_STATUS_READ_CREDENTIAL', 'reader-id.reader-secret')
+    database_path = tmp_path / 'session.db'
+    queue = ChatIpcQueue(tmp_path / 'chat_ipc.db')
+    config = replace(
+        Config(runtime=RuntimeConfig(preview=False)),
+        storage=replace(Config().storage, database=database_path),
+        feedback=replace(Config().feedback, enabled=False),
+    )
+    client = create_app(config, chat_queue=queue).test_client()
+    submission = client.post('/api/chat/messages', json={'text': 'Is Codex CLI still working?'})
+
+    class WaitingStream(Stream):
+        def read(self, after_sequence, timeout):
+            frame = super().read(after_sequence, timeout)
+            if self.sequence == 1:
+                return frame
+            deadline = time.monotonic() + 2.0
+            while not client.get('/api/chat/messages?after=0').json['messages'] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not client.get('/api/chat/messages?after=0').json['messages']:
+                raise AssertionError('Vision did not answer the status query')
+            raise KeyboardInterrupt
+
+    class Face:
+        def detect(self, _frame, _timestamp):
+            return []
+
+        def close(self):
+            pass
+
+    run(config, detector=Detector(), capture=WaitingStream(), hand_tracker=Hands(),
+        face_tracker=Face(), voice_listener=False)
+
+    reply = client.get('/api/chat/messages?after=0').json['messages'][0]
+    assert reply['messageId'] == submission.json['messageId']
+    assert reply['text'] == 'Codex CLI is working.'
+    assert opened == [('http://localhost:8000', 'reader-id.reader-secret', 3.0)]
+
+
+def test_microphone_hub_status_reaches_assistant_without_replacing_session_status(tmp_path, monkeypatch):
+    from voice_listener import VoiceCommandParser
+
+    chats = []
+    announcements = []
+
+    class Feedback:
+        enabled = False
+
+        def __init__(self, *_args):
+            pass
+
+        def start(self):
+            assert hasattr(self, 'assistant')
+
+        def set_session(self, _session):
+            pass
+
+        def bind_assistant(self, assistant):
+            self.assistant = assistant
+
+        def submit_chat(self, text, _context, **_kwargs):
+            chats.append(text)
+            return True
+
+        def speak_announcement(self, text):
+            announcements.append(text)
+            return True
+
+        def is_muted(self):
+            return False
+
+        def is_speaking(self):
+            return False
+
+        def drain(self):
+            return []
+
+        def close(self):
+            pass
+
+    class Listener:
+        def __init__(self, _config, *, callback, unmatched_callback, is_speaking):
+            self.callback = callback
+            self.unmatched_callback = unmatched_callback
+
+        def start(self):
+            parser = VoiceCommandParser()
+            self.callback(parser.parse("What is Antigravity's status?"))
+            self.unmatched_callback("Is Codex CLI still working?")
+            self.callback(parser.parse("status report"))
+
+        def close(self):
+            pass
+
+    class Face:
+        def detect(self, _frame, _timestamp):
+            return []
+
+        def close(self):
+            pass
+
+    config = Config(runtime=RuntimeConfig(preview=False))
+    config = replace(
+        config,
+        storage=replace(config.storage, database=tmp_path / 'session.db'),
+        ascend=replace(config.ascend, enabled=False),
+        feedback=replace(config.feedback, enabled=False),
+        voice_commands=replace(config.voice_commands, enabled=True),
+    )
+    monkeypatch.setattr('main.FeedbackService', Feedback)
+    monkeypatch.setattr('main.VoiceCommandListener', Listener)
+
+    run(config, detector=Detector(), capture=Stream(), hand_tracker=Hands(), face_tracker=Face())
+
+    assert chats == ["What is Antigravity's status?", "Is Codex CLI still working?"]
+    assert len(announcements) == 1
+    assert announcements[0].startswith('Session status:')
+
+
 def test_memory_storage_failure_keeps_camera_and_dashboard_chat_available(tmp_path, monkeypatch):
     from dashboard import create_app
     from integrations.chat_ipc import ChatIpcQueue
