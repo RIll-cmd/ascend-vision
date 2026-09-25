@@ -1,11 +1,14 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import threading
 import time
 
 import pytest
 
 from assistant.service import AssistantService
+from assistant.tool_runtime import ToolRuntime, ToolSpec
 from config import FeedbackConfig, LLMConfig
+from integrations.status_shelf import ShelfService, ShelfSnapshot
 
 
 class Generator:
@@ -84,3 +87,68 @@ def test_assistant_serializes_generator_calls_from_two_channels():
 
     assert {reply.text for reply in replies} == {"voice", "dashboard"}
     assert generator.max_active == 1
+
+
+def status_runtime(reader=None):
+    moment = datetime(2026, 9, 25, 12, tzinfo=timezone.utc)
+    snapshot = ShelfSnapshot(moment, (
+        ShelfService("codex-cli", "desktop", "agent", "working", moment, moment, 30),
+    ))
+    runtime = ToolRuntime()
+    runtime.register(ToolSpec("hub_status", 1, "read-only", frozenset(), ShelfSnapshot),
+                     reader or (lambda: snapshot))
+    return runtime
+
+
+def test_assistant_answers_hub_status_without_model_or_stale_session_history():
+    generator = Generator("I guess Codex is idle")
+    service = AssistantService(FeedbackConfig(), generator=generator,
+                               tool_runtime=status_runtime())
+
+    reply = service.respond("Is Codex CLI still working?")
+    service.respond("Hello")
+
+    assert reply.text == "Codex CLI is working."
+    assert reply.source == "tool"
+    assert len(generator.calls) == 1
+    assert generator.calls[0][1] is None
+
+
+def test_assistant_fails_closed_when_hub_status_tool_is_unavailable():
+    generator = Generator("I guess it is finished")
+    service = AssistantService(FeedbackConfig(), generator=generator)
+
+    reply = service.respond("Did Antigravity finish its work?")
+
+    assert "cannot verify" in reply.text.lower()
+    assert "finished" not in reply.text.lower()
+    assert generator.calls == []
+
+
+def test_assistant_fails_closed_when_hub_status_reader_raises():
+    def failing_reader():
+        raise RuntimeError("private credential")
+
+    generator = Generator("I guess it is idle")
+    service = AssistantService(FeedbackConfig(), generator=generator,
+                               tool_runtime=status_runtime(failing_reader))
+
+    reply = service.respond("What is Ascend Hub doing?")
+
+    assert "cannot verify" in reply.text.lower()
+    assert "private credential" not in reply.text
+    assert generator.calls == []
+
+
+def test_unrelated_chat_does_not_fetch_hub_status():
+    def failing_reader():
+        raise AssertionError("status tool should not run")
+
+    generator = Generator("Your focus is going well.")
+    service = AssistantService(FeedbackConfig(), generator=generator,
+                               tool_runtime=status_runtime(failing_reader))
+
+    reply = service.respond("What is my focus status?")
+
+    assert reply.source == "model"
+    assert len(generator.calls) == 1
