@@ -13,6 +13,7 @@ class FakeInteraction:
         self.user = SimpleNamespace(id=user_id)
         self.guild_id = guild_id
         self.events = []
+        self.expired = False
         self.response = SimpleNamespace(defer=self.defer)
 
     async def defer(self, *, ephemeral, thinking):
@@ -22,7 +23,7 @@ class FakeInteraction:
         self.events.append(("edit", content, allowed_mentions))
 
     def is_expired(self):
-        return False
+        return self.expired
 
 
 class FakeCore:
@@ -121,6 +122,62 @@ def test_unlinked_user_cannot_use_chat_commands(command, args):
 
     assert [event[0] for event in interaction.events] == ["defer", "verify", "edit"]
     assert "/link" in interaction.events[-1][1]
+
+
+def test_revoked_link_blocks_the_next_command_without_using_previous_session():
+    interaction = FakeInteraction()
+    bot = bot_for(interaction, cooldown_seconds=0)
+
+    async def run():
+        await bot.handle_ask(interaction, "before revoke")
+        bot.core.linked = False
+        later = FakeInteraction()
+        await bot.handle_ask(later, "after revoke")
+        assert [event[0] for event in later.events] == ["defer", "edit"]
+        assert "/link" in later.events[-1][1]
+        assert not any(event[0] == "handle" for event in later.events)
+        await bot.close()
+
+    asyncio.run(run())
+    assert len([event for event in interaction.events if event[0] == "handle"]) == 1
+
+
+def test_expired_pairing_code_never_reports_link_success():
+    interaction = FakeInteraction()
+    bot = bot_for(interaction, linked=False)
+
+    async def run():
+        await bot.handle_link(interaction, "A" * 43)
+        await bot.close()
+
+    asyncio.run(run())
+    assert interaction.events[1] == ("consume", "A" * 43, "123456789012345678")
+    assert "invalid or expired" in interaction.events[-1][1]
+    assert "is linked" not in interaction.events[-1][1]
+
+
+@pytest.mark.parametrize("command,args", [
+    ("handle_ask", ("private prompt",)),
+    ("handle_link", ("A" * 43,)),
+])
+def test_core_unavailable_fails_closed_without_leaking_exception(command, args, caplog):
+    interaction = FakeInteraction()
+    bot = bot_for(interaction)
+
+    async def unavailable(*_args):
+        raise httpx.ConnectError("private prompt and bridge-secret in provider detail")
+
+    bot.core.verify_link = unavailable
+    bot.core.consume_link = unavailable
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(getattr(bot, command)(interaction, *args))
+
+    assert [event[0] for event in interaction.events] == ["defer", "edit"]
+    assert "unavailable" in interaction.events[-1][1]
+    assert "linked" not in interaction.events[-1][1]
+    assert "private prompt" not in interaction.events[-1][1]
+    assert "private prompt" not in caplog.text
+    assert "bridge-secret" not in caplog.text
 
 
 def test_status_uses_fixed_question_and_newchat_clears_only_discord_key():
@@ -271,6 +328,67 @@ def test_process_logging_does_not_emit_provider_exception_details(caplog):
         assert "private prompt" not in caplog.text
     finally:
         router_log.setLevel(original)
+
+
+def test_gateway_offline_closes_the_optional_process_without_a_success_signal():
+    from discord_bot import _serve
+
+    class OfflineBot:
+        def __init__(self):
+            self.events = []
+
+        async def start(self):
+            self.events.append("start")
+            raise ConnectionError("Gateway unavailable")
+
+        async def close(self):
+            self.events.append("close")
+
+    bot = OfflineBot()
+    with pytest.raises(ConnectionError, match="Gateway unavailable"):
+        asyncio.run(_serve(bot))
+    assert bot.events == ["start", "close"]
+
+
+def test_shutdown_during_an_interaction_does_not_emit_a_late_success_reply():
+    from integrations.discord_phone_bot import DiscordPhoneBot
+
+    class BlockingHandler:
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def handle(self, owner, channel, session, text):
+            self.started.set()
+            self.release.wait(2)
+            self.finished.set()
+            return SimpleNamespace(text="late private answer")
+
+        def clear_session(self, owner, channel, session):
+            pass
+
+    async def run():
+        handler = BlockingHandler()
+        interaction = FakeInteraction()
+        bot = DiscordPhoneBot(FakeCore(interaction.events), handler,
+                              owner_id="owner-a", token="bot-secret",
+                              application_id=123456789012345678)
+        pending = asyncio.create_task(bot.handle_ask(interaction, "private prompt"))
+        try:
+            assert await asyncio.to_thread(handler.started.wait, 1)
+            interaction.expired = True
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+            await bot.close()
+        finally:
+            handler.release.set()
+            assert await asyncio.to_thread(handler.finished.wait, 1)
+        await asyncio.sleep(0)
+        assert not any(event[0] == "edit" for event in interaction.events)
+        assert bot._active_owners == set()
+
+    asyncio.run(run())
 
 
 def test_burst_is_rejected_and_newchat_waits_for_ask_before_clearing():
