@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import logging
+import math
 import os
 import re
+import time
 from typing import Mapping
 from urllib.parse import urlsplit
 
@@ -19,6 +21,7 @@ _CODE = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 _STATUS_QUESTION = "What is the status of Ascend Hub AI agents?"
 _ERROR = "Vision is unavailable right now. Please try again."
 _LINK_FIRST = "This Discord account is not linked. Create a code in phone chat, then use /link."
+_BUSY = "Vision is busy. Please try again in a moment."
 
 
 @dataclass(frozen=True)
@@ -117,13 +120,24 @@ class DiscordPhoneBot:
     """DM-only command router; Core rechecks the active link on each chat command."""
 
     def __init__(self, core, handler, *, owner_id: str, token: str,
-                 application_id: int, sync_commands: bool = False):
+                 application_id: int, sync_commands: bool = False,
+                 cooldown_seconds: float = 2.0, work_timeout_seconds: float = 600.0):
         if not owner_id or not token or type(application_id) is not int or application_id <= 0:
             raise ValueError("Discord bot identity is incomplete")
+        if (type(cooldown_seconds) not in (int, float) or not math.isfinite(cooldown_seconds)
+                or not 0 <= cooldown_seconds <= 60):
+            raise ValueError("Discord cooldown must be between 0 and 60 seconds")
+        if (type(work_timeout_seconds) not in (int, float) or not math.isfinite(work_timeout_seconds)
+                or not 0 < work_timeout_seconds <= 600):
+            raise ValueError("Discord work timeout must be between 0 and 600 seconds")
         self.core = core
         self._handler = handler
         self._owner_id = owner_id
         self._token = token
+        self._cooldown_seconds = cooldown_seconds
+        self._work_timeout_seconds = work_timeout_seconds
+        self._active_owners: set[str] = set()
+        self._last_chat_start: dict[str, float] = {}
         self.client = _DiscordClient(application_id=application_id, sync_commands=sync_commands)
         self.tree = self.client.tree
         self._register_commands()
@@ -187,27 +201,55 @@ class DiscordPhoneBot:
                 if owner != self._owner_id:
                     result = _LINK_FIRST
                 elif command == "newchat":
-                    await asyncio.wait_for(
-                        asyncio.to_thread(self._handler.clear_session, owner, "discord_dm", user_id),
-                        timeout=600,
-                    )
-                    result = "This Discord chat context is cleared."
+                    result = await self._run_handler(owner, command, user_id)
                 else:
                     prompt = _STATUS_QUESTION if command == "status" else value
                     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 4_000:
                         result = "Enter a message between 1 and 4000 characters."
                     else:
-                        reply = await asyncio.wait_for(
-                            asyncio.to_thread(self._handler.handle, owner, "discord_dm", user_id, prompt),
-                            timeout=600,
-                        )
-                        result = reply.text
+                        result = await self._run_handler(owner, command, user_id, prompt)
             if not isinstance(result, str) or not result.strip():
                 raise ValueError("Empty Discord command response")
             await self._edit(interaction, result[:1900], command)
         except Exception as exc:
             LOG.warning("Discord %s failed (%s)", command, type(exc).__name__)
             await self._edit(interaction, _ERROR, command)
+
+    async def _run_handler(self, owner: str, command: str, user_id: str,
+                           prompt: str | None = None) -> str:
+        # One owner, one running turn, zero queued turns. The reservation is made
+        # without yielding, so simultaneous interactions cannot both enter.
+        now = time.monotonic()
+        if (owner in self._active_owners or
+                (command != "newchat" and
+                 now - self._last_chat_start.get(owner, float("-inf")) < self._cooldown_seconds)):
+            return _BUSY
+        self._active_owners.add(owner)
+        if command != "newchat":
+            self._last_chat_start[owner] = now
+        task = None
+        try:
+            if command == "newchat":
+                task = asyncio.create_task(asyncio.to_thread(
+                    self._handler.clear_session, owner, "discord_dm", user_id,
+                ))
+            else:
+                task = asyncio.create_task(asyncio.to_thread(
+                    self._handler.handle, owner, "discord_dm", user_id, prompt,
+                ))
+            task.add_done_callback(lambda completed: self._finish_work(owner, completed))
+            result = await asyncio.wait_for(asyncio.shield(task), self._work_timeout_seconds)
+            return "This Discord chat context is cleared." if command == "newchat" else result.text
+        finally:
+            # A timed-out await leaves the shielded thread running and the slot
+            # reserved. Its done callback releases the slot only when work ends.
+            if task is None or task.done():
+                self._active_owners.discard(owner)
+
+    def _finish_work(self, owner: str, task: asyncio.Task) -> None:
+        self._active_owners.discard(owner)
+        if not task.cancelled():
+            task.exception()  # Consume late failures without logging private details.
 
     async def _edit(self, interaction, message: str, command: str) -> None:
         try:

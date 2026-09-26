@@ -1,6 +1,7 @@
 """Discord DM adapter boundaries; all Discord and Core traffic stays local."""
 import asyncio
 import logging
+import threading
 from types import SimpleNamespace
 
 import httpx
@@ -54,13 +55,13 @@ class FakeHandler:
         self.events.append(("clear", owner, channel, session))
 
 
-def bot_for(interaction, *, linked=True, owner="owner-a"):
+def bot_for(interaction, *, linked=True, owner="owner-a", **bot_options):
     from integrations.discord_phone_bot import DiscordPhoneBot
 
     core = FakeCore(interaction.events, linked=linked, owner=owner)
     handler = FakeHandler(interaction.events)
     return DiscordPhoneBot(core, handler, owner_id="owner-a", token="bot-secret",
-                           application_id=123456789012345678)
+                           application_id=123456789012345678, **bot_options)
 
 
 def test_registers_only_dm_slash_commands_without_message_intent():
@@ -270,3 +271,109 @@ def test_process_logging_does_not_emit_provider_exception_details(caplog):
         assert "private prompt" not in caplog.text
     finally:
         router_log.setLevel(original)
+
+
+def test_burst_is_rejected_and_newchat_waits_for_ask_before_clearing():
+    from integrations.discord_phone_bot import DiscordPhoneBot
+
+    class BlockingHandler:
+        started = threading.Event()
+        release = threading.Event()
+
+        def __init__(self):
+            self.turns = []
+            self.clear_count = 0
+
+        def handle(self, owner, channel, session, text):
+            if text == "before":
+                self.started.set()
+                assert self.release.wait(2)
+            self.turns.append(text)
+            return SimpleNamespace(text=",".join(self.turns))
+
+        def clear_session(self, owner, channel, session):
+            self.clear_count += 1
+            self.turns.clear()
+
+    async def run():
+        events = []
+        handler = BlockingHandler()
+        bot = DiscordPhoneBot(FakeCore(events), handler, owner_id="owner-a",
+                              token="bot-secret", application_id=123456789012345678,
+                              cooldown_seconds=0)
+        first = FakeInteraction()
+        first_task = asyncio.create_task(bot.handle_ask(first, "before"))
+        assert await asyncio.to_thread(handler.started.wait, 1)
+        bursts = [FakeInteraction() for _ in range(5)]
+        await asyncio.gather(*(bot.handle_ask(item, "burst") for item in bursts))
+        during = FakeInteraction()
+        await bot.handle_newchat(during)
+        assert handler.clear_count == 0
+        assert handler.turns == []
+        assert all("busy" in item.events[-1][1].lower() for item in bursts + [during])
+        handler.release.set()
+        await first_task
+        cleared = FakeInteraction()
+        await bot.handle_newchat(cleared)
+        assert handler.clear_count == 1
+        after = FakeInteraction()
+        await bot.handle_ask(after, "after")
+        assert after.events[-1][1] == "after"
+        await bot.close()
+
+    asyncio.run(run())
+
+
+def test_timed_out_thread_keeps_owner_slot_until_real_work_finishes():
+    from integrations.discord_phone_bot import DiscordPhoneBot
+
+    class SlowHandler:
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def handle(self, owner, channel, session, text):
+            self.started.set()
+            assert self.release.wait(2)
+            self.finished.set()
+            return SimpleNamespace(text="late reply")
+
+        def clear_session(self, owner, channel, session):
+            pass
+
+    async def run():
+        handler = SlowHandler()
+        bot = DiscordPhoneBot(FakeCore([]), handler, owner_id="owner-a",
+                              token="bot-secret", application_id=123456789012345678,
+                              cooldown_seconds=0, work_timeout_seconds=.02)
+        first = FakeInteraction()
+        await bot.handle_ask(first, "slow")
+        assert handler.started.is_set()
+        assert "try again" in first.events[-1][1].lower()
+        during = FakeInteraction()
+        await bot.handle_newchat(during)
+        assert "busy" in during.events[-1][1].lower()
+        handler.release.set()
+        assert await asyncio.to_thread(handler.finished.wait, 1)
+        await asyncio.sleep(.03)
+        after = FakeInteraction()
+        await bot.handle_newchat(after)
+        assert "cleared" in after.events[-1][1].lower()
+        await bot.close()
+
+    asyncio.run(run())
+
+
+def test_completed_ask_cooldown_rejects_immediate_second_ask():
+    interaction = FakeInteraction()
+    bot = bot_for(interaction, cooldown_seconds=60)
+
+    async def run():
+        await bot.handle_ask(interaction, "first")
+        another = FakeInteraction()
+        await bot.handle_ask(another, "second")
+        assert "busy" in another.events[-1][1].lower()
+        assert len([event for event in interaction.events if event[0] == "handle"]) == 1
+        await bot.close()
+
+    asyncio.run(run())
