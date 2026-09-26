@@ -188,6 +188,19 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         if callable(bind_assistant):
             bind_assistant(assistant_service)
         feedback.start()
+        phone_chat_config = getattr(config, 'phone_chat', None)
+        if phone_chat_config is not None and phone_chat_config.enabled:
+            from assistant.phone_handler import PhoneMessageHandler
+            from integrations.phone_worker import build_phone_worker
+
+            phone_owner_id = os.getenv(phone_chat_config.owner_id_env, '').strip()
+            phone_handler = PhoneMessageHandler(assistant_service, owner_id=phone_owner_id)
+            phone_worker = build_phone_worker(phone_chat_config, phone_handler)
+            if phone_worker is None:
+                raise RuntimeError('Enabled phone chat did not create its worker')
+            resources.callback(phone_worker.stop)
+            phone_worker.start()
+            LOG.info('Phone chat worker started; Core queue access is outbound-only')
         expression_tracker = ExpressionTracker(cooldown_seconds=45.0)
         ascend_client = None
         ascend_character_id = None

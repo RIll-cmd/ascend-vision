@@ -94,3 +94,26 @@ def test_ascend_config_uses_environment_variable_names_and_api_paths():
 
     with pytest.raises(ValueError, match="start with '/'"):
         AscendConfig(health_path='healthz')
+
+
+def test_phone_chat_worker_config_is_opt_in_and_bounded():
+    from config import PhoneChatConfig
+
+    defaults = PhoneChatConfig()
+    assert defaults.enabled is False
+    assert defaults.poll_interval_seconds == 2.0
+    assert PhoneChatConfig(enabled=True, lease_renew_interval_seconds=40).enabled is True
+    with pytest.raises(ValueError, match='phone_chat.lease_renew_interval_seconds'):
+        PhoneChatConfig(lease_renew_interval_seconds=60)
+    with pytest.raises(ValueError, match='phone_chat.worker_token_env'):
+        PhoneChatConfig(worker_token_env='not-a-variable')
+
+
+def test_load_config_accepts_optional_phone_chat_settings(tmp_path):
+    path = tmp_path / 'config.yaml'
+    path.write_text('phone_chat:\n  enabled: true\n  poll_interval_seconds: 3.5\n')
+
+    cfg = load_config(path)
+
+    assert cfg.phone_chat.enabled is True
+    assert cfg.phone_chat.poll_interval_seconds == 3.5

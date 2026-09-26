@@ -139,3 +139,10 @@ ascend:
 screen_audit:
   enabled: true
   interval_seconds: 1800
+
+phone_chat:
+  enabled: false # Enable only after all ASCEND_PHONE_* values are provisioned.
+  poll_interval_seconds: 2.0
+  lease_renew_interval_seconds: 20.0
+  request_timeout_seconds: 15.0
+  shutdown_timeout_seconds: 3.0

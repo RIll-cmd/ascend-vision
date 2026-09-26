@@ -430,6 +430,30 @@ class ScreenAuditConfig:
 
 
 @dataclass(frozen=True)
+class PhoneChatConfig:
+    """Opt-in outbound phone worker; credentials and URL are environment-only."""
+    enabled: bool = False
+    core_url_env: str = 'ASCEND_PHONE_CORE_URL'
+    worker_token_env: str = 'ASCEND_PHONE_WORKER_TOKEN'
+    owner_id_env: str = 'ASCEND_PHONE_OWNER_ID'
+    poll_interval_seconds: float = 2.0
+    lease_renew_interval_seconds: float = 20.0
+    request_timeout_seconds: float = 15.0
+    shutdown_timeout_seconds: float = 3.0
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('phone_chat.enabled must be a YAML boolean')
+        for name in ('core_url_env', 'worker_token_env', 'owner_id_env'):
+            if not isinstance(getattr(self, name), str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', getattr(self, name)):
+                raise ValueError(f'phone_chat.{name} must name an environment variable')
+        number('phone_chat.poll_interval_seconds', self.poll_interval_seconds, .1, 60)
+        number('phone_chat.lease_renew_interval_seconds', self.lease_renew_interval_seconds, .1, 45)
+        number('phone_chat.request_timeout_seconds', self.request_timeout_seconds, .1, 120)
+        number('phone_chat.shutdown_timeout_seconds', self.shutdown_timeout_seconds, .1, 30)
+
+
+@dataclass(frozen=True)
 class Config:
     camera: CameraConfig = field(default_factory=CameraConfig)
     detector: DetectorConfig = field(default_factory=DetectorConfig)
@@ -448,6 +472,7 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     ascend: AscendConfig = field(default_factory=AscendConfig)
     screen_audit: ScreenAuditConfig = field(default_factory=ScreenAuditConfig)
+    phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
 
 
 def load_config(path: Path) -> Config:
@@ -467,7 +492,7 @@ def load_config(path: Path) -> Config:
                 'storage': StorageConfig, 'sessions': SessionConfig, 'feedback': FeedbackConfig,
                 'dashboard': DashboardConfig, 'voice_commands': VoiceCommandConfig,
                 'llm': LLMConfig, 'ascend': AscendConfig,
-                'screen_audit': ScreenAuditConfig}
+                'screen_audit': ScreenAuditConfig, 'phone_chat': PhoneChatConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')
     values = {}

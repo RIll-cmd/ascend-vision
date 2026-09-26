@@ -105,6 +105,10 @@ class AssistantService:
         """Forget the temporary turns for one owner/channel/session tuple."""
         self._session_store.clear(session_key)
 
+    def expire_sessions(self) -> int:
+        """Purge expired temporary contexts, including sessions not queried again."""
+        return self._session_store.expire()
+
     def _memory_enabled(self) -> bool:
         if self._memory_store is None:
             return True

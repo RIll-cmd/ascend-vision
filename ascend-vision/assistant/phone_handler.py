@@ -64,6 +64,10 @@ class PhoneMessageHandler:
             self._validated_session_key(owner_id, channel, session_id)
         )
 
+    def expire_sessions(self) -> int:
+        expire = getattr(self._assistant_service, "expire_sessions", None)
+        return expire() if callable(expire) else 0
+
     def _validated_session_key(self, owner_id, channel, session_id) -> SessionKey:
         if owner_id != self._owner_id:
             raise ValueError("owner is not authorized for this Vision installation")
