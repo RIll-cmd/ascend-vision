@@ -136,6 +136,7 @@ class DiscordPhoneBot:
         self._token = token
         self._cooldown_seconds = cooldown_seconds
         self._work_timeout_seconds = work_timeout_seconds
+        self._closed = False
         self._active_owners: set[str] = set()
         self._last_chat_start: dict[str, float] = {}
         self.client = _DiscordClient(application_id=application_id, sync_commands=sync_commands)
@@ -179,10 +180,14 @@ class DiscordPhoneBot:
         await self._run(interaction, "link", code)
 
     async def _run(self, interaction, command: str, value: str | None = None) -> None:
+        if self._closed:
+            return
         try:
             await interaction.response.defer(ephemeral=True, thinking=True)
         except Exception as exc:
             LOG.warning("Discord %s defer failed (%s)", command, type(exc).__name__)
+            return
+        if self._closed:
             return
         if interaction.guild_id is not None:
             await self._edit(interaction, "Use this command in a DM with Vision.", command)
@@ -217,6 +222,8 @@ class DiscordPhoneBot:
 
     async def _run_handler(self, owner: str, command: str, user_id: str,
                            prompt: str | None = None) -> str:
+        if self._closed:
+            return _ERROR
         # One owner, one running turn, zero queued turns. The reservation is made
         # without yielding, so simultaneous interactions cannot both enter.
         now = time.monotonic()
@@ -253,7 +260,7 @@ class DiscordPhoneBot:
 
     async def _edit(self, interaction, message: str, command: str) -> None:
         try:
-            if not interaction.is_expired():
+            if not self._closed and not interaction.is_expired():
                 await interaction.edit_original_response(
                     content=message, allowed_mentions=discord.AllowedMentions.none(),
                 )
@@ -264,5 +271,6 @@ class DiscordPhoneBot:
         await self.client.start(self._token)
 
     async def close(self) -> None:
+        self._closed = True
         await self.client.close()
         await self.core.close()

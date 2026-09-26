@@ -332,6 +332,8 @@ def test_process_logging_does_not_emit_provider_exception_details(caplog):
 
 def test_gateway_offline_closes_the_optional_process_without_a_success_signal():
     from discord_bot import _serve
+    from assistant.phone_handler import PhoneMessageHandler
+    from assistant.service import AssistantReply
 
     class OfflineBot:
         def __init__(self):
@@ -349,6 +351,17 @@ def test_gateway_offline_closes_the_optional_process_without_a_success_signal():
         asyncio.run(_serve(bot))
     assert bot.events == ["start", "close"]
 
+    class PwaAssistant:
+        def respond(self, text, context=None, *, max_words=25, session_key=None):
+            assert session_key == ("owner-a", "phone_pwa", "pwa-device")
+            return AssistantReply("PWA still works", "offline")
+
+        def clear_session(self, session_key):
+            pass
+
+    pwa = PhoneMessageHandler(PwaAssistant(), owner_id="owner-a")
+    assert pwa.handle("owner-a", "phone_pwa", "pwa-device", "Are you there?").text == "PWA still works"
+
 
 def test_shutdown_during_an_interaction_does_not_emit_a_late_success_reply():
     from integrations.discord_phone_bot import DiscordPhoneBot
@@ -360,7 +373,7 @@ def test_shutdown_during_an_interaction_does_not_emit_a_late_success_reply():
 
         def handle(self, owner, channel, session, text):
             self.started.set()
-            self.release.wait(2)
+            assert self.release.wait(5)
             self.finished.set()
             return SimpleNamespace(text="late private answer")
 
@@ -368,27 +381,70 @@ def test_shutdown_during_an_interaction_does_not_emit_a_late_success_reply():
             pass
 
     async def run():
+        from discord_bot import _serve
+
         handler = BlockingHandler()
         interaction = FakeInteraction()
         bot = DiscordPhoneBot(FakeCore(interaction.events), handler,
                               owner_id="owner-a", token="bot-secret",
                               application_id=123456789012345678)
+        gateway_wait = asyncio.Event()
+
+        async def connected_until_shutdown():
+            await gateway_wait.wait()
+
+        bot.start = connected_until_shutdown
+        runner = asyncio.create_task(_serve(bot))
         pending = asyncio.create_task(bot.handle_ask(interaction, "private prompt"))
         try:
             assert await asyncio.to_thread(handler.started.wait, 1)
-            interaction.expired = True
-            pending.cancel()
+            runner.cancel()
             with pytest.raises(asyncio.CancelledError):
-                await pending
-            await bot.close()
+                await runner
         finally:
             handler.release.set()
             assert await asyncio.to_thread(handler.finished.wait, 1)
-        await asyncio.sleep(0)
+        await pending
         assert not any(event[0] == "edit" for event in interaction.events)
         assert bot._active_owners == set()
 
     asyncio.run(run())
+
+
+def test_closed_bot_does_not_admit_another_command():
+    interaction = FakeInteraction()
+    bot = bot_for(interaction)
+
+    async def run():
+        await bot.close()
+        await bot.handle_ask(interaction, "private prompt")
+
+    asyncio.run(run())
+    assert interaction.events == []
+
+
+def test_shutdown_while_core_verifies_does_not_start_new_handler_work():
+    interaction = FakeInteraction()
+    bot = bot_for(interaction)
+
+    async def run():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def delayed_verify(_discord_user_id):
+            started.set()
+            await release.wait()
+            return "owner-a"
+
+        bot.core.verify_link = delayed_verify
+        pending = asyncio.create_task(bot.handle_ask(interaction, "private prompt"))
+        await asyncio.wait_for(started.wait(), 1)
+        await bot.close()
+        release.set()
+        await pending
+
+    asyncio.run(run())
+    assert [event[0] for event in interaction.events] == ["defer"]
 
 
 def test_burst_is_rejected_and_newchat_waits_for_ask_before_clearing():
