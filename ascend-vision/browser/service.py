@@ -18,6 +18,9 @@ ALLOWED_CONTROLS = {'pause', 'resume', 'stop'}
 TERMINAL_STATES = {'completed', 'partial', 'failed', 'cancelled', 'unknown'}
 TERMINAL_PAYLOAD_SECONDS = 60 * 60
 TOMBSTONE_SECONDS = 24 * 60 * 60
+# About ten research tasks per hour across the 25-hour retention window.
+# Count every lifecycle state so cleanup and shutdown never scan more than 256.
+MAX_RETAINED_TASKS = 256
 
 
 class TaskNotFound(LookupError):
@@ -25,7 +28,7 @@ class TaskNotFound(LookupError):
 
 
 class TaskQueueFull(RuntimeError):
-    """The bounded pending-task queue is full."""
+    """The pending-task queue or retained-task registry is at capacity."""
 
 
 @dataclass(frozen=True)
@@ -84,7 +87,8 @@ class BrowserTaskService:
                  decision_provider: Callable[[BrowserTaskRequest, BrowserObservation], object] | None = None,
                  *, max_decisions: int = 20, max_actions: int = 30, max_pages: int = 3,
                  max_queued_tasks: int = 4, task_timeout_seconds: int = 180,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time,
+                 retention_clock: Callable[[], float] = time.monotonic):
         self._executor_factory = executor_factory or BrowserExecutor
         self._decision_provider = decision_provider
         self._max_decisions = max_decisions
@@ -93,6 +97,7 @@ class BrowserTaskService:
         self._max_queued_tasks = max_queued_tasks
         self._task_timeout_seconds = task_timeout_seconds
         self._clock = clock
+        self._retention_clock = retention_clock
         self._condition = threading.Condition(threading.RLock())
         self._tasks: dict[str, _Task | _Tombstone] = {}
         self._queue: deque[_Task] = deque()
@@ -126,6 +131,8 @@ class BrowserTaskService:
                 raise RuntimeError('browser task service has not started')
             if request.task_id in self._tasks:
                 raise ValueError('task_id has already been used')
+            if len(self._tasks) >= MAX_RETAINED_TASKS:
+                raise TaskQueueFull('Vision already has the maximum number of retained browser tasks.')
             if len(self._queue) >= self._max_queued_tasks:
                 raise TaskQueueFull('Vision already has the maximum number of queued browser tasks.')
             task = _Task(request)
@@ -215,12 +222,12 @@ class BrowserTaskService:
         if owner != session_key:
             raise TaskNotFound('Browser task was not found.')
         if isinstance(task, _Task) and task.state in TERMINAL_STATES:
-            task.terminal_activity_at = self._clock()
+            task.terminal_activity_at = self._retention_clock()
         return task
 
     def _expire_tasks(self, *, erase_terminal: bool = False) -> None:
         """Erase expired payloads under the condition lock, then age out tombstones."""
-        now = self._clock()
+        now = self._retention_clock()
         for task_id, task in list(self._tasks.items()):
             if isinstance(task, _Tombstone):
                 if now >= task.erased_at + TOMBSTONE_SECONDS:
@@ -247,7 +254,7 @@ class BrowserTaskService:
     def _append_event(self, task: _Task, state: str, summary: str) -> None:
         task.state = state
         if state in TERMINAL_STATES:
-            task.terminal_activity_at = self._clock()
+            task.terminal_activity_at = self._retention_clock()
         event = BrowserTaskEvent(task.request.task_id, task.next_sequence, self._clock(), state, summary[:500])
         task.next_sequence += 1
         task.events.append(event)

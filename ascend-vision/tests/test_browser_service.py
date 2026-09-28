@@ -191,6 +191,7 @@ def completed_service(clock):
                           'source_observation_ids': ['obs-1']},
         },
         clock=clock,
+        retention_clock=clock,
     )
     service.start()
     service.submit(request())
@@ -283,7 +284,7 @@ def test_tombstone_expires_24_hours_after_erasure_despite_status_activity():
 
 def test_idle_service_erases_request_and_event_payload_without_status_request():
     clock = ManualClock()
-    service = BrowserTaskService(clock=clock)
+    service = BrowserTaskService(clock=clock, retention_clock=clock)
     task_request = request()
     request_reference = weakref.ref(task_request)
     try:
@@ -305,7 +306,7 @@ def test_idle_service_erases_request_and_event_payload_without_status_request():
 
 def test_close_erases_terminal_payload_without_waiting_for_retention():
     clock = ManualClock()
-    service = BrowserTaskService(clock=clock)
+    service = BrowserTaskService(clock=clock, retention_clock=clock)
     task_request = request()
     request_reference = weakref.ref(task_request)
     try:
@@ -336,7 +337,7 @@ def test_terminal_expiry_preserves_active_and_queued_tasks():
         release.wait(timeout=2)
         return None
 
-    service = BrowserTaskService(lambda: ScriptedExecutor(), decide, clock=clock)
+    service = BrowserTaskService(lambda: ScriptedExecutor(), decide, clock=clock, retention_clock=clock)
     key = ('owner-1', 'dashboard', 'session-1')
     try:
         service.start()
@@ -371,7 +372,7 @@ def test_task_completing_after_bounded_close_erases_payload():
         release.wait(timeout=2)
         return None
 
-    service = BrowserTaskService(lambda: ScriptedExecutor(), decide, clock=clock)
+    service = BrowserTaskService(lambda: ScriptedExecutor(), decide, clock=clock, retention_clock=clock)
     try:
         service.start()
         service.submit(task_request)
@@ -422,7 +423,7 @@ def test_cleanup_erases_terminal_payload_while_another_decision_is_blocked():
 
     task_request = request()
     request_reference = weakref.ref(task_request)
-    service = BrowserTaskService(lambda: ScriptedExecutor(), decide, clock=clock)
+    service = BrowserTaskService(lambda: ScriptedExecutor(), decide, clock=clock, retention_clock=clock)
     try:
         service.start()
         service.submit(task_request)
@@ -438,4 +439,106 @@ def test_cleanup_erases_terminal_payload_while_another_decision_is_blocked():
         assert not release.is_set()
     finally:
         release.set()
+        service.close()
+
+
+def test_backward_wall_clock_changes_do_not_extend_payload_or_tombstone_retention():
+    wall_clock = ManualClock()
+    retention_clock = ManualClock()
+    service = BrowserTaskService(clock=wall_clock, retention_clock=retention_clock)
+    key = ('owner-1', 'dashboard', 'session-1')
+    try:
+        service.start()
+        service.submit(request())
+        done = wait_for_state(service, 'task-1', 'owner-1', {'failed'})
+        wall_clock.advance(-86400)
+        retention_clock.advance(3600)
+        expired = service.events('task-1', 0, key)
+        assert expired.state == 'failed'
+        assert expired.next_cursor == done.next_cursor
+        assert expired.result is None
+        assert expired.events == ()
+        wall_clock.advance(-86400)
+        retention_clock.advance(86400)
+        with pytest.raises(TaskNotFound):
+            service.events('task-1', 0, key)
+        with pytest.raises(TaskNotFound):
+            service.control('task-1', 'stop', key)
+    finally:
+        service.close()
+
+
+def test_registry_capacity_rejects_new_task_without_losing_active_or_queued_tasks():
+    entered = threading.Event()
+    release = threading.Event()
+
+    def decide(*_args):
+        entered.set()
+        release.wait(timeout=5)
+        return None
+
+    service = BrowserTaskService(lambda: ScriptedExecutor(), decide, max_queued_tasks=256)
+    key = ('owner-1', 'dashboard', 'session-1')
+    try:
+        service.start()
+        service.submit(request('active'))
+        assert entered.wait(timeout=1)
+        for index in range(255):
+            service.submit(request(f'queued-{index}'))
+        with pytest.raises(TaskQueueFull, match='maximum number of retained browser tasks'):
+            service.submit(request('overflow'))
+        assert service.events('active', 0, key).state == 'running'
+        assert service.events('queued-0', 0, key).state == 'queued'
+        assert service.events('queued-254', 0, key).state == 'queued'
+        with pytest.raises(TaskNotFound):
+            service.events('overflow', 0, key)
+    finally:
+        release.set()
+        service.close()
+
+
+def test_terminal_tasks_and_tombstones_use_registry_capacity_until_expiry():
+    wall_clock = ManualClock()
+    retention_clock = ManualClock()
+    service = BrowserTaskService(
+        clock=wall_clock, retention_clock=retention_clock, max_queued_tasks=256,
+    )
+    key = ('owner-1', 'dashboard', 'session-1')
+    try:
+        service.start()
+        for index in range(256):
+            service.submit(request(f'terminal-{index}'))
+        wait_for_state(service, 'terminal-255', 'owner-1', {'failed'})
+        with pytest.raises(TaskQueueFull, match='retained browser tasks'):
+            service.submit(request('overflow'))
+        retention_clock.advance(3600)
+        assert service.events('terminal-0', 0, key).result is None
+        with pytest.raises(TaskQueueFull, match='retained browser tasks'):
+            service.submit(request('overflow'))
+        retention_clock.advance(86400)
+        assert service.submit(request('recovered')).task_id == 'recovered'
+        with pytest.raises(TaskNotFound):
+            service.events('terminal-0', 0, key)
+        with pytest.raises(TaskNotFound):
+            service.events('terminal-255', 0, key)
+    finally:
+        service.close()
+
+
+def test_absolute_request_expiry_and_event_timestamps_still_use_wall_clock():
+    wall_clock = ManualClock()
+    retention_clock = ManualClock()
+    retention_clock.advance(1_000_000)
+    service = BrowserTaskService(clock=wall_clock, retention_clock=retention_clock)
+    try:
+        service.start()
+        service.submit(request())
+        done = wait_for_state(service, 'task-1', 'owner-1', {'failed'})
+        assert all(event.timestamp == wall_clock.now for event in done.events)
+        expired_request = request('expired')
+        wall_clock.advance(61)
+        with pytest.raises(ValueError, match='request has expired'):
+            service.submit(expired_request)
+        assert service.events('task-1', 0, ('owner-1', 'dashboard', 'session-1')).result is not None
+    finally:
         service.close()
