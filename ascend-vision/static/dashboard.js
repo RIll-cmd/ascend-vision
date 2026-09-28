@@ -273,8 +273,161 @@ function appendChatMessage(text,kind,status=''){
   content.textContent=text;
   item.append(speaker,content);
   chatMessages.append(item);
+  if(kind==='from-vision'){
+    const browserTask=text.match(/browser task ([a-f0-9-]{16,64})/i);
+    if(browserTask)setBrowserTask(browserTask[1]);
+  }
   const nearBottom=chatMessages.scrollHeight-chatMessages.scrollTop-chatMessages.clientHeight<48;
   if(nearBottom)chatMessages.scrollTop=chatMessages.scrollHeight;
+}
+
+const browserTaskForm=$('browser-task-form');
+const browserTaskGoal=$('browser-task-goal');
+const browserTaskStatus=$('browser-task-status');
+const browserTaskControls=$('browser-task-controls');
+const browserTaskEvents=$('browser-task-events');
+const browserTaskResult=$('browser-task-result');
+const browserActionReview=$('browser-action-review');
+const browserActionSummary=$('browser-action-summary');
+const browserActionValue=$('browser-action-value');
+let browserTaskId=null;
+let browserEventCursor=0;
+let browserTaskPollActive=false;
+let browserTaskTimer=null;
+
+function setBrowserTask(id){
+  if(!id||id===browserTaskId)return;
+  browserTaskId=id;
+  browserEventCursor=0;
+  browserTaskEvents?.replaceChildren();
+  browserTaskResult?.replaceChildren();
+  browserActionReview?.setAttribute('hidden','');
+  if(browserTaskStatus)browserTaskStatus.textContent=`Connecting to browser task ${id}…`;
+  browserTaskControls?.removeAttribute('hidden');
+  pollBrowserTask();
+  if(browserTaskTimer)clearInterval(browserTaskTimer);
+  browserTaskTimer=setInterval(pollBrowserTask,1000);
+}
+
+function renderBrowserResult(result){
+  if(!browserTaskResult)return;
+  browserTaskResult.replaceChildren();
+  if(!result)return;
+  const findings=Array.isArray(result.findings)?result.findings:[];
+  for(const finding of findings){
+    const paragraph=document.createElement('p');
+    paragraph.textContent=String(finding.text||'');
+    browserTaskResult.append(paragraph);
+    const sources=Array.isArray(finding.sources)?finding.sources:[];
+    for(const source of sources){
+      try{
+        const url=new URL(source);
+        if(!['http:','https:'].includes(url.protocol))continue;
+        const link=document.createElement('a');
+        link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';
+        link.textContent=url.href;browserTaskResult.append(link);
+      }catch(_error){ /* Invalid source values are not rendered as links. */ }
+    }
+  }
+  if(!findings.length&&result.reason){
+    const message=document.createElement('p');message.textContent=String(result.reason);
+    browserTaskResult.append(message);
+  }
+}
+
+function renderBrowserActionProposal(proposal){
+  if(!browserActionReview||!browserActionSummary||!proposal)return;
+  const action=String(proposal.action||'action');
+  const target=String(proposal.target_label||'selected control');
+  const effect=String(proposal.expected_effect||'');
+  browserActionSummary.textContent=`${action} at ${String(proposal.origin||'unknown origin')} — ${target}. ${effect}`;
+  browserActionValue.textContent=typeof proposal.arguments?.value==='string'
+    ? `Value to enter: ${proposal.arguments.value}`
+    : '';
+  browserActionReview.dataset.actionId=String(proposal.action_id||'');
+  browserActionReview.dataset.proposalDigest=String(proposal.digest||'');
+  browserActionReview.removeAttribute('hidden');
+}
+
+async function pollBrowserTask(){
+  if(!browserTaskId||browserTaskPollActive)return;
+  browserTaskPollActive=true;
+  try{
+    const response=await fetch(`/api/browser/tasks/${encodeURIComponent(browserTaskId)}?after=${browserEventCursor}`,{cache:'no-store'});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok||!payload)throw new Error((payload&&payload.error)||'Browser task status is unavailable.');
+    if(payload.resetRequired)browserTaskEvents?.replaceChildren();
+    for(const event of payload.events||[]){
+      const item=document.createElement('li');item.textContent=String(event.summary||event.state||'');
+      browserTaskEvents?.append(item);
+      if(event.proposal)renderBrowserActionProposal(event.proposal);
+    }
+    browserEventCursor=payload.nextCursor||browserEventCursor;
+    const state=String(payload.state||'unknown');
+    if(browserTaskStatus)browserTaskStatus.textContent=`Browser task ${state}.`;
+    renderBrowserResult(payload.result);
+    if(['completed','partial','failed','cancelled','unknown'].includes(state)){
+      browserTaskControls?.setAttribute('hidden','');
+      if(browserTaskTimer){clearInterval(browserTaskTimer);browserTaskTimer=null;}
+    }
+  }catch(error){
+    if(browserTaskStatus)browserTaskStatus.textContent=error.message;
+  }finally{browserTaskPollActive=false;}
+}
+
+if(browserTaskForm){
+  browserTaskForm.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const goal=browserTaskGoal.value.trim();
+    if(!goal)return;
+    const submit=browserTaskForm.querySelector('button[type="submit"]');
+    submit.disabled=true;
+    if(browserTaskStatus)browserTaskStatus.textContent='Queueing local browser research…';
+    try{
+      const response=await fetch('/api/browser/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({goal})});
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload)throw new Error((payload&&payload.error)||'Browser task could not be started.');
+      browserTaskForm.reset();setBrowserTask(payload.taskId);
+    }catch(error){if(browserTaskStatus)browserTaskStatus.textContent=error.message;}
+    finally{submit.disabled=false;}
+  });
+  browserTaskControls?.addEventListener('click',async event=>{
+    const command=event.target.closest('[data-browser-control]')?.dataset.browserControl;
+    if(!command||!browserTaskId)return;
+    try{
+      const response=await fetch(`/api/browser/tasks/${encodeURIComponent(browserTaskId)}/control`,{
+        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command}),
+      });
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload)throw new Error((payload&&payload.error)||'Browser task control failed.');
+      if(browserTaskStatus)browserTaskStatus.textContent=`Browser task ${payload.state}.`;
+      pollBrowserTask();
+    }catch(error){if(browserTaskStatus)browserTaskStatus.textContent=error.message;}
+  });
+  browserActionReview?.addEventListener('click',async event=>{
+    const decision=event.target.closest('[data-browser-decision]')?.dataset.browserDecision;
+    if(!decision||!browserTaskId)return;
+    const buttons=browserActionReview.querySelectorAll('button');
+    buttons.forEach(button=>{button.disabled=true;});
+    try{
+      const response=await fetch(`/api/browser/tasks/${encodeURIComponent(browserTaskId)}/decision`,{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          actionId:browserActionReview.dataset.actionId,
+          proposalDigest:browserActionReview.dataset.proposalDigest,
+          approved:decision==='approve',
+        }),
+      });
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload)throw new Error((payload&&payload.error)||'Browser action review failed.');
+      browserActionReview.setAttribute('hidden','');
+      if(browserTaskStatus)browserTaskStatus.textContent=`Browser task ${payload.state}.`;
+      pollBrowserTask();
+    }catch(error){
+      buttons.forEach(button=>{button.disabled=false;});
+      if(browserTaskStatus)browserTaskStatus.textContent=error.message;
+    }
+  });
 }
 
 async function pollChatReplies(){
@@ -441,3 +594,331 @@ if(memoryPanel){
   });
   setInterval(()=>{if(memoryPanel.open)refreshMemory();},5000);
 }
+
+const contextStatus=$('context-status');
+const contextIntentForm=$('context-intent-form');
+const contextIntentChoice=$('context-intent-choice');
+const contextIntentSubmit=$('context-intent-submit');
+const contextClear=$('context-clear');
+const contextPause=$('context-pause');
+const contextIntentUndo=$('context-intent-undo');
+const contextSnooze=$('context-snooze');
+const contextSnoozeClear=$('context-snooze-clear');
+const deskCalibrationStatus=$('desk-calibration-status');
+const deskCalibrationStart=$('desk-calibration-start');
+const deskCalibrationCancel=$('desk-calibration-cancel');
+const contextRows={
+  deskPresence:$('context-presence'),
+  desktopActivity:$('context-activity'),
+  foregroundCategory:$('context-category'),
+  focusSession:$('context-session'),
+  declaredIntent:$('context-intent-value'),
+};
+let latestContext=null, contextPollActive=false;
+const contextLabels={
+  present:'Face detected in calibrated desk area',away:'No face detected in calibrated desk area after absence dwell',unknown:'Unknown',
+  input_active:'Recently active',input_idle:'Input idle',locked:'Desktop locked',unavailable:'Unavailable',
+  development:'Development app',communication:'Communication app',
+  browser_unspecified:'Browser (content unknown)',entertainment:'Entertainment app',other:'Other app',
+  focus:'Focus',break:'Break',research:'Research',meeting:'Meeting',none:'None',
+  webcam:'Webcam face detector',desktop_activity:'Desktop activity',session_manager:'Vision session',
+  user_declaration:'Your correction',
+};
+
+function contextFieldText(field){
+  const value=contextLabels[field.value]||'Unknown';
+  const status=field.freshness==='fresh'?'Current':field.freshness==='stale'?'Stale':field.freshness==='paused'?'Paused':'Sensor unavailable';
+  const source=contextLabels[field.source]||'Source unknown';
+  const observed=field.observed_at?Date.parse(field.observed_at):NaN;
+  const age=Number.isFinite(observed)?` · ${duration((Date.now()-observed)/1000)} ago`:'';
+  return `${value} · ${status} · ${source}${age}`;
+}
+
+async function refreshCompanionDecisions(){
+  const list=$('companion-decisions');
+  if(!list)return;
+  try{
+    const response=await fetch('/api/context/companion-decisions',{cache:'no-store'});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok||!Array.isArray(payload?.decisions))throw new Error('Decision view unavailable.');
+    const rows=payload.decisions.flatMap(entry=>(entry.rules||[]).map(rule=>({entry,rule}))).slice(-20).reverse();
+    list.replaceChildren();
+    if(!rows.length){const item=document.createElement('li');item.textContent='No rule evaluations recorded in this run.';list.append(item);return;}
+    for(const {entry,rule} of rows){
+      const item=document.createElement('li');
+      const age=Number.isInteger(rule.evidence_age_seconds)?` · evidence ${rule.evidence_age_seconds}s old`:'';
+      item.textContent=`${entry.mode} · ${rule.rule_id} · ${rule.trigger} · ${rule.source||'no source'}${age} · ${rule.channel||'no channel'} · ${rule.outcome} (${rule.reason_code})`;
+      list.append(item);
+    }
+  }catch(_error){
+    list.replaceChildren();const item=document.createElement('li');item.textContent='Decision view unavailable.';list.append(item);
+  }
+}
+
+async function refreshContext(){
+  if(!contextStatus||contextPollActive)return;
+  contextPollActive=true;
+  try{
+    const response=await fetch('/api/context',{cache:'no-store'});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok||!payload?.snapshot)throw new Error('Laptop context is unavailable. Start Vision to reconnect.');
+    latestContext=payload.snapshot;
+    for(const [name,node] of Object.entries(contextRows)){
+      if(node)node.textContent=contextFieldText(latestContext.fields[name]||{value:'unknown',freshness:'unavailable'});
+    }
+    const snoozeUntil=latestContext.snooze_until?new Date(latestContext.snooze_until):null;
+    const regionResponse=await fetch('/api/context/desk-region',{cache:'no-store'});
+    const regionPayload=await regionResponse.json().catch(()=>null);
+    if(!regionResponse.ok||!regionPayload?.desk_region)throw new Error('Desk area setup is unavailable.');
+    const deskRegion=regionPayload.desk_region;
+    deskCalibrationStatus.textContent=deskRegion.calibrating
+      ?'Setup is active. In the Vision camera preview, drag a rectangle around the desk.'
+      :deskRegion.calibrated?'Desk area is set. You can set it up again to replace it.'
+      :'Desk area is not set up. Desk presence stays unknown until setup is complete.';
+    deskCalibrationStart.disabled=!deskRegion.available||deskRegion.calibrating||latestContext.paused;
+    deskCalibrationCancel.disabled=!deskRegion.calibrating;
+    $('context-snooze-value').textContent=snoozeUntil&&snoozeUntil>Date.now()
+      ?`Quiet until ${snoozeUntil.toLocaleTimeString()}`:'Not snoozed';
+    contextStatus.textContent=latestContext.paused
+      ?'Companion context is paused. Existing Vision monitoring follows its current controls.'
+      :`Live snapshot ${latestContext.snapshot_id} · updated ${new Date(latestContext.generated_at).toLocaleTimeString()}`;
+    contextPause.textContent=latestContext.paused?'Resume context':'Pause context';
+    await refreshCompanionDecisions();
+    [contextIntentSubmit,contextIntentUndo,contextSnooze,contextSnoozeClear,contextClear,contextPause].forEach(button=>{if(button)button.disabled=false;});
+  }catch(error){
+    contextStatus.textContent=error.message;
+    [contextIntentSubmit,contextIntentUndo,contextSnooze,contextSnoozeClear,contextClear,contextPause].forEach(button=>{if(button)button.disabled=true;});
+    if(deskCalibrationStart)deskCalibrationStart.disabled=true;
+    if(deskCalibrationCancel)deskCalibrationCancel.disabled=true;
+  }finally{
+    contextPollActive=false;
+  }
+}
+
+async function contextCommand(path,body){
+  const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const payload=await response.json().catch(()=>null);
+  if(!response.ok)throw new Error((payload&&payload.error)||'Context update failed.');
+  await refreshContext();
+}
+
+async function setDeskCalibration(enabled){
+  deskCalibrationStart.disabled=true;
+  deskCalibrationCancel.disabled=true;
+  try{
+    const response=await fetch('/api/context/desk-region/calibration',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled}),
+    });
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok)throw new Error(payload?.error||'Desk area setup failed.');
+    deskCalibrationStatus.textContent=enabled
+      ?'Setup started. In the Vision camera preview, drag a rectangle around your desk.'
+      :'Desk area setup cancelled.';
+    await refreshContext();
+  }catch(error){
+    deskCalibrationStatus.textContent=error.message;
+    deskCalibrationStart.disabled=false;
+    deskCalibrationCancel.disabled=false;
+  }
+}
+deskCalibrationStart?.addEventListener('click',()=>setDeskCalibration(true));
+deskCalibrationCancel?.addEventListener('click',()=>setDeskCalibration(false));
+
+contextIntentForm?.addEventListener('submit',async event=>{
+  event.preventDefault();
+  const intent=contextIntentChoice.value;
+  if(!intent)return;
+  const duration_seconds=intent==='break'?900:3600;
+  contextIntentSubmit.disabled=true;
+  try{
+    await contextCommand('/api/context/intent',{intent,duration_seconds});
+    contextStatus.textContent=`${contextLabels[intent]} declared temporarily.`;
+    contextIntentChoice.value='';
+  }catch(error){
+    contextStatus.textContent=error.message;
+  }finally{
+    contextIntentSubmit.disabled=false;
+  }
+});
+contextClear?.addEventListener('click',async()=>{
+  contextClear.disabled=true;
+  try{
+    await contextCommand('/api/context/clear',{});
+    contextStatus.textContent='Current context cleared.';
+  }catch(error){
+    contextStatus.textContent=error.message;
+  }finally{
+    contextClear.disabled=false;
+  }
+});
+contextPause?.addEventListener('click',async()=>{
+  contextPause.disabled=true;
+  try{
+    await contextCommand('/api/context/pause',{paused:!latestContext?.paused});
+    contextStatus.textContent=latestContext?.paused?'Companion context resumed.':'Companion context paused.';
+  }catch(error){
+    contextStatus.textContent=error.message;
+  }finally{
+    contextPause.disabled=false;
+  }
+});
+contextIntentUndo?.addEventListener('click',async()=>{
+  contextIntentUndo.disabled=true;
+  try{
+    await contextCommand('/api/context/intent/clear',{});
+    contextStatus.textContent='Temporary intent removed.';
+  }catch(error){
+    contextStatus.textContent=error.message;
+  }finally{
+    contextIntentUndo.disabled=false;
+  }
+});
+contextSnooze?.addEventListener('click',async()=>{
+  contextSnooze.disabled=true;
+  try{
+    await contextCommand('/api/context/snooze',{duration_seconds:1800});
+    contextStatus.textContent='Vision will stay quiet for 30 minutes.';
+  }catch(error){
+    contextStatus.textContent=error.message;
+  }finally{
+    contextSnooze.disabled=false;
+  }
+});
+contextSnoozeClear?.addEventListener('click',async()=>{
+  contextSnoozeClear.disabled=true;
+  try{
+    await contextCommand('/api/context/snooze/clear',{});
+    contextStatus.textContent='Quiet time cancelled.';
+  }catch(error){
+    contextStatus.textContent=error.message;
+  }finally{
+    contextSnoozeClear.disabled=false;
+  }
+});
+if(contextStatus){
+  refreshContext();
+  setInterval(refreshContext,2000);
+}
+
+const activityStatus=$('activity-status');
+const activityEnabled=$('activity-history-enabled');
+const activityDate=$('activity-date');
+const activityDays=$('activity-days');
+const activityMetrics=[
+  ['focus_session_seconds','Tracked focus-session minutes','focus_coverage_seconds','focus_uncovered_seconds'],
+  ['declared_break_seconds','Declared break minutes','break_coverage_seconds','break_uncovered_seconds'],
+  ['entertainment_category_seconds','Observed entertainment-category minutes','entertainment_coverage_seconds','entertainment_uncovered_seconds'],
+];
+const activityMetricNames=Object.fromEntries(activityMetrics.map(([key,label])=>[key,label]));
+
+function appendActivityText(parent,tag,text,className){
+  const node=document.createElement(tag);
+  node.textContent=text;
+  if(className)node.className=className;
+  parent.append(node);
+  return node;
+}
+
+function renderActivityDays(days){
+  activityDays.replaceChildren();
+  for(const day of days){
+    const card=document.createElement('article');
+    card.className='activity-day';
+    appendActivityText(card,'h3',`${day.date} · ${day.timezone}`);
+    const list=document.createElement('dl');
+    const rows=[['Tracked coverage',day.tracked_seconds],...activityMetrics.map(([metric,label,coverage,uncovered])=>[
+      label,day[metric],`${duration(day[coverage]||0)} covered · ${duration(day[uncovered]||0)} uncovered`
+    ])];
+    for(const row of rows){
+      const [label,value,note]=row;
+      appendActivityText(list,'dt',label);
+      appendActivityText(list,'dd',note===undefined?duration(value||0):`${duration(value||0)} · ${note}`);
+    }
+    card.append(list);
+    if(day.corrections?.length){
+      appendActivityText(card,'p',`${day.corrections.length} user correction${day.corrections.length===1?'':'s'} recorded.`);
+    }
+    const form=document.createElement('form');
+    form.className='activity-correction';
+    form.dataset.date=day.date;
+    appendActivityText(form,'label','Remove minutes from a disputed classification');
+    const select=document.createElement('select');
+    select.setAttribute('aria-label','Metric to correct');
+    for(const [key,label] of activityMetrics){
+      const option=document.createElement('option');
+      option.value=key;
+      option.textContent=label;
+      select.append(option);
+    }
+    form.append(select);
+    const amount=document.createElement('input');
+    amount.type='number'; amount.min='1'; amount.max='1440'; amount.step='1'; amount.value='1';
+    amount.required=true; amount.setAttribute('aria-label','Minutes to remove');
+    form.append(amount);
+    const correct=document.createElement('button');
+    correct.type='submit'; correct.textContent='Record correction';
+    form.append(correct);
+    card.append(form);
+    activityDays.append(card);
+  }
+}
+
+async function refreshActivity(){
+  if(!activityStatus||!activityDate)return;
+  try{
+    const selected=activityDate.value;
+    const response=await fetch(`/api/activity-history?date=${encodeURIComponent(selected)}`,{cache:'no-store'});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok||!payload)throw new Error(payload?.error||'Daily reflection is unavailable.');
+    activityEnabled.checked=payload.enabled===true;
+    renderActivityDays(payload.days||[]);
+    activityStatus.textContent=payload.enabled&&!payload.collection_available
+      ?'Activity-history opt-in is on, but laptop context tracking is disabled. No new summaries can be collected until it is enabled.'
+      :payload.enabled
+      ?(payload.days?.length?`Showing local totals through ${selected}. Data expires after ${payload.retention_days} days.`:'No measured activity is stored for this day yet.')
+      :'Activity history is off. No new daily totals are being saved.';
+  }catch(error){activityStatus.textContent=error.message;}
+}
+
+activityEnabled?.addEventListener('change',async()=>{
+  activityEnabled.disabled=true;
+  try{
+    const response=await fetch('/api/activity-history/settings',{method:'PUT',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({enabled:activityEnabled.checked})});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok)throw new Error(payload?.error||'Activity-history setting could not be changed.');
+    activityStatus.textContent=payload.enabled?'Daily activity totals are enabled on this laptop.':'Daily activity totals are paused; saved days remain until deleted or expired.';
+  }catch(error){activityEnabled.checked=!activityEnabled.checked;activityStatus.textContent=error.message;}
+  finally{activityEnabled.disabled=false;}
+});
+activityDate?.addEventListener('change',refreshActivity);
+$('activity-load')?.addEventListener('click',refreshActivity);
+activityDays?.addEventListener('submit',async event=>{
+  const form=event.target.closest('.activity-correction');
+  if(!form)return;
+  event.preventDefault();
+  const [metric,amount]=form.querySelectorAll('select,input');
+  const button=form.querySelector('button');
+  button.disabled=true;
+  try{
+    const response=await fetch('/api/activity-history/corrections',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({date:form.dataset.date,metric:metric.value,remove_minutes:Number(amount.value)})});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok)throw new Error(payload?.error||'Correction could not be saved.');
+    activityStatus.textContent=`Correction recorded for ${activityMetricNames[payload.correction.metric]||'activity'}.`;
+    await refreshActivity();
+  }catch(error){activityStatus.textContent=error.message;button.disabled=false;}
+});
+$('activity-delete')?.addEventListener('click',async()=>{
+  if(!window.confirm('Delete all saved daily activity totals and corrections? This cannot be undone.'))return;
+  const button=$('activity-delete'); button.disabled=true;
+  try{
+    const response=await fetch('/api/activity-history',{method:'DELETE'});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok)throw new Error(payload?.error||'Activity history could not be deleted.');
+    activityStatus.textContent='All saved activity totals and corrections were deleted.';
+    await refreshActivity();
+  }catch(error){activityStatus.textContent=error.message;}
+  finally{button.disabled=false;}
+});
+if(activityStatus)refreshActivity();

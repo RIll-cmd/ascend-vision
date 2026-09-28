@@ -1,6 +1,6 @@
 # Discord phone chat: staging operations
 
-This is the optional, single-owner Discord channel for Ascend Vision. It accepts only `/ask`, `/status`, `/newchat`, and `/link` as application commands in a private Discord context. The process uses the existing phone message handler, with a separate `discord_dm` session from the PWA. It does not listen to normal messages, open an inbound HTTP port, or start the desktop and camera process.
+This is the optional, single-owner Discord channel for Ascend Vision. It accepts only `/ask`, `/status`, `/context`, `/newchat`, and `/link` as application commands in a private Discord context. The process uses the existing phone message handler, with a separate `discord_dm` session from the PWA. `/context` and laptop-context questions in `/ask` require a verified Discord link and the separate laptop-context sharing opt-in. It does not listen to normal messages, open an inbound HTTP port, or start the desktop and camera process.
 
 Discord receives and processes the commands and prompts submitted in its client. Treat Discord as an external platform with its own retention and account controls. Vision's bot does not intentionally save a chat transcript; approved memories can still use Vision's local memory store under the existing memory policy. Explicit memory approval, editing, and deletion are available only in the dashboard.
 

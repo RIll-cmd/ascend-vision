@@ -77,14 +77,14 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Optional Ascend Vision Discord DM bot")
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("config.yaml"))
     parser.add_argument("--sync-commands", action="store_true",
-                        help="Explicitly publish the four global slash commands at startup")
+                        help="Explicitly publish the five global slash commands at startup")
     args = parser.parse_args(argv)
-    configure_private_logging()
     try:
         settings = DiscordBotSettings.from_environ()
     except ValueError as exc:
         LOG.error("Discord bot configuration failed: %s", exc)
         return 2
+    configure_private_logging()
     try:
         config = load_config(args.config)
         bot = build_discord_bot(settings, config, sync_commands=args.sync_commands)

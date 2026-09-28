@@ -3,10 +3,13 @@
 from collections import deque
 from dataclasses import dataclass, field
 import logging
+import secrets
 import threading
 import time
 from typing import Callable
+from urllib.parse import urlsplit
 
+from browser.authorization import ActionProposal, GrantBook
 from browser.contracts import BrowserDecision, BrowserTaskRequest
 from browser.executor import BrowserExecutor, BrowserObservation
 
@@ -46,6 +49,7 @@ class BrowserTaskEvent:
     timestamp: float
     state: str
     summary: str
+    proposal: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,8 @@ class _Task:
     result: dict | None = None
     pause_requested: bool = False
     stop_requested: bool = False
+    pending_proposal: ActionProposal | None = None
+    authorization_result: bool | None = None
     created_at: float = field(default_factory=time.monotonic)
     terminal_activity_at: float | None = None
 
@@ -87,6 +93,7 @@ class BrowserTaskService:
                  decision_provider: Callable[[BrowserTaskRequest, BrowserObservation], object] | None = None,
                  *, max_decisions: int = 20, max_actions: int = 30, max_pages: int = 3,
                  max_queued_tasks: int = 4, task_timeout_seconds: int = 180,
+                 enable_mutations: bool = False,
                  clock: Callable[[], float] = time.time,
                  retention_clock: Callable[[], float] = time.monotonic):
         self._executor_factory = executor_factory or BrowserExecutor
@@ -96,7 +103,11 @@ class BrowserTaskService:
         self._max_pages = max_pages
         self._max_queued_tasks = max_queued_tasks
         self._task_timeout_seconds = task_timeout_seconds
+        if type(enable_mutations) is not bool:
+            raise ValueError('enable_mutations must be a boolean')
+        self._enable_mutations = enable_mutations
         self._clock = clock
+        self._grants = GrantBook(clock=clock)
         self._retention_clock = retention_clock
         self._condition = threading.Condition(threading.RLock())
         self._tasks: dict[str, _Task | _Tombstone] = {}
@@ -186,6 +197,32 @@ class BrowserTaskService:
             self._condition.notify_all()
             return self._receipt(task)
 
+    def decide(self, task_id: str, action_id: str, proposal_digest: str, approved: bool,
+               session_key: tuple[str, str, str]) -> TaskReceipt:
+        if type(approved) is not bool:
+            raise ValueError('approved must be a boolean')
+        if not isinstance(action_id, str) or not action_id or len(action_id) > 128:
+            raise ValueError('action_id is invalid')
+        if not isinstance(proposal_digest, str) or len(proposal_digest) != 64:
+            raise ValueError('proposal digest is invalid')
+        with self._condition:
+            task = self._owned_task(task_id, session_key)
+            if isinstance(task, _Tombstone) or task.state != 'waiting_for_user':
+                raise ValueError('browser task has no pending action review')
+            proposal = task.pending_proposal
+            owner = task.request.session_key[0]
+            if proposal is None or proposal.action_id != action_id or proposal.digest != proposal_digest:
+                raise ValueError('the browser action proposal changed; review the latest action')
+            if approved:
+                grant = self._grants.approve(task_id, action_id, proposal_digest, owner)
+                if grant is None:
+                    raise ValueError('the browser action proposal expired')
+            elif not self._grants.reject(task_id, action_id, proposal_digest, owner):
+                raise ValueError('the browser action proposal expired')
+            task.authorization_result = approved
+            self._condition.notify_all()
+            return self._receipt(task)
+
     def close(self, timeout_seconds: float = 3.0) -> None:
         join_deadline = time.monotonic() + max(0.0, timeout_seconds)
         with self._condition:
@@ -251,11 +288,12 @@ class BrowserTaskService:
                     return
                 self._condition.wait(timeout=.5)
 
-    def _append_event(self, task: _Task, state: str, summary: str) -> None:
+    def _append_event(self, task: _Task, state: str, summary: str, proposal: dict | None = None) -> None:
         task.state = state
         if state in TERMINAL_STATES:
             task.terminal_activity_at = self._retention_clock()
-        event = BrowserTaskEvent(task.request.task_id, task.next_sequence, self._clock(), state, summary[:500])
+        event = BrowserTaskEvent(task.request.task_id, task.next_sequence, self._clock(),
+                                 state, summary[:500], proposal)
         task.next_sequence += 1
         task.events.append(event)
 
@@ -337,6 +375,18 @@ class BrowserTaskService:
                         current = executor.observe(task.request.task_id)
                         observations[current.observation_id] = current
                         continue
+                    if self._requires_review(decision, current):
+                        if not self._enable_mutations:
+                            raise PermissionError('Authenticated browser actions are disabled.')
+                        proposal = self._proposal(task, current, decision, deadline)
+                        if not self._await_authorization(task, proposal, deadline):
+                            if task.stop_requested or self._closing:
+                                self._cancel_task(task)
+                            else:
+                                self._finish(task, 'partial', 'The owner rejected or did not review the proposed browser action.', [])
+                            return
+                        if not self._grants.consume(proposal, owner=task.request.session_key[0]):
+                            raise PermissionError('The one-time browser action grant expired or changed.')
                     if decision.action != 'observe':
                         actions += 1
                         if actions > self._max_actions:
@@ -359,6 +409,10 @@ class BrowserTaskService:
             return executor.navigate(task_id, args['url'])
         if decision.action == 'click':
             return executor.click(task_id, current.observation_id, args['element_ref'])
+        if decision.action == 'fill':
+            return executor.fill(task_id, current.observation_id, args['element_ref'], args['value'])
+        if decision.action == 'select':
+            return executor.select(task_id, current.observation_id, args['element_ref'], args['value'])
         if decision.action == 'scroll':
             return executor.scroll(task_id, current.observation_id, args['direction'], args['pixels'])
         if decision.action == 'back':
@@ -368,6 +422,61 @@ class BrowserTaskService:
         if decision.action == 'observe':
             return executor.observe(task_id)
         raise PermissionError('This browser capability is not available in public research.')
+
+    @staticmethod
+    def _requires_review(decision: BrowserDecision, current: BrowserObservation) -> bool:
+        if decision.action in {'fill', 'select'}:
+            return True
+        if decision.action == 'click':
+            element = next((item for item in current.elements
+                            if item.element_ref == decision.arguments['element_ref']), None)
+            return element is None or element.kind != 'page_link'
+        return decision.action in {'submit', 'upload', 'download'}
+
+    def _proposal(self, task: _Task, current: BrowserObservation, decision: BrowserDecision,
+                  deadline: float) -> ActionProposal:
+        args = decision.arguments
+        target_ref = args.get('element_ref', '')
+        element = next((item for item in current.elements if item.element_ref == target_ref), None)
+        if element is None:
+            raise PermissionError('The proposed browser action does not target a current observed element.')
+        parsed = urlsplit(current.url)
+        origin = f'{parsed.scheme}://{parsed.netloc}'
+        action_arguments = {'value': args['value']} if decision.action in {'fill', 'select'} else {}
+        effect = decision.expected_result.strip() or (
+            f"{decision.action.title()} {element.label or 'the selected control'}"
+            + (f" with {args['value']}" if 'value' in args else '')
+        )
+        return ActionProposal(
+            task_id=task.request.task_id,
+            action_id=secrets.token_urlsafe(18),
+            owner=task.request.session_key[0],
+            observation_id=current.observation_id,
+            document_revision=current.document_revision,
+            origin=origin,
+            action=decision.action,
+            target_ref=target_ref,
+            target_label=element.label,
+            arguments=action_arguments,
+            expected_effect=effect[:500],
+            expires_at=min(deadline, self._clock() + 600),
+        )
+
+    def _await_authorization(self, task: _Task, proposal: ActionProposal, deadline: float) -> bool:
+        with self._condition:
+            task.pending_proposal = proposal
+            task.authorization_result = None
+            self._grants.register(proposal)
+            self._append_event(task, 'waiting_for_user',
+                               'Review and approve or reject this exact browser action.',
+                               proposal=proposal.to_payload())
+            while (task.authorization_result is None and not task.stop_requested and not self._closing
+                   and self._clock() < deadline):
+                self._condition.wait(timeout=min(.5, max(0.0, deadline - self._clock())))
+            approved = task.authorization_result is True and not task.stop_requested and not self._closing
+            task.pending_proposal = None
+            task.authorization_result = None
+            return approved
 
     def _await_dispatch(self, task: _Task, deadline: float) -> bool:
         with self._condition:

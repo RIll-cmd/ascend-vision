@@ -6,7 +6,7 @@ import weakref
 import pytest
 
 from browser.contracts import BrowserTaskRequest
-from browser.executor import BrowserObservation
+from browser.executor import BrowserElement, BrowserObservation
 from browser.service import BrowserTaskService, TaskNotFound, TaskQueueFull
 
 
@@ -22,16 +22,17 @@ def request(task_id='task-1', owner='owner-1'):
     })
 
 
-def observation(task_id, observation_id='obs-1', url='https://example.org/docs'):
+def observation(task_id, observation_id='obs-1', url='https://example.org/docs', elements=()):
     return BrowserObservation(task_id, 'page-1', 1, observation_id,
                               '2026-09-28T00:00:00+00:00', url,
-                              'Example', 'Official documentation text.', (), False)
+                              'Example', 'Official documentation text.', tuple(elements), False)
 
 
 class ScriptedExecutor(AbstractContextManager):
     def __init__(self):
         self.calls = []
         self.observe_calls = 0
+        self.current = None
 
     def __enter__(self):
         return self
@@ -41,11 +42,23 @@ class ScriptedExecutor(AbstractContextManager):
 
     def observe(self, task_id):
         self.observe_calls += 1
-        return observation(task_id)
+        self.current = observation(task_id, elements=(
+            BrowserElement('field-1', 'textbox', 'Message', 'input'),
+            BrowserElement('send-1', 'button', 'Send message', 'button'),
+        ))
+        return self.current
 
     def navigate(self, task_id, url):
         self.calls.append(('navigate', url))
         return observation(task_id, 'obs-2', url)
+
+    def fill(self, task_id, observation_id, element_ref, value):
+        self.calls.append(('fill', element_ref, value))
+        return observation(task_id, 'obs-2')
+
+    def click(self, task_id, observation_id, element_ref):
+        self.calls.append(('click', element_ref))
+        return observation(task_id, 'obs-2')
 
     def close(self):
         pass
@@ -124,25 +137,40 @@ def test_service_stop_prevents_a_late_model_decision_from_dispatching():
         service.close()
 
 
-def test_service_fails_closed_when_model_proposes_unsupported_form_edits():
+def test_service_holds_a_form_edit_until_owner_approves_the_exact_proposal():
     executor = ScriptedExecutor()
+    decisions = iter([
+        {'schema_version': 1, 'observation_id': 'obs-1', 'action': 'fill',
+         'arguments': {'element_ref': 'field-1', 'value': 'Hello there'},
+         'expected_result': 'Prepare the message.'},
+        {'schema_version': 1, 'observation_id': 'obs-2', 'action': 'finish',
+         'arguments': {'finding': 'The message was prepared.',
+                       'source_observation_ids': ['obs-2']}},
+    ])
     service = BrowserTaskService(
         lambda: executor,
-        lambda _request, _observation: {
-            'schema_version': 1,
-            'observation_id': 'obs-1',
-            'action': 'fill',
-            'arguments': {'element_ref': 'field-1', 'value': 'unexpected write'},
-        },
+        lambda _request, _observation: next(decisions),
+        enable_mutations=True,
     )
     try:
         service.start()
         receipt = service.submit(request())
-        done = wait_for_state(service, receipt.task_id, 'owner-1', {'failed', 'partial'})
+        pending = wait_for_state(service, receipt.task_id, 'owner-1', {'waiting_for_user'})
+        event = next(item for item in pending.events if item.proposal is not None)
 
-        assert done.state == 'failed'
+        assert event.proposal['action'] == 'fill'
+        assert event.proposal['target_label'] == 'Message'
+        assert event.proposal['arguments'] == {'value': 'Hello there'}
         assert executor.calls == []
-        assert executor.observe_calls == 1
+        with pytest.raises(TaskNotFound):
+            service.decide(receipt.task_id, event.proposal['action_id'], event.proposal['digest'], True,
+                           ('other-owner', 'dashboard', 'session-1'))
+
+        service.decide(receipt.task_id, event.proposal['action_id'], event.proposal['digest'], True,
+                       ('owner-1', 'dashboard', 'session-1'))
+        done = wait_for_state(service, receipt.task_id, 'owner-1', {'completed', 'failed'})
+        assert done.state == 'completed'
+        assert executor.calls == [('fill', 'field-1', 'Hello there')]
     finally:
         service.close()
 

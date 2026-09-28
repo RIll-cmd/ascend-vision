@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -7,7 +7,7 @@ from assistant.tool_runtime import ToolCallError, ToolPolicyError, ToolRuntime, 
 from integrations.status_shelf import ShelfService, ShelfSnapshot
 
 
-NOW = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc)
 
 
 def service(name, state, *, instance="desktop", service_type="agent"):
@@ -124,7 +124,8 @@ def test_targeted_status_is_derived_from_shelf_state():
         service("codex-cli", "working"),
     ))
 
-    assert result == "Codex CLI is working."
+    assert result.startswith("Codex CLI is working.")
+    assert "status shelf, updated" in result
     assert "Antigravity" not in result
 
 
@@ -135,7 +136,8 @@ def test_multiple_named_agents_are_all_reported():
         service("codex-cli", "working"),
     ))
 
-    assert result == "Antigravity is idle; Codex CLI is working."
+    assert result.startswith("Antigravity is idle; Codex CLI is working.")
+    assert "status shelf, updated" in result
 
 
 def test_missing_agent_in_multiple_targets_is_explicit():
@@ -173,9 +175,8 @@ def test_missing_named_agent_is_not_invented():
 def test_unknown_named_agent_is_explicitly_missing_from_shelf():
     intent = parse_status_intent("What is Claude's status?")
 
-    assert render_status_answer(intent, snapshot(service("codex-cli", "working"))) == (
-        "I couldn't find Claude in Ascend Hub's status shelf."
-    )
+    assert "I couldn't find Claude in Ascend Hub's status shelf." in render_status_answer(
+        intent, snapshot(service("codex-cli", "working")))
 
 
 def test_idle_does_not_claim_an_agent_finished():
@@ -204,6 +205,17 @@ def test_multiple_agent_completion_question_does_not_guess_task_outcomes():
     assert "does not confirm whether their last tasks finished" in result
 
 
+def test_stale_status_shelf_cannot_be_answered_as_current():
+    intent = parse_status_intent("Is Codex CLI still working?")
+    stale = ShelfSnapshot(NOW - timedelta(minutes=5), (service("codex-cli", "working"),))
+
+    result = render_status_answer(intent, stale, now=NOW)
+
+    assert "cannot verify" in result.lower()
+    assert "stale" in result.lower()
+    assert "Codex CLI is working" not in result
+
+
 def test_empty_shelf_reports_no_registered_ai_agents():
     intent = parse_status_intent("Which AIs are online?")
-    assert render_status_answer(intent, snapshot()) == "Ascend Hub has no AI agent status to report."
+    assert render_status_answer(intent, snapshot()).startswith("Ascend Hub has no AI agent status to report.")

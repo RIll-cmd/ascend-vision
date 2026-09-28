@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
@@ -19,6 +20,9 @@ _JOB_FIELDS = frozenset({
     "messageId", "ownerId", "deviceId", "sessionId", "text", "expiresAt",
     "attempt", "leaseId", "leaseExpiresAt",
 })
+_AUDIO_JOB_FIELDS = _JOB_FIELDS | {"audioBase64", "audioMimeType"}
+_AUDIO_TYPES = frozenset({"audio/webm", "audio/ogg", "audio/mp4", "audio/m4a", "audio/aac", "audio/wav"})
+_MAX_AUDIO_BYTES = 5 * 1024 * 1024
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
@@ -40,15 +44,17 @@ class WorkerJob:
     owner_id: str
     device_id: str
     session_id: str
-    text: str
+    text: str | None
     expires_at: datetime
     attempt: int
     lease_id: str
     lease_expires_at: datetime
+    audio_base64: str | None = None
+    audio_mime_type: str | None = None
 
     @classmethod
     def parse(cls, payload: object, *, owner_id: str) -> "WorkerJob":
-        if not isinstance(payload, dict) or frozenset(payload) != _JOB_FIELDS:
+        if not isinstance(payload, dict) or frozenset(payload) not in {_JOB_FIELDS, _AUDIO_JOB_FIELDS}:
             raise ValueError("phone worker job is invalid: fields")
         try:
             message_id = str(UUID(payload["messageId"]))
@@ -61,8 +67,21 @@ class WorkerJob:
             if not isinstance(payload[key], str) or not _IDENTIFIER.fullmatch(payload[key]):
                 raise ValueError(f"phone worker job is invalid: {key}")
         text = payload["text"]
-        if not isinstance(text, str) or not text.strip() or len(text) > 4_000:
+        audio_data = payload.get("audioBase64")
+        mime_type = payload.get("audioMimeType")
+        if text is not None and (not isinstance(text, str) or not text.strip() or len(text) > 4_000):
             raise ValueError("phone worker job is invalid: text")
+        if (text is None) == (audio_data is None):
+            raise ValueError("phone worker job requires exactly one of text or audio")
+        if audio_data is not None:
+            if not isinstance(audio_data, str) or not isinstance(mime_type, str) or mime_type not in _AUDIO_TYPES:
+                raise ValueError("phone worker audio job is invalid")
+            try:
+                decoded = base64.b64decode(audio_data, validate=True)
+            except Exception as error:
+                raise ValueError("phone worker audio job is invalid") from error
+            if not decoded or len(decoded) > _MAX_AUDIO_BYTES:
+                raise ValueError("phone worker audio job exceeds the size limit")
         attempt = payload["attempt"]
         if type(attempt) is not int or attempt < 1 or attempt > 3:
             raise ValueError("phone worker job is invalid: attempt")
@@ -76,6 +95,8 @@ class WorkerJob:
             attempt=attempt,
             lease_id=payload["leaseId"],
             lease_expires_at=_timestamp(payload["leaseExpiresAt"], "leaseExpiresAt"),
+            audio_base64=audio_data,
+            audio_mime_type=mime_type,
         )
 
 
@@ -201,9 +222,17 @@ class PhoneQueueWorker:
 
         renewal = asyncio.create_task(renew_while_generating())
         try:
-            reply = await asyncio.to_thread(
-                self.handler.handle, job.owner_id, "phone_pwa", job.session_id, job.text,
-            )
+            if job.audio_base64 is not None:
+                audio = base64.b64decode(job.audio_base64, validate=True)
+                handler = getattr(self.handler, "handle_audio", None)
+                if not callable(handler):
+                    raise RuntimeError("Phone audio transcription is not configured")
+                reply = await asyncio.to_thread(handler, job.owner_id, "phone_pwa", job.session_id,
+                                                audio, job.audio_mime_type)
+            else:
+                reply = await asyncio.to_thread(
+                    self.handler.handle, job.owner_id, "phone_pwa", job.session_id, job.text,
+                )
             text = getattr(reply, "text", None)
             if not isinstance(text, str) or not text.strip() or len(text) > 8_000:
                 result = {"status": "failed", "errorCode": "assistant_unavailable"}
@@ -278,3 +307,37 @@ def build_phone_worker(config, handler, *, environ=None, transport=None):
         lease_renew_interval_seconds=config.lease_renew_interval_seconds,
         shutdown_timeout_seconds=config.shutdown_timeout_seconds,
     )
+
+
+class GeminiAudioTranscriber:
+    """One-shot, text-only transcription; audio stays in memory in the laptop worker."""
+
+    def __init__(self, *, api_key: str, model: str, client=None):
+        if not api_key.strip() or not model.strip():
+            raise ValueError("Gemini transcription requires an API key and model")
+        self.model = model
+        if client is None:
+            from google import genai
+            from google.genai import types
+            client = genai.Client(api_key=api_key, vertexai=False,
+                                  http_options=types.HttpOptions(timeout=30_000))
+        self.client = client
+
+    def transcribe(self, audio_data: bytes, mime_type: str) -> str:
+        if not isinstance(audio_data, bytes) or not audio_data or len(audio_data) > _MAX_AUDIO_BYTES:
+            raise ValueError("audio payload is invalid")
+        if mime_type not in _AUDIO_TYPES:
+            raise ValueError("audio format is unsupported")
+        from google.genai import types
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=[
+                "Transcribe the spoken words exactly. Return only the transcript, without commentary or interpretation.",
+                types.Part.from_bytes(data=audio_data, mime_type=mime_type),
+            ],
+            config=types.GenerateContentConfig(temperature=0, max_output_tokens=800),
+        )
+        transcript = getattr(response, "text", None)
+        if not isinstance(transcript, str) or not transcript.strip():
+            raise ValueError("Gemini transcription was empty")
+        return transcript.strip()[:4_001]

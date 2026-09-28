@@ -9,18 +9,55 @@ import logging
 import os
 import re
 import threading
+import time
+import uuid
 from typing import Literal
 
+from assistant.context_packet import (
+    build_context_packet, render_activity_answer, render_break_answer,
+    validate_context_read_response,
+)
+from assistant.context_screen_policy import is_screen_inspection_request
+from assistant.browser_intent import parse_browser_intent
 from assistant.hub_status import parse_status_intent, render_status_answer
 from assistant.session_store import SessionContextStore, SessionKey
 from assistant.tool_runtime import ToolRuntime
+from integrations.vision_query_reader import MissionSnapshot, render_missions_answer
 from feedback import ConversationContext, LLMRoaster, OfflineRoaster, get_fallback_chat_reply
 from llm_router import get_router
+from browser.contracts import BrowserTaskRequest
+from browser.service import TaskQueueFull
 
 
 LOG = logging.getLogger(__name__)
 CONTEXT_TEXT_BUDGET = 3_000
 STATUS_UNAVAILABLE_TEXT = "I cannot verify Ascend Hub AI status right now."
+MISSIONS_UNAVAILABLE_TEXT = "I cannot verify today's Ascend Core missions right now."
+LAPTOP_CONTEXT_LOCAL_ONLY_TEXT = "Laptop context is not shared with this phone or Discord session. Enable context sharing on the laptop to allow it."
+SCREEN_INSPECTION_LOCAL_ONLY_TEXT = "Screen inspection can only be started locally in Vision; screen contents are never shared to phone or Discord."
+LAPTOP_CONTEXT_UNAVAILABLE_TEXT = "I cannot read current laptop context right now."
+DAILY_REVIEW_LOCAL_ONLY_TEXT = "Daily activity history is local to the laptop and is not shared with this phone or Discord session."
+DAILY_REVIEW_UNAVAILABLE_TEXT = "I cannot read the local daily activity summary right now."
+_DAILY_REVIEW_QUESTION = re.compile(
+    r"\b(?:review|summari[sz]e|recap)\s+(?:my\s+)?(?:day|today)\b|"
+    r"\bhow\s+was\s+my\s+day\b|\bdaily\s+activity\s+summary\b", re.I,
+)
+_ACTIVITY_QUESTION = re.compile(
+    r"\b(?:what\s+am\s+i\s+doing|what(?:'s|\s+is)\s+my\s+(?:current\s+)?activity|"
+    r"what(?:'s|\s+is)\s+happening\s+at\s+my\s+desk)\b", re.I,
+)
+_BREAK_QUESTION = re.compile(r"\b(?:am\s+i\s+(?:on|taking)\s+a\s+break|did\s+i\s+declare\s+a\s+break)\b", re.I)
+_MISSIONS_QUESTION = re.compile(
+    r"\b(?:what|which|list|show|tell\s+me)\b.{0,100}\bmissions?\b|"
+    r"\bmissions?\b.{0,50}\b(?:today|current|active|have)\b", re.I,
+)
+_MISSION_MUTATION = re.compile(r"\b(?:complete|finish|claim|accept|skip|delete|cancel)\b", re.I)
+_LOCAL_CHANNELS = frozenset({"voice", "dashboard"})
+
+
+def _is_local_session(session_key: SessionKey | None) -> bool:
+    """Allow laptop sensors only for explicitly local channels (and legacy local calls)."""
+    return session_key is None or session_key[1] in _LOCAL_CHANNELS
 
 
 @dataclass(frozen=True)
@@ -34,20 +71,34 @@ class AssistantService:
 
     def __init__(self, feedback_config, llm_config=None, *, generator=None, memory_store=None,
                  tool_runtime: ToolRuntime | None = None,
-                 session_store: SessionContextStore | None = None):
+                 session_store: SessionContextStore | None = None,
+                 context_provider=None, screen_inspector=None,
+                 phone_context_sharing_enabled: bool = False,
+                 daily_summary_provider=None, browser_task_client=None,
+                 browser_automation_config=None, browser_task_submitted=None):
         self._feedback_config = feedback_config
         self._llm_config = llm_config
         self._generator = generator
         self._generator_source: Literal["model", "offline"] = "model"
         self._memory_store = memory_store
         self._tool_runtime = tool_runtime
+        self._context_provider = context_provider
+        self._screen_inspector = screen_inspector
+        self._daily_summary_provider = daily_summary_provider
+        self._browser_task_client = browser_task_client
+        self._browser_automation_config = browser_automation_config
+        self._browser_task_submitted = browser_task_submitted
+        if type(phone_context_sharing_enabled) is not bool:
+            raise ValueError("phone_context_sharing_enabled must be a boolean")
+        self._phone_context_sharing_enabled = phone_context_sharing_enabled
         self._session_store = session_store or SessionContextStore()
         self._turns: deque[tuple[str, str]] = deque(maxlen=12)
         self._suppress_session = False
         self._lock = threading.RLock()
 
     def respond(self, user_text, context=None, *, max_words=25,
-                session_key: SessionKey | None = None) -> AssistantReply:
+                session_key: SessionKey | None = None,
+                trusted_laptop_context: dict | None = None) -> AssistantReply:
         if not isinstance(user_text, str) or not user_text.strip():
             raise ValueError("user_text must be nonempty")
         if len(user_text) > 4_000:
@@ -56,6 +107,18 @@ class AssistantService:
             raise ValueError("max_words must be a positive integer")
 
         text = user_text.strip()
+        local_session = _is_local_session(session_key)
+        browser_goal = parse_browser_intent(text)
+        if browser_goal is not None:
+            return self._submit_browser_task(browser_goal, session_key, local_session)
+        shared_phone_session = bool(
+            session_key is not None and session_key[1] == "phone_pwa"
+            and self._phone_context_sharing_enabled
+        )
+        if trusted_laptop_context is not None:
+            if session_key is None or session_key[1] != "discord_dm":
+                raise ValueError("remote laptop context is only valid for a linked Discord session")
+            trusted_laptop_context = validate_context_read_response(trusted_laptop_context)
         with self._lock:
             memory_enabled = self._memory_enabled()
             if not memory_enabled:
@@ -67,6 +130,19 @@ class AssistantService:
             )
             if command_reply is not None:
                 return command_reply
+            if _DAILY_REVIEW_QUESTION.search(text):
+                if not local_session:
+                    return AssistantReply(DAILY_REVIEW_LOCAL_ONLY_TEXT, "offline")
+                if self._daily_summary_provider is None:
+                    return AssistantReply(DAILY_REVIEW_UNAVAILABLE_TEXT, "offline")
+                try:
+                    answer = self._daily_summary_provider()
+                    if not isinstance(answer, str) or not answer.strip():
+                        raise ValueError("daily summary provider returned no text")
+                    return AssistantReply(answer, "tool")
+                except Exception as exc:
+                    LOG.warning("Daily summary unavailable (%s)", type(exc).__name__)
+                    return AssistantReply(DAILY_REVIEW_UNAVAILABLE_TEXT, "offline")
             status_intent = parse_status_intent(text)
             if status_intent is not None:
                 if self._tool_runtime is None:
@@ -77,9 +153,56 @@ class AssistantService:
                 except Exception as exc:
                     LOG.warning("Hub status unavailable (%s)", type(exc).__name__)
                     return AssistantReply(STATUS_UNAVAILABLE_TEXT, "offline")
+            if is_screen_inspection_request(text):
+                if not local_session:
+                    return AssistantReply(SCREEN_INSPECTION_LOCAL_ONLY_TEXT, "offline")
+                if self._screen_inspector is None:
+                    return AssistantReply("User-requested screen inspection is unavailable right now.", "offline")
+                try:
+                    observation = self._screen_inspector.inspect_once()
+                    category = observation.category.lower().replace("_", " ")
+                    observed = observation.observed_at.astimezone().strftime("%H:%M:%S")
+                    line = " ".join(observation.observation.split())[:240]
+                    return AssistantReply(
+                        f"One-time screen capture at {observed} was immediately discarded: {category}. "
+                        f"Untrusted visual observation: {line} This estimate does not prove task progress.",
+                        "tool",
+                    )
+                except Exception as exc:
+                    LOG.warning("User-requested screen inspection unavailable (%s)", type(exc).__name__)
+                    return AssistantReply("I could not complete the requested screen check.", "offline")
+            if _MISSIONS_QUESTION.search(text) and not _MISSION_MUTATION.search(text):
+                if self._tool_runtime is None:
+                    return AssistantReply(MISSIONS_UNAVAILABLE_TEXT, "offline")
+                try:
+                    snapshot = self._tool_runtime.start_request().call("missions_summary", {})
+                    if not isinstance(snapshot, MissionSnapshot):
+                        raise TypeError("invalid missions result")
+                    return AssistantReply(render_missions_answer(snapshot), "tool")
+                except Exception as exc:
+                    LOG.warning("Core missions unavailable (%s)", type(exc).__name__)
+                    return AssistantReply(MISSIONS_UNAVAILABLE_TEXT, "offline")
+            if _ACTIVITY_QUESTION.search(text) or _BREAK_QUESTION.search(text):
+                if not (local_session or shared_phone_session or trusted_laptop_context is not None):
+                    return AssistantReply(LAPTOP_CONTEXT_LOCAL_ONLY_TEXT, "offline")
+                packet = trusted_laptop_context or self._read_laptop_context()
+                if packet is None:
+                    return AssistantReply(LAPTOP_CONTEXT_UNAVAILABLE_TEXT, "offline")
+                answer = render_break_answer(packet) if _BREAK_QUESTION.search(text) else render_activity_answer(packet)
+                return AssistantReply(answer, "tool")
             prompt_context, memory_ready = self._with_memory_context(
                 text, context, memory_enabled, session_key=session_key,
             )
+            if local_session or shared_phone_session:
+                packet = self._read_laptop_context()
+                if packet is not None:
+                    base = prompt_context if isinstance(prompt_context, ConversationContext) else ConversationContext(user_query=text)
+                    prompt_context = replace(base, laptop_context=packet)
+            elif trusted_laptop_context is not None:
+                base = prompt_context if isinstance(prompt_context, ConversationContext) else ConversationContext(user_query=text)
+                prompt_context = replace(base, laptop_context=trusted_laptop_context)
+            elif isinstance(prompt_context, ConversationContext) and prompt_context.laptop_context is not None:
+                prompt_context = replace(prompt_context, laptop_context=None)
             try:
                 generator = self._get_generator()
                 answer = generator.generate_chat(text, prompt_context, max_words=max_words)
@@ -100,6 +223,52 @@ class AssistantService:
                 text, reply.text, memory_enabled and memory_ready, session_key=session_key,
             )
             return reply
+
+    def _submit_browser_task(self, goal: str, session_key: SessionKey | None,
+                             local_session: bool) -> AssistantReply:
+        if not local_session or session_key is None or session_key[1] not in _LOCAL_CHANNELS:
+            return AssistantReply('Browser research is only available from local laptop chat or voice.', 'offline')
+        config = self._browser_automation_config
+        if config is None or not getattr(config, 'enabled', False):
+            return AssistantReply('Local browser research is not enabled on this laptop yet.', 'offline')
+        if self._browser_task_client is None:
+            return AssistantReply('The local browser service is unavailable right now.', 'offline')
+        request = BrowserTaskRequest.from_payload({
+            'schema_version': 1,
+            'task_id': uuid.uuid4().hex,
+            'session_key': list(session_key),
+            'goal': goal,
+            'provider': config.provider,
+            'scope_mode': config.scope_mode,
+            'expires_at': time.time() + config.task_timeout_seconds,
+        })
+        try:
+            receipt = self._browser_task_client.submit(request)
+        except TaskQueueFull:
+            return AssistantReply('The browser task queue is full. Stop or wait for a task to finish first.', 'offline')
+        except Exception as exc:
+            LOG.info('Browser task submission unavailable (%s)', type(exc).__name__)
+            return AssistantReply('I could not start the browser research task.', 'offline')
+        if session_key[1] == 'voice' and callable(self._browser_task_submitted):
+            try:
+                self._browser_task_submitted(receipt.task_id, session_key)
+            except Exception as exc:
+                LOG.info('Browser voice completion watcher unavailable (%s)', type(exc).__name__)
+        return AssistantReply(
+            f'Queued browser task {receipt.task_id}. I’ll use a temporary visible browser for public research only.',
+            'tool',
+        )
+
+    def _read_laptop_context(self):
+        if self._context_provider is None:
+            return None
+        try:
+            read_snapshot = getattr(self._context_provider, "read_snapshot", None)
+            snapshot = read_snapshot() if callable(read_snapshot) else self._context_provider()
+            return build_context_packet(snapshot)
+        except Exception as exc:
+            LOG.warning("Laptop context read failed (%s)", type(exc).__name__)
+            return None
 
     def clear_session(self, session_key: SessionKey) -> None:
         """Forget the temporary turns for one owner/channel/session tuple."""

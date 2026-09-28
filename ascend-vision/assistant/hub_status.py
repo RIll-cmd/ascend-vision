@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import re
 
-from integrations.status_shelf import ShelfService, ShelfSnapshot
+from integrations.status_shelf import MAX_SNAPSHOT_AGE, ShelfService, ShelfSnapshot
 
 
 _STATUS_WORDS = re.compile(
@@ -120,7 +121,19 @@ def _matches(service: ShelfService, target: str) -> bool:
     return " " + target + " " in haystack
 
 
-def render_status_answer(intent: StatusIntent, snapshot: ShelfSnapshot) -> str:
+def render_status_answer(intent: StatusIntent, snapshot: ShelfSnapshot, *, now: datetime | None = None) -> str:
+    current = now or datetime.now(timezone.utc)
+    if (snapshot.generated_at.tzinfo is None or snapshot.generated_at.utcoffset() is None
+            or current.tzinfo is None or current.utcoffset() is None):
+        return "I cannot verify Ascend Hub AI status because the shelf timestamp is invalid."
+    age_seconds = int((current.astimezone(timezone.utc) - snapshot.generated_at.astimezone(timezone.utc)).total_seconds())
+    if age_seconds < -5 or age_seconds > MAX_SNAPSHOT_AGE.total_seconds():
+        age_label = f"{max(age_seconds, 0)} seconds" if age_seconds < 3600 else f"{max(age_seconds, 0) // 3600} hours"
+        return f"I cannot verify Ascend Hub AI status because its status shelf snapshot is stale or future-dated ({age_label} old)."
+    age_seconds = max(0, age_seconds)
+    age_text = f"{age_seconds} seconds ago" if age_seconds < 60 else (
+        f"{age_seconds // 60} minutes ago" if age_seconds < 3600 else f"{age_seconds // 3600} hours ago"
+    )
     if intent.targets:
         services = [row for row in snapshot.services
                     if any(_matches(row, target) for target in intent.targets)]
@@ -128,12 +141,12 @@ def render_status_answer(intent: StatusIntent, snapshot: ShelfSnapshot) -> str:
                    if not any(_matches(row, target) for row in snapshot.services)]
         if not services:
             names = ", ".join(_KNOWN_NAMES.get(target, target.title()) for target in missing)
-            return f"I couldn't find {names} in Ascend Hub's status shelf."
+            return f"I couldn't find {names} in Ascend Hub's status shelf. Source: shelf updated {age_text}."
     else:
         services = [row for row in snapshot.services
                     if row.service_type in {"agent", "assistant", "bot", "vision"}]
         if not services:
-            return "Ascend Hub has no AI agent status to report."
+            return f"Ascend Hub has no AI agent status to report. Source: shelf updated {age_text}."
         missing = []
 
     services.sort(key=lambda row: (_name(row), row.instance_id))
@@ -155,4 +168,4 @@ def render_status_answer(intent: StatusIntent, snapshot: ShelfSnapshot) -> str:
     if intent.asks_completion:
         outcome = "their last tasks" if len(intent.targets) > 1 else "its last task"
         answer += f" The current status does not confirm whether {outcome} finished."
-    return answer
+    return f"{answer} Source: Ascend Hub status shelf, updated {age_text}."

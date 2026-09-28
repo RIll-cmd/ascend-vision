@@ -23,6 +23,164 @@ def wait_result(service):
     pytest.fail('Feedback result did not arrive')
 
 
+def test_feedback_reports_pending_legacy_speech_for_companion_arbitration():
+    service = FeedbackService(FeedbackConfig(), 45, generator=Mock(), speaker=Mock())
+    service.enabled = True
+    try:
+        assert service.speak_guarded_announcement("shadow", lambda: True)
+        assert service.has_pending_noncompanion_speech() is False
+        assert service.speak_announcement("legacy announcement")
+        assert service.has_pending_noncompanion_speech() is True
+        service.cancel_speech()
+        assert service.has_pending_noncompanion_speech() is False
+    finally:
+        service.close()
+
+
+def test_legacy_warning_preempts_queued_companion_announcement():
+    from datetime import datetime, timedelta, timezone
+
+    from assistant.companion_policy import CompanionPolicy, CompanionPreferences
+    from assistant.companion_runtime import CompanionRuntime
+    from assistant.context_runtime import ContextRuntime, ObservationEnvelope
+    from assistant.intervention_delivery import InterventionDelivery
+    from integrations.warning_state_machine import SensoryTriggerType, WarningFirstStateMachine
+
+    now = datetime(2026, 9, 28, 10, tzinfo=timezone.utc)
+    context = ContextRuntime(
+        device_id="test-device", boot_id="test-boot",
+        monotonic=lambda: 100.0, now_utc=lambda: now,
+    )
+    for source, kind, value, sequence in (
+        ("desktop_activity", "desktopActivity", "input_active", 1),
+        ("desktop_activity", "foregroundCategory", "development", 2),
+        ("session_runtime", "focusSession", "focus", 1),
+    ):
+        assert context.accept(ObservationEnvelope(
+            schema_version=1, event_id=f"{source}-{sequence}", source=source,
+            kind=kind, value=value, boot_id="test-boot", sequence=sequence,
+            observed_at=now - timedelta(seconds=2), expires_at=now + timedelta(seconds=8),
+        )) == "accepted"
+
+    service = FeedbackService(FeedbackConfig(), 45, generator=Mock(), speaker=Mock())
+    service.enabled = True
+    companion = CompanionRuntime(
+        context, CompanionPolicy(), InterventionDelivery(now=lambda: now),
+        lambda: CompanionPreferences(
+            enabled=True, mode="focus_coach", break_suggestion_enabled=True,
+            focus_session_id="focus-1", focus_session_started_at=now - timedelta(minutes=51),
+            local_speech_enabled=True,
+            speech_queue_busy=service.has_pending_noncompanion_speech(),
+        ),
+        service, now=lambda: now,
+    )
+    try:
+        tick = companion.tick()
+        assert [receipt.status for receipt in tick.receipts] == ["attempted"]
+        warning = WarningFirstStateMachine(feedback_service=service, time_fn=lambda: 100.0)
+        warning.handle_trigger(SensoryTriggerType.PHONE, now=100.0)
+        second_tick = companion.tick()
+
+        with service._jobs.mutex:
+            announcements = [job for job in service._jobs.queue if hasattr(job, "guard")]
+        assert second_tick.receipts == ()
+        assert second_tick.evaluation.decisions[0].reason_code == "speech_queue_busy"
+        assert len(announcements) == 1
+        assert announcements[0].guard is None
+        assert "Phone distraction detected" in announcements[0].text
+    finally:
+        service.close()
+
+
+def test_legacy_announcement_cancels_companion_speech_already_in_progress():
+    companion_started = threading.Event()
+    companion_cancelled = threading.Event()
+    legacy_started = threading.Event()
+
+    class CancellableSpeaker:
+        def speak(self, text, cancelled):
+            if text == "companion prompt":
+                companion_started.set()
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    if cancelled():
+                        companion_cancelled.set()
+                        return SpeechOutcome(True, False)
+                    time.sleep(0.002)
+            elif text == "legacy warning":
+                legacy_started.set()
+            return SpeechOutcome(True, True)
+
+        def close(self):
+            pass
+
+    service = FeedbackService(FeedbackConfig(), 45, generator=Mock(), speaker=CancellableSpeaker())
+    service.start()
+    try:
+        assert service.speak_guarded_announcement("companion prompt", lambda: True)
+        assert companion_started.wait(1)
+        assert service.speak_announcement("legacy warning")
+        assert companion_cancelled.wait(1)
+        assert legacy_started.wait(1)
+    finally:
+        service.close()
+
+
+def test_stop_and_resume_cancels_active_companion_then_accepts_ordinary_announcement():
+    companion_started = threading.Event()
+    companion_cancelled = threading.Event()
+    resumed_started = threading.Event()
+
+    class CancellableSpeaker:
+        def speak(self, text, cancelled):
+            if text == "companion prompt":
+                companion_started.set()
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    if cancelled():
+                        companion_cancelled.set()
+                        return SpeechOutcome(True, False)
+                    time.sleep(0.002)
+            elif text == "resumed announcement":
+                resumed_started.set()
+            return SpeechOutcome(True, True)
+
+        def close(self):
+            pass
+
+    service = FeedbackService(FeedbackConfig(), 45, generator=Mock(), speaker=CancellableSpeaker())
+    service.start()
+    try:
+        assert service.speak_guarded_announcement("companion prompt", lambda: True)
+        assert companion_started.wait(1)
+        service.cancel_speech()
+        assert companion_cancelled.wait(1)
+        assert service.speak_announcement("resumed announcement")
+        assert resumed_started.wait(1)
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("speech_kind", ["chat", "screen_audit", "event_feedback"])
+def test_nonannouncement_speech_preempts_queued_companion_prompt(speech_kind):
+    service = FeedbackService(FeedbackConfig(), 0, generator=Mock(), speaker=Mock())
+    service.enabled = True
+    try:
+        assert service.speak_guarded_announcement("companion prompt", lambda: True)
+        if speech_kind == "chat":
+            accepted = service.submit_chat("Please answer me")
+        elif speech_kind == "screen_audit":
+            accepted = service.submit_expression("screen-audit")
+        else:
+            service.set_session(7)
+            accepted = service.submit(1, 7, CONTEXT)
+        assert accepted
+        with service._jobs.mutex:
+            assert not any(getattr(job, "guard", None) is not None for job in service._jobs.queue)
+    finally:
+        service.close()
+
+
 def test_api_receives_only_allowlisted_metadata():
     client = Mock()
     client.models.generate_content.return_value = SimpleNamespace(candidates=[SimpleNamespace(finish_reason='STOP')], text='Your phone has promoted itself to project manager.')

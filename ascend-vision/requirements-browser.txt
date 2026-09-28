@@ -1,0 +1,3 @@
+# Optional visible local browser runtime. Install only for browser automation.
+playwright==1.63.0
+pywin32==311 ; sys_platform == "win32"

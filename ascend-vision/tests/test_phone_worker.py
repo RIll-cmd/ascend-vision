@@ -153,13 +153,53 @@ def test_worker_renews_lease_routes_isolated_phone_session_and_completes_once():
     asyncio.run(scenario())
 
 
+def test_worker_routes_audio_to_opt_in_transcriber_without_logging_audio_or_transcript(caplog):
+    import base64
+    from integrations.phone_worker import PhoneQueueWorker
+
+    class AudioHandler(Handler):
+        def handle_audio(self, owner_id, channel, session_id, audio, mime_type):
+            self.calls.append((owner_id, channel, session_id, len(audio), mime_type))
+            from assistant.service import AssistantReply
+            return AssistantReply("transcribed answer", "model")
+
+    async def scenario():
+        payload = _job(text=None, audioBase64=base64.b64encode(b"private-recording").decode(), audioMimeType="audio/webm")
+        client = QueueClient(payload)
+        handler = AudioHandler()
+        with caplog.at_level(logging.WARNING):
+            assert await PhoneQueueWorker(client, handler, owner_id="owner-1",
+                                          clock=lambda: datetime(2026, 9, 26, 12, tzinfo=timezone.utc)).run_once()
+        assert handler.calls == [("owner-1", "phone_pwa", "tab-1", len(b"private-recording"), "audio/webm")]
+        assert client.calls[-1][2] == {"status": "completed", "reply": "transcribed answer"}
+        assert "private-recording" not in caplog.text
+
+    asyncio.run(scenario())
+
+
+def test_gemini_audio_transcriber_uses_inline_audio_and_only_returns_text():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from integrations.phone_worker import GeminiAudioTranscriber
+
+    client = Mock()
+    client.models.generate_content.return_value = SimpleNamespace(text="hello there")
+    transcriber = GeminiAudioTranscriber(api_key="test-only", model="gemini-test", client=client)
+    assert transcriber.transcribe(b"audio", "audio/webm") == "hello there"
+    call = client.models.generate_content.call_args.kwargs
+    assert call["model"] == "gemini-test"
+    assert "Transcribe the spoken words exactly" in call["contents"][0]
+    assert call["contents"][1].inline_data.mime_type == "audio/webm"
+
+
 def test_worker_fails_generically_without_logging_prompt_reply_or_exception(caplog):
     from integrations.phone_worker import PhoneQueueWorker
 
     async def scenario():
         client = QueueClient(_job())
         handler = Handler(error=RuntimeError("secret prompt and provider response"))
-        worker = PhoneQueueWorker(client, handler, owner_id="owner-1")
+        worker = PhoneQueueWorker(client, handler, owner_id="owner-1",
+                                  clock=lambda: datetime(2026, 9, 26, 12, tzinfo=timezone.utc))
         with caplog.at_level(logging.WARNING):
             assert await worker.run_once() is True
         assert client.calls[-1][2] == {"status": "failed", "errorCode": "assistant_unavailable"}

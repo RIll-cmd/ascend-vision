@@ -16,6 +16,8 @@ class SessionManager:
         self.update_seconds = update_seconds
         self.mode = 'background'
         self.session_id = None
+        self.session_started_at = None
+        self._state_lock = threading.RLock()
         self.quit_requested = False
         self._requests = queue.Queue(maxsize=64)
         self._active_by_type: dict[str, tuple[int, int]] = {}
@@ -49,15 +51,22 @@ class SessionManager:
         return set(self._active_by_type.keys())
 
     def start(self, mode='background'):
-        if self.session_id is not None:
-            raise RuntimeError('Session manager has already started')
-        recovered = self.db.recover()
-        if recovered:
-            LOG.warning('Recovered %d interrupted session(s) at their last heartbeat', recovered)
-        self.session_id = self.db.start_session(mode, self.now())
-        self.mode = mode
-        self._last_heartbeat = time.monotonic()
-        LOG.info('SESSION_STARTED id=%d mode=%s', self.session_id, self.mode)
+        with self._state_lock:
+            if self.session_id is not None:
+                raise RuntimeError('Session manager has already started')
+            recovered = self.db.recover()
+            if recovered:
+                LOG.warning('Recovered %d interrupted session(s) at their last heartbeat', recovered)
+            self.session_started_at = self.now()
+            self.session_id = self.db.start_session(mode, self.session_started_at)
+            self.mode = mode
+            self._last_heartbeat = time.monotonic()
+            LOG.info('SESSION_STARTED id=%d mode=%s', self.session_id, self.mode)
+
+    def session_snapshot(self):
+        """Return mode, session ID, and start time from one consistent state read."""
+        with self._state_lock:
+            return self.session_id, self.mode, self.session_started_at
 
     def request(self, command):
         if command not in ('focus', 'background', 'toggle', 'quit'):
@@ -72,6 +81,10 @@ class SessionManager:
             LOG.warning('Session command queue full; request ignored')
 
     def process_commands(self, at=None):
+        with self._state_lock:
+            self._process_commands(at)
+
+    def _process_commands(self, at=None):
         if self._quit.is_set():
             self.quit_requested = True
             return
@@ -88,6 +101,7 @@ class SessionManager:
             if mode != self.mode:
                 self.session_id = self.db.switch_session(self.session_id, mode, at)
                 self.mode = mode
+                self.session_started_at = at
                 LOG.info('SESSION_STARTED id=%d mode=%s', self.session_id, mode)
         if time.monotonic() - self._last_heartbeat >= self.heartbeat_seconds:
             self.db.heartbeat(self.session_id, at)
@@ -141,7 +155,9 @@ class SessionManager:
             del self._active_by_type[target_type]
 
     def close(self, at=None):
-        if self.session_id is not None:
-            self.db.end_session(self.session_id, at or self.now())
-            LOG.info('SESSION_ENDED id=%d mode=%s', self.session_id, self.mode)
-            self.session_id = None
+        with self._state_lock:
+            if self.session_id is not None:
+                self.db.end_session(self.session_id, at or self.now())
+                LOG.info('SESSION_ENDED id=%d mode=%s', self.session_id, self.mode)
+                self.session_id = None
+                self.session_started_at = None

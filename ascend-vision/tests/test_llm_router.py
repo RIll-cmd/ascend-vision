@@ -196,7 +196,7 @@ def test_llm_config_defaults_and_validation():
     cfg = LLMConfig()
     assert cfg.groq_model == "llama-3.1-8b-instant"
     assert cfg.cerebras_model == "llama3.1-8b"
-    assert cfg.gemini_model == "gemini-2.5-flash"
+    assert cfg.gemini_model == "gemini-3.6-flash"
     assert cfg.groq_api_key_env == "GROQ_API_KEY"
     assert cfg.cerebras_api_key_env == "CEREBRAS_API_KEY"
     assert cfg.gemini_api_key_env == "GEMINI_API_KEY"
@@ -230,3 +230,102 @@ def test_llm_roaster_integration(mock_groq, mock_cerebras, mock_gemini):
     assert "Groq says" in reply
 
     roaster.close()
+
+
+def test_browser_structured_response_stays_with_the_selected_provider_and_reports_usage():
+    from types import SimpleNamespace
+
+    class GeminiClient:
+        def __init__(self):
+            self.models = self
+            self.models_seen = []
+
+        def generate_content(self, *, model, contents, config):
+            self.models_seen.append(model)
+            return SimpleNamespace(
+                text='{"action":"observe"}',
+                usage_metadata=SimpleNamespace(prompt_token_count=14, candidates_token_count=6),
+            )
+
+    gemini = GeminiClient()
+    router = LLMRouter(LLMConfig(), gemini_client=gemini)
+
+    response = router.generate_browser_structured_response(
+        'gemini', '{"goal":"research"}', system_prompt='JSON only', max_tokens=200,
+    )
+
+    assert response.data == {'action': 'observe'}
+    assert response.provider == 'gemini'
+    assert response.model == 'gemini-3.6-flash'
+    assert response.input_tokens == 14
+    assert response.output_tokens == 6
+    assert gemini.models_seen == ['gemini-3.6-flash']
+
+
+def test_browser_structured_response_does_not_fall_back_when_selected_provider_fails():
+    class FailingGemini:
+        class models:
+            @staticmethod
+            def generate_content(**_kwargs):
+                raise OSError('offline')
+
+    class OtherProvider:
+        called = False
+
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**_kwargs):
+                    OtherProvider.called = True
+                    raise AssertionError('unapproved provider must not be used')
+
+    router = LLMRouter(LLMConfig(), gemini_client=FailingGemini(), cerebras_client=OtherProvider())
+
+    with pytest.raises(RuntimeError, match='selected browser provider'):
+        router.generate_browser_structured_response('gemini', 'prompt')
+
+    assert OtherProvider.called is False
+
+
+def test_groq_key_pool_rotates_to_backup_key_on_rate_limit():
+    import groq
+    client1 = Mock()
+    client1.chat.completions.create.side_effect = groq.RateLimitError(
+        message="Rate limit exceeded on key 1",
+        response=Mock(status_code=429, headers={}),
+        body=None
+    )
+    client2 = Mock()
+    client2.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Groq backup key 2 says hello!"))]
+    )
+
+    router = LLMRouter(LLMConfig(), groq_clients=[client1, client2])
+    res = router.generate_response("Test prompt", task="fast")
+    assert "backup key 2" in res
+    assert client1.chat.completions.create.call_count == 1
+    assert client2.chat.completions.create.call_count == 1
+
+
+def test_gemini_browser_structured_response_rotates_to_backup_key_on_limit():
+    client1 = Mock()
+    client1.models.generate_content.side_effect = Exception("503 UNAVAILABLE: High demand")
+
+    client2 = Mock()
+    client2.models.generate_content.return_value = SimpleNamespace(
+        text='{"action":"navigate"}',
+        usage_metadata=SimpleNamespace(prompt_token_count=10, candidates_token_count=5),
+    )
+
+    router = LLMRouter(LLMConfig(), gemini_clients=[client1, client2])
+    res = router.generate_browser_structured_response('gemini', '{"goal":"search"}')
+    assert res.data == {'action': 'navigate'}
+    assert client1.models.generate_content.call_count == 1
+    assert client2.models.generate_content.call_count == 1
+
+
+def test_key_pool_parses_comma_and_newline_separated_keys(monkeypatch):
+    monkeypatch.setenv("TEST_KEY_ENV", "key_a, key_b; key_c\nkey_d")
+    keys = LLMRouter._parse_keys("TEST_KEY_ENV")
+    assert keys == ["key_a", "key_b", "key_c", "key_d"]
+

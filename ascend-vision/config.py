@@ -73,6 +73,50 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
+class CompanionContextConfig:
+    """Local laptop context; disabled until explicitly enabled by the owner."""
+    enabled: bool = False
+    share_with_phone: bool = False
+    proactive_enabled: bool = False
+    shadow_mode_enabled: bool = False
+    mode: str = 'quiet'
+    break_suggestion_enabled: bool = False
+    desk_checkin_enabled: bool = False
+    agent_needs_input_enabled: bool = False
+    break_interval_minutes: int = 50
+    desk_absence_minutes: int = 5
+    desktop_poll_seconds: float = 2.0
+    idle_after_seconds: float = 60.0
+    absence_dwell_seconds: float = 10.0
+    return_dwell_seconds: float = 3.0
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('companion_context.enabled must be a YAML boolean')
+        for name in ('share_with_phone', 'proactive_enabled', 'shadow_mode_enabled',
+                     'break_suggestion_enabled', 'desk_checkin_enabled',
+                     'agent_needs_input_enabled'):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f'companion_context.{name} must be a YAML boolean')
+        if self.proactive_enabled and not self.enabled:
+            raise ValueError('proactive companion requires companion_context.enabled')
+        if self.agent_needs_input_enabled and not (self.proactive_enabled or self.shadow_mode_enabled):
+            raise ValueError('agent needs-input rule requires proactive or shadow mode')
+        if self.shadow_mode_enabled and not self.enabled:
+            raise ValueError('companion shadow mode requires companion_context.enabled')
+        if self.share_with_phone and not self.enabled:
+            raise ValueError('companion_context.share_with_phone requires companion_context.enabled')
+        if self.mode not in ('quiet', 'companion', 'focus_coach'):
+            raise ValueError('companion_context.mode must be quiet, companion, or focus_coach')
+        number('companion_context.break_interval_minutes', self.break_interval_minutes, 10, 180, integer=True)
+        number('companion_context.desk_absence_minutes', self.desk_absence_minutes, 1, 60, integer=True)
+        number('companion_context.desktop_poll_seconds', self.desktop_poll_seconds, .5, 10)
+        number('companion_context.idle_after_seconds', self.idle_after_seconds, 1, 3600)
+        number('companion_context.absence_dwell_seconds', self.absence_dwell_seconds, 1, 60)
+        number('companion_context.return_dwell_seconds', self.return_dwell_seconds, .5, 30)
+
+
+@dataclass(frozen=True)
 class HoldConfig:
     """Hold confirmation and future alert eligibility."""
     threshold_frames: int = 12
@@ -373,7 +417,7 @@ class VoiceCommandConfig:
 class LLMConfig:
     groq_model: str = 'llama-3.1-8b-instant'
     cerebras_model: str = 'llama3.1-8b'
-    gemini_model: str = 'gemini-2.5-flash'
+    gemini_model: str = 'gemini-3.6-flash'
     groq_api_key_env: str = 'GROQ_API_KEY'
     cerebras_api_key_env: str = 'CEREBRAS_API_KEY'
     gemini_api_key_env: str = 'GEMINI_API_KEY'
@@ -420,7 +464,7 @@ class AscendConfig:
 
 @dataclass(frozen=True)
 class ScreenAuditConfig:
-    enabled: bool = True
+    enabled: bool = False
     interval_seconds: float = 1800.0
 
     def __post_init__(self):
@@ -433,6 +477,7 @@ class ScreenAuditConfig:
 class PhoneChatConfig:
     """Opt-in outbound phone worker; credentials and URL are environment-only."""
     enabled: bool = False
+    voice_upload_enabled: bool = False
     core_url_env: str = 'ASCEND_PHONE_CORE_URL'
     worker_token_env: str = 'ASCEND_PHONE_WORKER_TOKEN'
     owner_id_env: str = 'ASCEND_PHONE_OWNER_ID'
@@ -444,6 +489,10 @@ class PhoneChatConfig:
     def __post_init__(self):
         if type(self.enabled) is not bool:
             raise ValueError('phone_chat.enabled must be a YAML boolean')
+        if type(self.voice_upload_enabled) is not bool:
+            raise ValueError('phone_chat.voice_upload_enabled must be a YAML boolean')
+        if self.voice_upload_enabled and not self.enabled:
+            raise ValueError('phone_chat.voice_upload_enabled requires phone_chat.enabled')
         for name in ('core_url_env', 'worker_token_env', 'owner_id_env'):
             if not isinstance(getattr(self, name), str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', getattr(self, name)):
                 raise ValueError(f'phone_chat.{name} must name an environment variable')
@@ -454,10 +503,40 @@ class PhoneChatConfig:
 
 
 @dataclass(frozen=True)
+class BrowserAutomationConfig:
+    """Opt-in local browser research with conservative task limits."""
+    enabled: bool = False
+    provider: str = 'gemini'
+    scope_mode: str = 'public_research'
+    profile_mode: str = 'ephemeral'
+    max_decisions: int = 20
+    max_actions: int = 30
+    max_pages: int = 3
+    max_queued_tasks: int = 4
+    task_timeout_seconds: int = 180
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('browser_automation.enabled must be a YAML boolean')
+        if self.provider not in {'gemini', 'cerebras', 'groq'}:
+            raise ValueError('browser_automation.provider must be gemini, cerebras or groq')
+        if self.scope_mode != 'public_research':
+            raise ValueError('browser_automation.scope_mode must be public_research in this release')
+        if self.profile_mode != 'ephemeral':
+            raise ValueError('browser_automation.profile_mode must be ephemeral in this release')
+        for name, maximum in (
+            ('max_decisions', 20), ('max_actions', 30), ('max_pages', 3),
+            ('max_queued_tasks', 4), ('task_timeout_seconds', 180),
+        ):
+            number(f'browser_automation.{name}', getattr(self, name), 1, maximum, integer=True)
+
+
+@dataclass(frozen=True)
 class Config:
     camera: CameraConfig = field(default_factory=CameraConfig)
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    companion_context: CompanionContextConfig = field(default_factory=CompanionContextConfig)
     hold: HoldConfig = field(default_factory=HoldConfig)
     hands: HandConfig = field(default_factory=HandConfig)
     face: FaceConfig = field(default_factory=FaceConfig)
@@ -473,6 +552,7 @@ class Config:
     ascend: AscendConfig = field(default_factory=AscendConfig)
     screen_audit: ScreenAuditConfig = field(default_factory=ScreenAuditConfig)
     phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
+    browser_automation: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
 
 
 def load_config(path: Path) -> Config:
@@ -486,13 +566,15 @@ def load_config(path: Path) -> Config:
     if not isinstance(data, dict):
         raise ValueError('config must contain a YAML mapping')
     sections = {'camera': CameraConfig, 'detector': DetectorConfig,
-                'runtime': RuntimeConfig, 'hold': HoldConfig, 'hands': HandConfig,
+                'runtime': RuntimeConfig, 'companion_context': CompanionContextConfig,
+                'hold': HoldConfig, 'hands': HandConfig,
                 'face': FaceConfig, 'drowsiness': DrowsinessConfig, 'yawn': YawnConfig,
                 'posture': PostureConfig,
                 'storage': StorageConfig, 'sessions': SessionConfig, 'feedback': FeedbackConfig,
                 'dashboard': DashboardConfig, 'voice_commands': VoiceCommandConfig,
                 'llm': LLMConfig, 'ascend': AscendConfig,
-                'screen_audit': ScreenAuditConfig, 'phone_chat': PhoneChatConfig}
+                 'screen_audit': ScreenAuditConfig, 'phone_chat': PhoneChatConfig,
+                 'browser_automation': BrowserAutomationConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')
     values = {}

@@ -14,6 +14,25 @@ from detector import PhoneBox
 from main import main, run
 
 
+@pytest.fixture(autouse=True)
+def prevent_test_tts_model_downloads(monkeypatch):
+    from feedback import FeedbackService
+    from speech import SpeechOutcome
+
+    class SilentSpeaker:
+        def speak(self, _text, _cancelled):
+            return SpeechOutcome(False, False)
+
+        def close(self):
+            pass
+
+    def build_feedback(config, cooldown_seconds, **kwargs):
+        kwargs.setdefault("speaker", SilentSpeaker())
+        return FeedbackService(config, cooldown_seconds, **kwargs)
+
+    monkeypatch.setattr("main.FeedbackService", build_feedback)
+
+
 class Stream:
     def __init__(self):
         self.closed = False
@@ -56,6 +75,126 @@ def test_loop_logs_each_detection_and_closes_on_interrupt(caplog):
     assert stream.closed
     assert sum('PHONE_VISIBLE' in record.message for record in caplog.records) == 2
     assert any('STATS' in record.message for record in caplog.records)
+
+
+def test_enabled_companion_policy_is_ticked_from_live_context(tmp_path, monkeypatch):
+    from config import CompanionContextConfig, FeedbackConfig, StorageConfig
+    from assistant.companion_runtime import CompanionRuntime as RealCompanionRuntime
+
+    ticked = []
+
+    class CountingCompanionRuntime(RealCompanionRuntime):
+        def tick(self):
+            ticked.append(True)
+            return super().tick()
+
+    class PipeServer:
+        def __init__(self, _runtime):
+            pass
+        def start(self):
+            pass
+        def close(self):
+            pass
+
+    monkeypatch.setattr('assistant.companion_runtime.CompanionRuntime', CountingCompanionRuntime)
+    monkeypatch.setattr('integrations.context_ipc.ContextPipeServer', PipeServer)
+    config = Config(
+        runtime=RuntimeConfig(preview=False),
+        companion_context=CompanionContextConfig(enabled=True, proactive_enabled=True),
+        feedback=FeedbackConfig(enabled=False),
+        storage=StorageConfig(database=tmp_path / 'session.db'),
+    )
+
+    run(config, detector=Detector(), capture=Stream(), hand_tracker=Hands(),
+        face_tracker=type('Face', (), {'detect': lambda self, *_: [], 'close': lambda self: None})(),
+        voice_listener=False)
+
+    assert ticked
+
+
+def test_main_loop_arbitrates_companion_prompt_against_frame_warning(tmp_path, monkeypatch):
+    from threading import Event
+    from unittest.mock import Mock
+
+    from assistant.companion_runtime import CompanionRuntime as RealCompanionRuntime
+    from config import CompanionContextConfig, FeedbackConfig, HoldConfig, SessionConfig
+    from feedback import FeedbackService
+    from speech import SpeechOutcome
+
+    companion_started = Event()
+    companion_cancelled = Event()
+    legacy_started = Event()
+
+    class CancellableSpeaker:
+        def speak(self, text, cancelled):
+            if text == "companion prompt":
+                companion_started.set()
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if cancelled():
+                        companion_cancelled.set()
+                        return SpeechOutcome(True, False)
+                    time.sleep(0.002)
+            elif text.startswith("Warning:"):
+                legacy_started.set()
+            return SpeechOutcome(True, True)
+
+        def close(self):
+            pass
+
+    services = []
+
+    def feedback_factory(config, cooldown):
+        generator = Mock()
+        generator.generate.return_value = "Phone event observed."
+        service = FeedbackService(config, cooldown, generator=generator, speaker=CancellableSpeaker())
+        services.append(service)
+        return service
+
+    class QueuingCompanionRuntime(RealCompanionRuntime):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.queued = False
+
+        def tick(self):
+            if not self.queued:
+                self.queued = self._speech.speak_guarded_announcement(
+                    "companion prompt", lambda: True,
+                )
+
+    class PipeServer:
+        def __init__(self, _runtime): pass
+        def start(self): pass
+        def close(self): pass
+
+    class NearHands(Hands):
+        def detect(self, frame, timestamp):
+            return [[(1., 1., 0.)] * 21]
+
+    class Face:
+        def detect(self, _frame, _timestamp): return []
+        def close(self): pass
+
+    monkeypatch.setattr('main.FeedbackService', feedback_factory)
+    monkeypatch.setattr('assistant.companion_runtime.CompanionRuntime', QueuingCompanionRuntime)
+    monkeypatch.setattr('integrations.context_ipc.ContextPipeServer', PipeServer)
+    config = replace(
+        Config(runtime=RuntimeConfig(preview=False),
+               companion_context=CompanionContextConfig(enabled=True, proactive_enabled=True),
+               feedback=FeedbackConfig(enabled=True),
+               sessions=SessionConfig(initial_mode='focus'),
+               hold=HoldConfig(threshold_frames=1)),
+        storage=replace(Config().storage, database=tmp_path / 'session.db'),
+        ascend=replace(Config().ascend, enabled=False),
+    )
+
+    run(config, detector=Detector(), capture=Stream(), hand_tracker=NearHands(),
+        face_tracker=Face(), voice_listener=False)
+
+    assert companion_started.wait(1)
+    assert companion_cancelled.is_set()
+    assert legacy_started.is_set()
+    assert services
 
 
 def test_loop_cleans_up_on_inference_error():
@@ -216,10 +355,11 @@ def test_dashboard_queue_receives_the_shared_assistant_answer(tmp_path):
     message_id = submission.json['messageId']
 
     class Assistant:
-        def respond(self, user_text, context, *, max_words):
+        def respond(self, user_text, context, *, max_words, session_key):
             assert user_text == "How is focus going?"
             assert context.user_query == user_text
             assert max_words == 25
+            assert session_key == ("local", "dashboard", "local-dashboard")
             return AssistantReply("Your focus is steady.", "model")
 
     class WaitingStream(Stream):
@@ -268,7 +408,8 @@ def test_dashboard_chat_uses_stable_session_start_time(tmp_path, monkeypatch):
     observed = []
 
     class Assistant:
-        def respond(self, user_text, context, *, max_words):
+        def respond(self, user_text, context, *, max_words, session_key):
+            assert session_key == ("local", "dashboard", "local-dashboard")
             observed.append((context.session_duration_minutes, time.perf_counter()))
             (first_seen if user_text == 'early chat' else second_seen).set()
             return AssistantReply('Acknowledged.', 'offline')
@@ -442,7 +583,8 @@ def test_runtime_answers_dashboard_hub_status_with_dedicated_credential(tmp_path
 
     reply = client.get('/api/chat/messages?after=0').json['messages'][0]
     assert reply['messageId'] == submission.json['messageId']
-    assert reply['text'] == 'Codex CLI is working.'
+    assert reply['text'].startswith('Codex CLI is working.')
+    assert 'status shelf' in reply['text']
     assert opened == [('http://localhost:8000', 'reader-id.reader-secret', 3.0)]
 
 
@@ -524,6 +666,178 @@ def test_microphone_hub_status_reaches_assistant_without_replacing_session_statu
     assert chats == ["What is Antigravity's status?", "Is Codex CLI still working?"]
     assert len(announcements) == 1
     assert announcements[0].startswith('Session status:')
+
+
+def test_opt_in_context_runtime_wires_existing_session_state_and_closes_cleanly(tmp_path, monkeypatch):
+    from config import CompanionContextConfig
+    from integrations.desktop_activity import DesktopActivitySample
+
+    servers = []
+
+    class PipeServer:
+        def __init__(self, runtime):
+            self.runtime = runtime
+            self.started = False
+
+        def start(self):
+            self.started = True
+            servers.append(self)
+
+        def close(self):
+            self.final_snapshot = self.runtime.read_snapshot()
+
+    class ActivityAdapter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def sample(self):
+            return DesktopActivitySample('input_active', 'development', True)
+
+    monkeypatch.setattr('integrations.context_ipc.ContextPipeServer', PipeServer)
+    monkeypatch.setattr('integrations.desktop_activity.WindowsActivityAdapter', ActivityAdapter)
+    base = Config(runtime=RuntimeConfig(preview=False))
+    config = replace(
+        base,
+        companion_context=CompanionContextConfig(enabled=True),
+        storage=replace(base.storage, database=tmp_path / 'context.db'),
+        feedback=replace(base.feedback, enabled=False),
+    )
+
+    run(config, detector=Detector(), capture=Stream(), hand_tracker=Hands(),
+        face_tracker=type('Face', (), {'detect': lambda *_args: [], 'close': lambda *_args: None})(),
+        voice_listener=False)
+
+    assert len(servers) == 1 and servers[0].started
+    assert servers[0].final_snapshot.fields['focusSession'].value == 'background'
+    assert servers[0].final_snapshot.fields['foregroundCategory'].value == 'development'
+
+
+def test_opted_in_activity_recorder_receives_only_live_context_snapshots(tmp_path, monkeypatch):
+    from config import CompanionContextConfig
+
+    observed = []
+
+    class Recorder:
+        def __init__(self, store, *, timezone_name):
+            observed.append(('created', timezone_name, store.enabled))
+
+        def record(self, snapshot, *, wall_time, monotonic_time):
+            observed.append((snapshot.paused, snapshot.fields['focusSession'].value,
+                             wall_time.tzinfo is not None, monotonic_time))
+
+    class PipeServer:
+        def __init__(self, _runtime): pass
+        def start(self): pass
+        def close(self): pass
+
+    monkeypatch.setattr('assistant.activity_summary.ActivitySummaryRecorder', Recorder)
+    monkeypatch.setattr('integrations.context_ipc.ContextPipeServer', PipeServer)
+    base = Config(runtime=RuntimeConfig(preview=False))
+    config = replace(
+        base,
+        companion_context=CompanionContextConfig(enabled=True),
+        storage=replace(base.storage, database=tmp_path / 'context.db'),
+        feedback=replace(base.feedback, enabled=False),
+        dashboard=replace(base.dashboard, timezone='UTC'),
+    )
+
+    run(config, detector=Detector(), capture=Stream(), hand_tracker=Hands(),
+        face_tracker=type('Face', (), {'detect': lambda *_: [], 'close': lambda *_: None})(),
+        voice_listener=False)
+
+    assert observed[0] == ('created', 'UTC', False)
+    assert any(item[1] == 'background' and item[2] is True for item in observed[1:])
+
+
+def test_main_supplies_deterministic_daily_summary_to_the_local_assistant(tmp_path, monkeypatch):
+    from config import CompanionContextConfig
+
+    captured = {}
+
+    class Assistant:
+        def __init__(self, *_args, **kwargs):
+            captured.update(kwargs)
+
+        def respond(self, *_args, **_kwargs):
+            return None
+
+    class PipeServer:
+        def __init__(self, _runtime): pass
+        def start(self): pass
+        def close(self): pass
+
+    monkeypatch.setattr('main.AssistantService', Assistant)
+    monkeypatch.setattr('integrations.context_ipc.ContextPipeServer', PipeServer)
+    base = Config(runtime=RuntimeConfig(preview=False))
+    config = replace(
+        base,
+        companion_context=CompanionContextConfig(enabled=True),
+        storage=replace(base.storage, database=tmp_path / 'context.db'),
+        feedback=replace(base.feedback, enabled=False),
+        dashboard=replace(base.dashboard, timezone='UTC'),
+    )
+
+    run(config, detector=Detector(), capture=Stream(), hand_tracker=Hands(),
+        face_tracker=type('Face', (), {'detect': lambda *_: [], 'close': lambda *_: None})(),
+        voice_listener=False)
+
+    assert callable(captured['daily_summary_provider'])
+    summary = captured['daily_summary_provider']()
+    assert 'Activity history is off' in summary
+    assert 'Core mission completions could not be verified right now.' in summary
+    assert 'completion timestamps are not provided' not in summary
+
+
+def test_main_daily_summary_includes_core_confirmed_completion_history(tmp_path, monkeypatch):
+    from datetime import timedelta
+    from integrations.vision_query_reader import MissionCompletion, MissionSnapshot
+    from config import CompanionContextConfig
+
+    captured = {}
+
+    class Assistant:
+        def __init__(self, *_args, **kwargs):
+            captured.update(kwargs)
+
+        def respond(self, *_args, **_kwargs):
+            return None
+
+    class MissionReader:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def read_missions(self):
+            return MissionSnapshot(datetime.now(timezone.utc), ())
+
+        def read_completion_history(self, start_at, end_at):
+            assert start_at.tzinfo is not None and end_at.tzinfo is not None
+            return (MissionCompletion("mission-1", "Study", start_at + timedelta(hours=9), "NORMAL"),)
+
+    class PipeServer:
+        def __init__(self, _runtime): pass
+        def start(self): pass
+        def close(self): pass
+
+    monkeypatch.setattr('main.AssistantService', Assistant)
+    monkeypatch.setattr('integrations.context_ipc.ContextPipeServer', PipeServer)
+    monkeypatch.setattr('integrations.vision_query_reader.VisionMissionReader', MissionReader)
+    base = Config(runtime=RuntimeConfig(preview=False))
+    config = replace(
+        base,
+        companion_context=CompanionContextConfig(enabled=True),
+        storage=replace(base.storage, database=tmp_path / 'context.db'),
+        feedback=replace(base.feedback, enabled=False),
+        dashboard=replace(base.dashboard, timezone='UTC'),
+    )
+
+    run(config, detector=Detector(), capture=Stream(), hand_tracker=Hands(),
+        face_tracker=type('Face', (), {'detect': lambda *_: [], 'close': lambda *_: None})(),
+        voice_listener=False)
+
+    summary = captured['daily_summary_provider']()
+    assert 'Core-confirmed mission completions today: Study (09:00).' in summary
+    assert 'mission completions could not be verified' not in summary
+    assert 'timestamps are not provided' not in summary
 
 
 def test_memory_storage_failure_keeps_camera_and_dashboard_chat_available(tmp_path, monkeypatch):

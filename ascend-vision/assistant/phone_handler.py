@@ -25,7 +25,8 @@ class PhoneMessageHandler:
     """Validate transport identity and policy before invoking shared chat."""
 
     def __init__(self, assistant_service: AssistantService, *, owner_id: str,
-                 max_words: int = 25, allowed_channels: frozenset[str] = frozenset({"phone_pwa"})):
+                 max_words: int = 25, allowed_channels: frozenset[str] = frozenset({"phone_pwa"}),
+                 audio_transcriber=None):
         if not callable(getattr(assistant_service, "respond", None)):
             raise TypeError("assistant_service must provide respond")
         if not callable(getattr(assistant_service, "clear_session", None)):
@@ -40,24 +41,36 @@ class PhoneMessageHandler:
         self._owner_id = owner_id
         self._max_words = max_words
         self._allowed_channels = allowed_channels
+        self._audio_transcriber = audio_transcriber
 
     def handle(self, owner_id: str, channel: PhoneChannel, session_id: str,
-               text: str) -> AssistantReply:
+               text: str, *, remote_context: dict | None = None) -> AssistantReply:
         key = self._validated_session_key(owner_id, channel, session_id)
         if not isinstance(text, str) or not text.strip() or len(text) > 4_000:
             raise ValueError("text must contain between 1 and 4000 characters")
         normalized = text.strip()
         if _MEMORY_ADMIN.search(normalized):
             return AssistantReply(_MEMORY_ADMIN_REPLY, "offline")
+        options = {}
+        if remote_context is not None:
+            if channel != "discord_dm":
+                raise ValueError("remote context is only accepted for the linked Discord channel")
+            options["trusted_laptop_context"] = remote_context
         reply = self._assistant_service.respond(
-            normalized,
-            context=None,
-            max_words=self._max_words,
-            session_key=key,
+            normalized, context=None, max_words=self._max_words, session_key=key, **options,
         )
         if not isinstance(reply, AssistantReply) or not reply.text.strip():
             raise RuntimeError("Assistant returned an invalid reply")
         return reply
+
+    def handle_audio(self, owner_id: str, channel: PhoneChannel, session_id: str,
+                     audio_data: bytes, mime_type: str | None) -> AssistantReply:
+        if channel != "phone_pwa" or self._audio_transcriber is None:
+            raise RuntimeError("Phone audio transcription is not enabled")
+        transcript = self._audio_transcriber.transcribe(audio_data, mime_type or "")
+        if not isinstance(transcript, str) or not transcript.strip() or len(transcript) > 4_000:
+            raise ValueError("Gemini returned an empty or oversized transcript")
+        return self.handle(owner_id, channel, session_id, transcript)
 
     def clear_session(self, owner_id: str, channel: PhoneChannel, session_id: str) -> None:
         self._assistant_service.clear_session(

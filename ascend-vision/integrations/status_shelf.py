@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 import re
+import threading
+import time
 from typing import Callable, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -41,12 +43,68 @@ class ShelfService:
     last_heartbeat_at: datetime | None
     stale_after_seconds: int
     activity_label: str | None = None
+    activity_started_at: datetime | None = None
+    needs_input_operation_ref: str | None = None
 
 
 @dataclass(frozen=True)
 class ShelfSnapshot:
     generated_at: datetime
     services: tuple[ShelfService, ...]
+
+
+class AgentNeedsInputProvider:
+    """Poll explicit Core evidence off the camera loop and fail closed on errors."""
+
+    def __init__(self, reader: "StatusShelfReader", *, interval_seconds: float = 10.0):
+        if not isinstance(interval_seconds, (int, float)) or isinstance(interval_seconds, bool) or not 1 <= interval_seconds <= 30:
+            raise ValueError("needs-input poll interval must be between 1 and 30 seconds")
+        self._reader = reader
+        self._interval = float(interval_seconds)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._items = ()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("needs-input provider is already started")
+        self._thread = threading.Thread(target=self._run, name="agent-needs-input-shelf", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        from assistant.companion_policy import NeedsInputEvidence
+        while not self._stop.is_set():
+            try:
+                snapshot = self._reader.read()
+                current = tuple(
+                    NeedsInputEvidence(
+                        service_id=service.service_id,
+                        operation_ref=service.needs_input_operation_ref,
+                        label=service.activity_label,
+                        observed_at=service.last_heartbeat_at,
+                    )
+                    for service in snapshot.services
+                    if service.needs_input_operation_ref is not None
+                    and service.last_heartbeat_at is not None
+                    and service.state == "working"
+                )
+            except Exception:
+                current = ()
+            with self._lock:
+                self._items = current
+            self._stop.wait(self._interval)
+
+    def __call__(self) -> tuple:
+        with self._lock:
+            return self._items
+
+    def close(self, timeout_seconds: float = 3.0) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout_seconds)
+        self._thread = None
 
 
 def _aware_datetime(value: object) -> datetime:
@@ -68,6 +126,7 @@ def _service(row: object, generated_at: datetime, now: datetime) -> ShelfService
     service_type, state = row.get("serviceType"), row.get("state")
     if service_type not in SERVICE_TYPES or state not in SERVICE_STATES:
         raise ValueError("Invalid shelf service state")
+    reported_state = state
     state_since = _aware_datetime(row.get("stateSince"))
     stale_after = row.get("staleAfterSeconds")
     if type(stale_after) is not int or not 1 <= stale_after <= 3600:
@@ -91,8 +150,25 @@ def _service(row: object, generated_at: datetime, now: datetime) -> ShelfService
     label = activity.get("label") if activity else None
     if label is not None and (not isinstance(label, str) or len(label) > 160 or "\n" in label or "\r" in label):
         raise ValueError("Invalid shelf activity label")
+    started_value = activity.get("startedAt") if activity else None
+    started_at = _aware_datetime(started_value) if started_value is not None else None
+    issue = row.get("issue")
+    if issue is not None and not isinstance(issue, dict):
+        raise ValueError("Invalid shelf issue")
+    operation_ref = None
+    if issue and issue.get("code") == "needs_input":
+        candidate = issue.get("operationRef")
+        if (reported_state != "working" or not activity or activity.get("kind") != "operation"
+                or not started_at or not isinstance(candidate, str)
+                or not re.fullmatch(r"[a-f0-9]{16}", candidate)):
+            raise ValueError("Invalid needs-input operation evidence")
+        # A valid but now-stale Core report remains displayable; it is not
+        # eligible evidence for a proactive alert.
+        operation_ref = candidate if state == "working" else None
+    elif issue and issue.get("operationRef") is not None:
+        raise ValueError("Unexpected operation reference on shelf issue")
     return ShelfService(service_id, instance_id, service_type, state, state_since,
-                        heartbeat, stale_after, label)
+                        heartbeat, stale_after, label, started_at, operation_ref)
 
 
 class StatusShelfReader:

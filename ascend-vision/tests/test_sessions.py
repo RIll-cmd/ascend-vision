@@ -46,6 +46,33 @@ def test_thread_callbacks_only_queue_and_duplicate_mode_is_noop(tmp_path):
         manager.close()
 
 
+def test_session_manager_exposes_start_time_for_focus_interval_policy(tmp_path):
+    with Database(tmp_path / 'test.db') as db:
+        manager = SessionManager(db, now=lambda: NOW)
+        manager.start()
+        assert manager.session_started_at == NOW
+
+        switched_at = NOW + timedelta(seconds=15)
+        manager.request('focus')
+        manager.process_commands(switched_at)
+
+        assert manager.session_started_at == switched_at
+        manager.close()
+        assert manager.session_started_at is None
+
+
+def test_session_snapshot_returns_consistent_focus_metadata(tmp_path):
+    with Database(tmp_path / 'test.db') as db:
+        manager = SessionManager(db, now=lambda: NOW)
+        manager.start()
+        manager.request('focus')
+        switched_at = NOW + timedelta(seconds=10)
+        manager.process_commands(switched_at)
+
+        assert manager.session_snapshot() == (manager.session_id, 'focus', switched_at)
+        manager.close()
+
+
 def test_buffered_frame_remains_in_previous_session(tmp_path):
     with Database(tmp_path / 'test.db') as db:
         manager = SessionManager(db, now=lambda: NOW)

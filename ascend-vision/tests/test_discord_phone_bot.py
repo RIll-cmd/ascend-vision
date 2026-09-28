@@ -40,16 +40,34 @@ class FakeCore:
         self.events.append(("consume", code, discord_user_id))
         return self.linked
 
+    async def read_context(self, discord_user_id):
+        self.events.append(("context", discord_user_id))
+        return context_response()
+
     async def close(self):
         pass
 
+
+def context_response():
+    return {"available": False, "reason": "never_published", "deviceId": "laptop-1",
+        "lastSeenAt": None, "fields": {
+            name: {"value": value, "source": "none", "freshness": "unavailable",
+                   "observedAt": None, "expiresAt": None, "ageSeconds": None,
+                   "evidenceKind": "observation"}
+            for name, value in {
+                "deskPresence": "unknown", "desktopActivity": "unavailable",
+                "foregroundCategory": "unknown", "focusSession": "unavailable",
+                "declaredIntent": "none",
+            }.items()
+        }}
 
 class FakeHandler:
     def __init__(self, events):
         self.events = events
 
-    def handle(self, owner, channel, session, text):
-        self.events.append(("handle", owner, channel, session, text))
+    def handle(self, owner, channel, session, text, *, remote_context=None):
+        event = ("handle", owner, channel, session, text)
+        self.events.append(event if remote_context is None else (*event, remote_context))
         return SimpleNamespace(text="Private answer")
 
     def clear_session(self, owner, channel, session):
@@ -70,7 +88,7 @@ def test_registers_only_dm_slash_commands_without_message_intent():
     bot = bot_for(interaction)
 
     assert {command.name for command in bot.tree.get_commands()} == {
-        "ask", "status", "newchat", "link",
+        "ask", "status", "context", "newchat", "link",
     }
     assert bot.client.intents.message_content is False
     assert bot.client.intents.guilds is False
@@ -81,6 +99,7 @@ def test_registers_only_dm_slash_commands_without_message_intent():
 @pytest.mark.parametrize("command,args", [
     ("handle_ask", ("private prompt",)),
     ("handle_status", ()),
+    ("handle_context", ()),
     ("handle_newchat", ()),
     ("handle_link", ("A" * 43,)),
 ])
@@ -109,9 +128,24 @@ def test_ask_defers_then_verifies_and_routes_to_separate_discord_session():
     assert interaction.events[3][0:2] == ("edit", "Private answer")
 
 
+def test_laptop_context_question_fetches_link_scoped_snapshot_before_assistant():
+    interaction = FakeInteraction()
+    bot = bot_for(interaction)
+
+    asyncio.run(bot.handle_ask(interaction, "What am I doing at my desk?"))
+
+    assert interaction.events[1:4] == [
+        ("verify", "123456789012345678"),
+        ("context", "123456789012345678"),
+        ("handle", "owner-a", "discord_dm", "123456789012345678",
+         "What am I doing at my desk?", context_response()),
+    ]
+
+
 @pytest.mark.parametrize("command,args", [
     ("handle_ask", ("private prompt",)),
     ("handle_status", ()),
+    ("handle_context", ()),
     ("handle_newchat", ()),
 ])
 def test_unlinked_user_cannot_use_chat_commands(command, args):
@@ -196,6 +230,20 @@ def test_status_uses_fixed_question_and_newchat_clears_only_discord_key():
     )
 
 
+def test_context_command_reads_only_after_link_verification_and_shows_unavailable_honestly():
+    interaction = FakeInteraction()
+    bot = bot_for(interaction)
+
+    asyncio.run(bot.handle_context(interaction))
+
+    assert interaction.events[1:3] == [
+        ("verify", "123456789012345678"),
+        ("context", "123456789012345678"),
+    ]
+    assert "unknown" in interaction.events[-1][1]
+    assert "No laptop snapshot" in interaction.events[-1][1]
+
+
 def test_link_defers_and_consumes_code_without_echoing_it():
     interaction = FakeInteraction()
     bot = bot_for(interaction)
@@ -239,6 +287,10 @@ def test_core_client_uses_dedicated_bearer_and_exact_pairing_paths():
         received.append(request)
         if request.url.path.endswith("consume-link"):
             return httpx.Response(200, json={"linked": True})
+        if request.url.path.endswith("verify-link"):
+            return httpx.Response(200, json={"linked": True, "ownerId": "owner-a"})
+        if request.url.path.endswith("/context"):
+            return httpx.Response(200, json=context_response())
         return httpx.Response(200, json={"linked": True, "ownerId": "owner-a"})
 
     async def run():
@@ -247,6 +299,7 @@ def test_core_client_uses_dedicated_bearer_and_exact_pairing_paths():
         try:
             assert await client.consume_link("A" * 43, "123456789012345678") is True
             assert await client.verify_link("123456789012345678") == "owner-a"
+            assert await client.read_context("123456789012345678") == context_response()
         finally:
             await client.close()
 
@@ -254,6 +307,7 @@ def test_core_client_uses_dedicated_bearer_and_exact_pairing_paths():
     assert [request.url.path for request in received] == [
         "/api/phone-chat/worker/discord/consume-link",
         "/api/phone-chat/worker/discord/verify-link",
+        "/api/phone-chat/worker/discord/context",
     ]
     assert all(request.headers["Authorization"] == "Bearer bridge-secret" for request in received)
     assert received[0].read().decode().count("discordUserId") == 1

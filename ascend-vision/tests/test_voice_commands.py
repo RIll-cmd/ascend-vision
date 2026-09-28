@@ -666,6 +666,59 @@ def test_bound_assistant_enables_voice_without_model_api_key(monkeypatch):
         service.close()
 
 
+def test_voice_chat_passes_local_channel_session_to_assistant():
+    from assistant.service import AssistantReply
+
+    class Assistant:
+        def __init__(self):
+            self.session_key = None
+
+        def respond(self, user_text, context, *, max_words, session_key):
+            self.session_key = session_key
+            return AssistantReply("Voice reply.", "offline")
+
+    assistant = Assistant()
+    speaker = Mock()
+    speaker.speak.return_value = Mock(started=True, completed=True, error=None)
+    service = FeedbackService(
+        FeedbackConfig(enabled=True), cooldown_seconds=0.0,
+        generator=Mock(), speaker=speaker,
+    )
+    service.bind_assistant(assistant)
+    service.start()
+    try:
+        assert service.submit_chat(
+            "Hello Vision", ConversationContext("Hello Vision"), cooldown=0.0,
+            session_key=("local", "voice", "voice-42"),
+        )
+        deadline = time.monotonic() + 2.0
+        while not speaker.speak.called and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert assistant.session_key == ("local", "voice", "voice-42")
+    finally:
+        service.close()
+
+
+def test_guarded_companion_announcement_skips_speech_when_evidence_changes():
+    speaker = Mock()
+    speaker.speak.return_value = Mock(started=True, completed=True, error=None)
+    service = FeedbackService(
+        FeedbackConfig(enabled=True), cooldown_seconds=0.0,
+        generator=Mock(), speaker=speaker,
+    )
+    service.start()
+    try:
+        assert service.speak_guarded_announcement(
+            "Would you like to take a break?", lambda: False,
+        ) is True
+        deadline = time.monotonic() + 2.0
+        while not speaker.speak.called and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not speaker.speak.called
+    finally:
+        service.close()
+
+
 def test_voice_chat_speaks_verified_hub_status_without_model_call():
     from assistant.service import AssistantService
     from assistant.tool_runtime import ToolRuntime, ToolSpec
@@ -692,7 +745,8 @@ def test_voice_chat_speaks_verified_hub_status_without_model_call():
         deadline = time.monotonic() + 2.0
         while not speaker.speak.called and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert speaker.speak.call_args.args[0] == 'Antigravity is idle.'
+        assert speaker.speak.call_args.args[0].startswith('Antigravity is idle.')
+        assert 'status shelf' in speaker.speak.call_args.args[0]
         generator.generate_chat.assert_not_called()
     finally:
         service.close()

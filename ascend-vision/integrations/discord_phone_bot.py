@@ -15,6 +15,10 @@ import discord
 from discord import app_commands
 import httpx
 
+from assistant.context_packet import (
+    is_laptop_context_question, render_activity_answer, unavailable_context_read_response,
+    validate_context_read_response,
+)
 
 LOG = logging.getLogger(__name__)
 _CODE = re.compile(r"[A-Za-z0-9_-]{43}\Z")
@@ -101,6 +105,15 @@ class DiscordCoreClient:
             raise ValueError("Invalid Discord verification response")
         return payload["ownerId"]
 
+    async def read_context(self, discord_user_id: str) -> dict:
+        response = await self._client.post(
+            "/api/phone-chat/worker/discord/context",
+            json={"discordUserId": discord_user_id},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return validate_context_read_response(payload)
+
     async def close(self) -> None:
         await self._client.aclose()
 
@@ -155,6 +168,11 @@ class DiscordPhoneBot:
             await self.handle_status(interaction)
 
         @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=True)
+        @app_commands.command(name="context", description="Read shared laptop context")
+        async def context(interaction: discord.Interaction):
+            await self.handle_context(interaction)
+
+        @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=True)
         @app_commands.command(name="newchat", description="Clear this Discord chat context")
         async def newchat(interaction: discord.Interaction):
             await self.handle_newchat(interaction)
@@ -164,7 +182,7 @@ class DiscordPhoneBot:
         async def link(interaction: discord.Interaction, code: str):
             await self.handle_link(interaction, code)
 
-        for command in (ask, status, newchat, link):
+        for command in (ask, status, context, newchat, link):
             self.tree.add_command(command)
 
     async def handle_ask(self, interaction, prompt: str) -> None:
@@ -172,6 +190,9 @@ class DiscordPhoneBot:
 
     async def handle_status(self, interaction) -> None:
         await self._run(interaction, "status")
+
+    async def handle_context(self, interaction) -> None:
+        await self._run(interaction, "context")
 
     async def handle_newchat(self, interaction) -> None:
         await self._run(interaction, "newchat")
@@ -207,12 +228,28 @@ class DiscordPhoneBot:
                     result = _LINK_FIRST
                 elif command == "newchat":
                     result = await self._run_handler(owner, command, user_id)
+                elif command == "context":
+                    packet = await self.core.read_context(user_id)
+                    result = render_activity_answer(packet)
+                    last_seen = packet.get("lastSeenAt")
+                    if last_seen:
+                        result += f" Last laptop update received: {last_seen}."
+                    else:
+                        result += " No laptop snapshot has been received yet."
                 else:
                     prompt = _STATUS_QUESTION if command == "status" else value
                     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 4_000:
                         result = "Enter a message between 1 and 4000 characters."
                     else:
-                        result = await self._run_handler(owner, command, user_id, prompt)
+                        remote_context = None
+                        if command == "ask" and is_laptop_context_question(prompt):
+                            try:
+                                remote_context = await self.core.read_context(user_id)
+                            except Exception:
+                                remote_context = unavailable_context_read_response()
+                        result = await self._run_handler(
+                            owner, command, user_id, prompt, remote_context=remote_context,
+                        )
             if not isinstance(result, str) or not result.strip():
                 raise ValueError("Empty Discord command response")
             await self._edit(interaction, result[:1900], command)
@@ -221,7 +258,7 @@ class DiscordPhoneBot:
             await self._edit(interaction, _ERROR, command)
 
     async def _run_handler(self, owner: str, command: str, user_id: str,
-                           prompt: str | None = None) -> str:
+                           prompt: str | None = None, *, remote_context: dict | None = None) -> str:
         if self._closed:
             return _ERROR
         # One owner, one running turn, zero queued turns. The reservation is made
@@ -241,9 +278,15 @@ class DiscordPhoneBot:
                     self._handler.clear_session, owner, "discord_dm", user_id,
                 ))
             else:
-                task = asyncio.create_task(asyncio.to_thread(
-                    self._handler.handle, owner, "discord_dm", user_id, prompt,
-                ))
+                if remote_context is None:
+                    task = asyncio.create_task(asyncio.to_thread(
+                        self._handler.handle, owner, "discord_dm", user_id, prompt,
+                    ))
+                else:
+                    task = asyncio.create_task(asyncio.to_thread(
+                        self._handler.handle, owner, "discord_dm", user_id, prompt,
+                        remote_context=remote_context,
+                    ))
             task.add_done_callback(lambda completed: self._finish_work(owner, completed))
             result = await asyncio.wait_for(asyncio.shield(task), self._work_timeout_seconds)
             return "This Discord chat context is cleared." if command == "newchat" else result.text

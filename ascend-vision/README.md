@@ -80,6 +80,88 @@ Without a current authenticated shelf, Vision says it cannot verify AI status.
 An `idle` status does not prove that an agent finished its last task; completion
 reports require a later Core completion-history feature.
 
+## Laptop companion context V1 (opt-in)
+
+To try the new local context card, set `companion_context.enabled: true` in the
+same YAML configuration passed to both `main.py` and `dashboard.py`. Start
+Vision and the dashboard in separate PowerShell windows as above. The dashboard
+shows desk presence, Windows input/lock state, a coarse foreground app category,
+and the existing Focus/Background session mode. It never sends window titles,
+webpage contents, keystrokes, audio, or camera frames to the context pipe.
+
+The camera signal reuses Vision's existing face tracker on its current frame
+stream. It reports only desk presence, not who is in view. A face must remain
+visible for 3 seconds before Vision reports presence; healthy camera absence
+must persist for 10 seconds before it reports away. Missing face-tracker or
+camera availability is shown as unknown/unavailable.
+
+The desktop adapter samples every 2 seconds. It maps a short local allowlist of
+process names to categories and discards the process name after classification.
+Input becomes idle after 60 seconds without keyboard/mouse input. If Windows
+does not provide a reliable lock-state signal, Vision reports desktop activity
+unavailable rather than claiming that the user is active.
+
+The dashboard shows each value's source and age, and can set or undo a temporary
+focus, break, research, or meeting intent; set or cancel a 30-minute quiet
+interval; clear current context; or pause/resume this companion context feature.
+A break defaults to 15 minutes; other intents default to one hour. These values
+live only in the running Vision process. Phase 1 has no proactive prompts, so
+the quiet interval is recorded for future companion behavior and does not affect
+current monitoring. Pause stops the new companion context collector; existing
+Phone Watch camera and activity features continue under their current controls.
+Phase 1 does not publish laptop context to Core, PWA, or Discord.
+
+Local voice/dashboard chat may read the same current snapshot. A serialized
+allowlisted packet is capped at 4 KiB and labels each value with its source,
+freshness, and observation age; normal channel transcripts remain separately
+scoped. “What am I doing?” and “Am I on a break?” use deterministic wording.
+Development-app presence is never described as proof of coding progress.
+Current mission questions use Core's owner-checked `missions_summary` read with
+the short-lived Vision token; no mission write operation is registered. AI
+status answers name the Core shelf and refuse stale snapshots.
+
+“Look at my screen” performs one user-requested inspection, resizes the image to
+at most 1280 pixels per side and 2 MiB, and deletes its temporary image after
+classification. The result is labeled as an untrusted visual estimate and
+expires after 30 seconds; it is not saved as context or memory. Periodic cloud
+screen audits are a separate setting (`screen_audit.enabled`) and default off.
+
+Context snapshots and corrections are held in memory and served to the local
+dashboard over a same-Windows-user authenticated named pipe. Restarting Vision
+starts with unknown context. The feature is disabled by default until you enable
+it in configuration.
+
+### Proactive companion — Phase 3 implementation through delivery routing
+
+Local interventions are also disabled by default. They require both
+`companion_context.enabled: true` and `proactive_enabled: true`; each rule has
+its own opt-in and the mode must be `companion` or `focus_coach` as appropriate.
+The focus-break rule is available only in `focus_coach`, after a fresh active
+focus session reaches its configured interval (50 minutes by default). A desk
+check-in requires its own opt-in, fresh camera-confirmed absence for five
+minutes, an active focus session, and an unlocked desktop. Unknown or stale
+presence never triggers it.
+
+Each proposed intervention carries a stable, content-free deduplication ID,
+evidence timestamps, a reason code, and a short expiry. One local delivery
+controller enforces a 15-minute cooldown, a three-per-hour limit, and an
+eight-per-day limit. Queued speech rechecks live eligibility immediately
+before playback, so a pause, snooze, changed session, or expired observation
+cancels it. These interventions do not call Core mutation or bad-habit penalty
+paths. Legacy detector warnings remain separate trigger policies but share the
+speech queue: accepted non-companion speech preempts queued or active companion
+prompts, and a companion prompt does not enqueue while other speech is pending.
+The optional agent-needs-input rule requires fresh, explicit Core operation
+evidence and its own opt-in; idle, generic stuck status, and elapsed time are
+never substitutes. Producer wiring and selected-build integration still need
+staging verification.
+
+The shadow-mode explanation view and local pause/snooze controls are
+implemented. Remaining acceptance work is the real-wiring arbitration replay,
+review of three representative shadow sessions, tuning from that review, and
+the seven-day personal pilot. Keep `proactive_enabled` false until those
+acceptance checks are complete.
+
 ```powershell
 # Select a port and print the URL without opening a browser:
 .\.venv\Scripts\python.exe dashboard.py --port 8766 --no-open-browser
