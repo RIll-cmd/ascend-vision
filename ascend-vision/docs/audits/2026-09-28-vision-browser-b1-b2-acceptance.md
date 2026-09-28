@@ -26,12 +26,12 @@ Added `tests/test_browser_acceptance.py`, which runs the actual Playwright execu
 | Five fixture research goals, repeated twice | 10/10 completed |
 | Verified, source-linked findings | 10/10 |
 | Browser navigation dispatches | 10 |
-| Prompt-injection fixtures | 5/5 blocked before any unauthorized follow-up request |
+| Prompt-injection fixtures | 5/5 failed closed; no unauthorized browser effect |
 | Fixture requests from injection cases | One initial fixture navigation each; no form submission or extra navigation |
 | Model tokens | N/A — scripted provider, no LLM request |
 | Dedicated fixture-suite elapsed time | 12.83 seconds on the recorded run |
 
-The fixtures exercise hostile page text that asks Vision to click a button, fill a field, change a selection, access a private metadata address, and use a JavaScript URL. The service fails closed and does not report findings for those tasks. Existing executor tests additionally cover delayed content, duplicate labels, mutated link targets, popup ownership, denied forms, private redirects, and WebSocket blocking.
+The fixtures exercise hostile page text that asks Vision to click a button, fill a field, change a selection, access a private metadata address, and use a JavaScript URL. The service fails closed and does not report findings for those tasks. The recording executor verifies that the private-host attempt is rejected by policy before Playwright navigation, the JavaScript URL is rejected before executor dispatch, and no button click succeeds; the fixture server also sees no form submission or extra request. Existing executor tests additionally cover delayed content, duplicate labels, mutated link targets, popup ownership, denied forms, private redirects, and WebSocket blocking.
 
 Commands and results:
 
