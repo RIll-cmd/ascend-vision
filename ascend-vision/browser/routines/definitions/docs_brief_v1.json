@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "routine_id": "docs_brief",
+  "version": 1,
+  "title": "Documentation brief",
+  "mode": "public_research",
+  "inputs": {
+    "url": {"type": "url", "required": true, "max_length": 2048},
+    "question": {"type": "text", "required": true, "max_length": 500}
+  },
+  "allowed_origins": ["https://playwright.dev"],
+  "input_path_prefixes": {"url": ["/python/docs/"]},
+  "allowed_actions": ["navigate", "observe", "click", "scroll", "back", "wait_for", "ask_user", "finish"],
+  "budget": {"decisions": 12, "actions": 18, "pages": 2, "seconds": 120},
+  "goal_template": "Answer the supplied question using only observed documentation pages. Cite current sources and say when evidence is missing.",
+  "completion_verifier": "cited_document_v1",
+  "site_adapter": null
+}

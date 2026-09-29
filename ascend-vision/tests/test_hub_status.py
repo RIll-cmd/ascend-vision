@@ -1,13 +1,20 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from assistant.hub_status import parse_status_intent, render_status_answer
 from assistant.tool_runtime import ToolCallError, ToolPolicyError, ToolRuntime, ToolSpec
-from integrations.status_shelf import ShelfService, ShelfSnapshot
+from integrations.status_shelf import CompletionSummary, ShelfService, ShelfSnapshot
 
 
-NOW = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+NOW = datetime.now(timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def fresh_fixture_time(monkeypatch):
+    # Collection can precede these tests by longer than the shelf freshness TTL.
+    # Refresh test evidence, never weaken the production stale-snapshot check.
+    monkeypatch.setattr(__import__(__name__, fromlist=["NOW"]), "NOW", datetime.now(timezone.utc))
 
 
 def service(name, state, *, instance="desktop", service_type="agent"):
@@ -85,6 +92,19 @@ def test_status_intents_are_recognized(question):
     ("Is Claude still working?", "claude", False),
     ("is claude still active?", "claude", False),
     ("Did Claude finish its work?", "claude", True),
+    ("What is Claude's availability?", "claude", False),
+    ("What is the status of Claude?", "claude", False),
+    ("What is the status of Claude today?", "claude", False),
+    ("What is the status of Claude right now?", "claude", False),
+    ("What is the status of Claude at the moment?", "claude", False),
+    ("What is the status of Claude this morning?", "claude", False),
+    ("What is the status of Claude as of now?", "claude", False),
+    ("What is the status of Claude tonight?", "claude", False),
+    ("What is the status of Codex CLI today?", "codex cli", False),
+    ("Show status of Claude please", "claude", False),
+    ("What is Codex Cloud's status?", "codex cloud", False),
+    ("Is Codex Cloud running?", "codex cloud", False),
+    ("What is Claude Codex's status?", "claude codex", False),
 ])
 def test_explicit_unknown_agent_status_targets_the_named_agent(question, target, asks_completion):
     intent = parse_status_intent(question)
@@ -99,6 +119,8 @@ def test_explicit_unknown_agent_status_targets_the_named_agent(question, target,
     "What is My Focus's status?",
     "what is my focus's status?",
     "Is my focus active?",
+    "Is my Codex subscription active?",
+    "Are you working on Vision?",
     "Is My Focus still active?",
     "Show My Focus's status",
     "Are you working?",
@@ -124,7 +146,8 @@ def test_targeted_status_is_derived_from_shelf_state():
         service("codex-cli", "working"),
     ))
 
-    assert result == "Codex CLI is working."
+    assert result.startswith("Codex CLI is working.")
+    assert "status shelf, updated" in result
     assert "Antigravity" not in result
 
 
@@ -135,7 +158,8 @@ def test_multiple_named_agents_are_all_reported():
         service("codex-cli", "working"),
     ))
 
-    assert result == "Antigravity is idle; Codex CLI is working."
+    assert result.startswith("Antigravity is idle; Codex CLI is working.")
+    assert "status shelf, updated" in result
 
 
 def test_missing_agent_in_multiple_targets_is_explicit():
@@ -173,9 +197,8 @@ def test_missing_named_agent_is_not_invented():
 def test_unknown_named_agent_is_explicitly_missing_from_shelf():
     intent = parse_status_intent("What is Claude's status?")
 
-    assert render_status_answer(intent, snapshot(service("codex-cli", "working"))) == (
-        "I couldn't find Claude in Ascend Hub's status shelf."
-    )
+    assert "I couldn't find Claude in Ascend Hub's status shelf." in render_status_answer(
+        intent, snapshot(service("codex-cli", "working")))
 
 
 def test_idle_does_not_claim_an_agent_finished():
@@ -194,6 +217,65 @@ def test_completed_wording_uses_shelf_and_does_not_guess_completion():
     assert "does not confirm whether its last task finished" in result
 
 
+@pytest.mark.parametrize("outcome, wording", [
+    ("succeeded", "latest recorded work for Codex CLI succeeded"),
+    ("failed", "latest recorded work for Codex CLI failed"),
+    ("cancelled", "latest recorded work for Codex CLI was cancelled"),
+])
+def test_completion_questions_use_only_explicit_shelf_outcomes(outcome, wording):
+    intent = parse_status_intent("Did Codex CLI finish its task?")
+    row = ShelfService("codex-cli", "desktop", "agent", "idle", NOW, NOW, 30,
+                       completions=(CompletionSummary(outcome, NOW, "Build"),))
+
+    answer = render_status_answer(intent, snapshot(row))
+
+    assert wording in answer
+    assert "does not confirm" not in answer
+
+
+def test_completion_question_selects_most_recent_record_even_if_shelf_is_unsorted():
+    intent = parse_status_intent("Did Codex CLI finish its task?")
+    row = ShelfService("codex-cli", "desktop", "agent", "idle", NOW, NOW, 30,
+                       completions=(
+                           CompletionSummary("succeeded", NOW - timedelta(hours=2)),
+                           CompletionSummary("failed", NOW - timedelta(hours=1)),
+                       ))
+
+    answer = render_status_answer(intent, snapshot(row))
+
+    assert "latest recorded work for Codex CLI failed" in answer
+
+
+def test_completion_question_uses_unknown_fallback_when_history_is_absent():
+    intent = parse_status_intent("Did Codex CLI finish its task?")
+    answer = render_status_answer(intent, snapshot(service("codex-cli", "idle")))
+
+    assert "does not confirm whether its last task finished" in answer
+
+
+def test_completion_wording_disambiguates_duplicate_agent_instances():
+    intent = parse_status_intent("Did Antigravity finish its work?")
+    answer = render_status_answer(intent, snapshot(
+        ShelfService("antigravity", "desktop", "agent", "idle", NOW, NOW, 30,
+                     completions=(CompletionSummary("succeeded", NOW),)),
+        ShelfService("antigravity", "laptop", "agent", "working", NOW, NOW, 30),
+    ))
+
+    assert "latest recorded work for Antigravity (desktop) succeeded" in answer
+    assert "Antigravity (laptop)'s last task finished" in answer
+
+
+@pytest.mark.parametrize("question, target", [
+    ("Is Codex Cloud running?", "codex cloud"),
+    ("What is Claude Codex's status?", "claude codex"),
+])
+def test_unknown_name_with_known_name_prefix_is_not_aliased(question, target):
+    intent = parse_status_intent(question)
+
+    assert intent.targets == (target,)
+    assert "couldn't find" in render_status_answer(intent, snapshot(service("codex-cli", "working")))
+
+
 def test_multiple_agent_completion_question_does_not_guess_task_outcomes():
     intent = parse_status_intent("Have Antigravity and Codex CLI finished?")
     result = render_status_answer(intent, snapshot(
@@ -204,6 +286,17 @@ def test_multiple_agent_completion_question_does_not_guess_task_outcomes():
     assert "does not confirm whether their last tasks finished" in result
 
 
+def test_stale_status_shelf_cannot_be_answered_as_current():
+    intent = parse_status_intent("Is Codex CLI still working?")
+    stale = ShelfSnapshot(NOW - timedelta(minutes=5), (service("codex-cli", "working"),))
+
+    result = render_status_answer(intent, stale, now=NOW)
+
+    assert "cannot verify" in result.lower()
+    assert "stale" in result.lower()
+    assert "Codex CLI is working" not in result
+
+
 def test_empty_shelf_reports_no_registered_ai_agents():
     intent = parse_status_intent("Which AIs are online?")
-    assert render_status_answer(intent, snapshot()) == "Ascend Hub has no AI agent status to report."
+    assert render_status_answer(intent, snapshot()).startswith("Ascend Hub has no AI agent status to report.")

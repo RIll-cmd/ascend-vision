@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .venv/
 venv/
 ENV/
@@ -14,6 +16,15 @@ env/
 !.env.example
 *.pem
 *.key
+*.token
+*.secret
+**/.staging_worker_token
+
+# Node & Frontend dependencies / build artifacts
+node_modules/
+dist/
+build/
+*.tsbuildinfo
 
 # Model weights & binaries (Prevents GitHub >100MB rejection)
 *.pt
@@ -36,6 +47,15 @@ Ultralytics/
 data/
 runs/
 
+# Testing & Coverage
+.coverage
+htmlcov/
+.coverage.*
+test-results/
+playwright-report/
+.pytest-tmp-*/
+**/.pytest-tmp-*/
+
 # Operating system & Editor configs
 .DS_Store
 Thumbs.db
@@ -56,14 +76,7 @@ desktop.ini
 **/.codex/
 .cursor/
 **/.cursor/
-
-# Local credentials and one-off test/scratch directories
-**/.staging_worker_token
-.pytest-tmp-*/
-**/.pytest-tmp-*/
 codex-temp/
 **/codex-temp/
 .playwright-cli/
 **/.playwright-cli/
-test-results/
-playwright-report/

@@ -196,7 +196,7 @@ def test_llm_config_defaults_and_validation():
     cfg = LLMConfig()
     assert cfg.groq_model == "llama-3.1-8b-instant"
     assert cfg.cerebras_model == "llama3.1-8b"
-    assert cfg.gemini_model == "gemini-2.5-flash"
+    assert cfg.gemini_model == "gemini-3.6-flash"
     assert cfg.groq_api_key_env == "GROQ_API_KEY"
     assert cfg.cerebras_api_key_env == "CEREBRAS_API_KEY"
     assert cfg.gemini_api_key_env == "GEMINI_API_KEY"
@@ -230,3 +230,190 @@ def test_llm_roaster_integration(mock_groq, mock_cerebras, mock_gemini):
     assert "Groq says" in reply
 
     roaster.close()
+
+
+def test_browser_structured_response_stays_with_the_selected_provider_and_reports_usage():
+    from types import SimpleNamespace
+
+    class GeminiClient:
+        def __init__(self):
+            self.models = self
+            self.models_seen = []
+
+        def generate_content(self, *, model, contents, config):
+            self.models_seen.append(model)
+            return SimpleNamespace(
+                text='{"action":"observe"}',
+                usage_metadata=SimpleNamespace(prompt_token_count=14, candidates_token_count=6),
+            )
+
+    gemini = GeminiClient()
+    router = LLMRouter(LLMConfig(), gemini_client=gemini)
+
+    response = router.generate_browser_structured_response(
+        'gemini', '{"goal":"research"}', system_prompt='JSON only', max_tokens=200,
+    )
+
+    assert response.data == {'action': 'observe'}
+    assert response.provider == 'gemini'
+    assert response.model == 'gemini-3.6-flash'
+    assert response.input_tokens == 14
+    assert response.output_tokens == 6
+    assert gemini.models_seen == ['gemini-3.6-flash']
+
+
+def test_browser_structured_malformed_json_still_reports_usage_once():
+    client = Mock()
+    client.models.generate_content.return_value = SimpleNamespace(
+        text='{', usage_metadata=SimpleNamespace(prompt_token_count=12, candidates_token_count=3),
+    )
+    router = LLMRouter(LLMConfig(), gemini_client=client)
+    calls = []
+
+    with pytest.raises(RuntimeError, match='selected browser provider'):
+        router.generate_browser_structured_response(
+            'gemini', 'private sentinel prompt', usage_callback=calls.append,
+            max_provider_attempts=1,
+        )
+
+    assert len(calls) == 1
+    assert calls[0].input_tokens == 12
+    assert calls[0].output_tokens == 3
+    assert calls[0].outcome == 'invalid_response'
+
+
+def test_browser_structured_model_fallback_is_attributed_to_actual_model():
+    client = Mock()
+    client.models.generate_content.side_effect = [
+        RuntimeError('model not_found'),
+        SimpleNamespace(text='{"action":"observe"}', model_version='gemini-3.7-flash',
+                        usage_metadata=SimpleNamespace(prompt_token_count=8, candidates_token_count=2)),
+    ]
+    router = LLMRouter(LLMConfig(), gemini_client=client)
+    reservations = []
+    records = []
+
+    response = router.generate_browser_structured_response(
+        'gemini', 'prompt', before_call=reservations.append,
+        usage_callback=records.append, max_provider_attempts=2,
+    )
+
+    assert response.model == 'gemini-3.7-flash'
+    assert [item['model'] for item in reservations] == ['gemini-3.6-flash', 'gemini-3.7-flash']
+    assert [item.model_actual for item in records] == [None, 'gemini-3.7-flash']
+    assert [item.outcome for item in records] == ['provider_error', 'success']
+
+
+def test_browser_structured_reservation_rejection_prevents_provider_call():
+    client = Mock()
+    router = LLMRouter(LLMConfig(), gemini_client=client)
+
+    def reject(_reservation):
+        raise ValueError('budget rejected')
+
+    with pytest.raises(RuntimeError, match='selected browser provider'):
+        router.generate_browser_structured_response('gemini', 'prompt', before_call=reject)
+
+    client.models.generate_content.assert_not_called()
+
+
+def test_browser_structured_timeout_is_recorded_with_unknown_usage():
+    client = Mock()
+    client.models.generate_content.side_effect = TimeoutError('provider timed out')
+    router = LLMRouter(LLMConfig(), gemini_client=client)
+    records = []
+
+    with pytest.raises(RuntimeError, match='selected browser provider'):
+        router.generate_browser_structured_response(
+            'gemini', 'prompt', usage_callback=records.append, max_provider_attempts=1,
+        )
+
+    assert len(records) == 1
+    assert records[0].outcome == 'timeout'
+    assert records[0].input_tokens is None
+    assert records[0].output_tokens is None
+
+
+def test_browser_structured_success_without_provider_usage_keeps_counts_unknown():
+    client = Mock()
+    client.models.generate_content.return_value = SimpleNamespace(text='{"action":"observe"}')
+    router = LLMRouter(LLMConfig(), gemini_client=client)
+    records = []
+
+    result = router.generate_browser_structured_response(
+        'gemini', 'prompt', usage_callback=records.append, max_provider_attempts=1,
+    )
+
+    assert result.data == {'action': 'observe'}
+    assert len(records) == 1
+    assert records[0].outcome == 'success'
+    assert records[0].input_tokens is None
+    assert records[0].output_tokens is None
+
+
+def test_browser_structured_response_does_not_fall_back_when_selected_provider_fails():
+    class FailingGemini:
+        class models:
+            @staticmethod
+            def generate_content(**_kwargs):
+                raise OSError('offline')
+
+    class OtherProvider:
+        called = False
+
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**_kwargs):
+                    OtherProvider.called = True
+                    raise AssertionError('unapproved provider must not be used')
+
+    router = LLMRouter(LLMConfig(), gemini_client=FailingGemini(), cerebras_client=OtherProvider())
+
+    with pytest.raises(RuntimeError, match='selected browser provider'):
+        router.generate_browser_structured_response('gemini', 'prompt')
+
+    assert OtherProvider.called is False
+
+
+def test_groq_key_pool_rotates_to_backup_key_on_rate_limit():
+    import groq
+    client1 = Mock()
+    client1.chat.completions.create.side_effect = groq.RateLimitError(
+        message="Rate limit exceeded on key 1",
+        response=Mock(status_code=429, headers={}),
+        body=None
+    )
+    client2 = Mock()
+    client2.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Groq backup key 2 says hello!"))]
+    )
+
+    router = LLMRouter(LLMConfig(), groq_clients=[client1, client2])
+    res = router.generate_response("Test prompt", task="fast")
+    assert "backup key 2" in res
+    assert client1.chat.completions.create.call_count == 1
+    assert client2.chat.completions.create.call_count == 1
+
+
+def test_gemini_browser_structured_response_rotates_to_backup_key_on_limit():
+    client1 = Mock()
+    client1.models.generate_content.side_effect = Exception("503 UNAVAILABLE: High demand")
+
+    client2 = Mock()
+    client2.models.generate_content.return_value = SimpleNamespace(
+        text='{"action":"navigate"}',
+        usage_metadata=SimpleNamespace(prompt_token_count=10, candidates_token_count=5),
+    )
+
+    router = LLMRouter(LLMConfig(), gemini_clients=[client1, client2])
+    res = router.generate_browser_structured_response('gemini', '{"goal":"search"}')
+    assert res.data == {'action': 'navigate'}
+    assert client1.models.generate_content.call_count == 1
+    assert client2.models.generate_content.call_count == 1
+
+
+def test_key_pool_parses_comma_and_newline_separated_keys(monkeypatch):
+    monkeypatch.setenv("TEST_KEY_ENV", "key_a, key_b; key_c\nkey_d")
+    keys = LLMRouter._parse_keys("TEST_KEY_ENV")
+    assert keys == ["key_a", "key_b", "key_c", "key_d"]

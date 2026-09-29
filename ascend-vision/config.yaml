@@ -18,6 +18,20 @@ runtime:
   preview: true
   stats_interval_seconds: 5.0
   target_fps: 15.0
+companion_context:
+  enabled: false # Opt in to local laptop context and dashboard controls.
+  proactive_enabled: false # Separate opt-in for local proactive interventions.
+  shadow_mode_enabled: false # Evaluate and explain rules without sending notifications or speech.
+  mode: quiet # quiet, companion, or focus_coach
+  break_suggestion_enabled: false
+  desk_checkin_enabled: false
+  agent_needs_input_enabled: false # Requires explicit fresh Core operation evidence.
+  break_interval_minutes: 50
+  desk_absence_minutes: 5
+  desktop_poll_seconds: 2.0
+  idle_after_seconds: 60.0
+  absence_dwell_seconds: 10.0
+  return_dwell_seconds: 3.0
 hands:
   model: models/hand_landmarker.task
   num_hands: 2
@@ -119,7 +133,7 @@ voice_commands:
 llm:
   groq_model: "groq/compound-mini"
   cerebras_model: "llama3.1-8b"
-  gemini_model: "gemini-2.5-flash"
+  gemini_model: "gemini-3.6-flash"
   groq_api_key_env: "GROQ_API_KEY"
   cerebras_api_key_env: "CEREBRAS_API_KEY"
   gemini_api_key_env: "GEMINI_API_KEY"
@@ -137,5 +151,39 @@ ascend:
   event_path: /api/integration/event
 
 screen_audit:
-  enabled: true
+  enabled: false # Periodic cloud screenshot audits are a separate opt-in.
   interval_seconds: 1800
+
+phone_chat:
+  enabled: false # Enable only after all ASCEND_PHONE_* values are provisioned.
+  voice_upload_enabled: false # Explicit opt-in; recordings are sent to Google Gemini for transcription.
+  poll_interval_seconds: 2.0
+  lease_renew_interval_seconds: 20.0
+  request_timeout_seconds: 15.0
+  shutdown_timeout_seconds: 3.0
+
+browser_automation:
+  enabled: false # Local browser research is opt-in and kept off by default.
+  b3_enabled: false # Signed-in workflows, form actions, and file transfer require a separate opt-in.
+  remote_enabled: false # PWA/Discord initiation requires a separately configured Core worker.
+  remote_writes_enabled: false # Phone review of signed-in site actions is a separate opt-in.
+  remote_scopes: []
+  provider: gemini
+  scope_mode: public_research
+  profile_mode: ephemeral
+  max_decisions: 20
+  max_actions: 30
+  max_pages: 3
+  max_queued_tasks: 4
+  task_timeout_seconds: 180
+  metrics_enabled: false # Operational metrics are opt-in and stay in owner-local storage.
+  metrics_retention_days: 30
+  metrics_max_runs: 10000
+  pilot_enabled: false # Live provider calls require an owner-reviewed price table and explicit B2 acceptance.
+  pilot_price_table_path: null
+  pilot_token_bound_reviewed: false
+  pilot_b2_live_accepted: false
+  pilot_voice_completion_confirmed: false
+  pilot_daily_budget_usd_micros: 1000000
+  pilot_total_budget_usd_micros: 5000000
+  enabled_routines: []

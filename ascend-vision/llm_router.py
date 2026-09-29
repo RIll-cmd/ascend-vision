@@ -5,7 +5,11 @@ import json
 import logging
 import os
 import re
-from typing import Optional
+import secrets
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any, Optional
 
 from config import LLMConfig
 
@@ -82,6 +86,139 @@ def _clean_and_truncate(text: str, max_words: int = 25) -> str:
     return cleaned
 
 
+@dataclass(frozen=True)
+class BrowserStructuredResponse:
+    data: dict
+    provider: str
+    model: str
+    input_tokens: int | None
+    output_tokens: int | None
+    latency_ms: int
+    requested_model: str | None = None
+
+
+class ProviderKeyPool:
+    """Thread-safe pool of API keys for a provider with automatic rotation upon limits/errors."""
+
+    def __init__(
+        self,
+        provider: str,
+        keys: list[str],
+        client_factory,
+        explicit_client=None,
+        cooldown_seconds: float = 60.0,
+    ):
+        self.provider = provider
+        self.keys = [k.strip() for k in keys if k and k.strip()]
+        self.client_factory = client_factory
+        self.explicit_client = explicit_client
+        self.cooldown_seconds = cooldown_seconds
+        self._clients: dict[str, Any] = {}
+        self._cooldown_until: dict[str, float] = {}
+        self._lock = threading.Lock()
+        self._current_index = 0
+
+    @property
+    def has_keys(self) -> bool:
+        return self.explicit_client is not None or len(self.keys) > 0
+
+    def get_current_client(self):
+        """Returns the currently active client or None if none configured."""
+        if self.explicit_client is not None:
+            return self.explicit_client
+        if not self.keys:
+            return None
+        with self._lock:
+            key = self.keys[self._current_index % len(self.keys)]
+            if key not in self._clients:
+                self._clients[key] = self.client_factory(key)
+            return self._clients[key]
+
+    def execute_with_failover(self, call_fn, *, max_attempts: int | None = None):
+        """Executes call_fn(client). If rotatable limit/error occurs and backup keys exist, rotates and retries."""
+        if self.explicit_client is not None:
+            return call_fn(self.explicit_client)
+
+        if not self.keys:
+            raise ValueError(f"No API keys configured for provider '{self.provider}'.")
+        if max_attempts is not None and (type(max_attempts) is not int or max_attempts < 1):
+            raise ValueError('max_attempts must be a positive integer')
+
+        now = time.monotonic()
+        total_keys = len(self.keys)
+        if total_keys == 1 or max_attempts == 1:
+            key = self.keys[0]
+            with self._lock:
+                if key not in self._clients:
+                    self._clients[key] = self.client_factory(key)
+                client = self._clients[key]
+            return call_fn(client)
+
+        with self._lock:
+            start_index = self._current_index
+
+        last_error = None
+        for attempt in range(min(total_keys, max_attempts or total_keys)):
+            idx = (start_index + attempt) % total_keys
+            key = self.keys[idx]
+
+            with self._lock:
+                cooldown = self._cooldown_until.get(key, 0.0)
+                # If on cooldown, skip it unless this is our last option
+                if now < cooldown and attempt < total_keys - 1:
+                    continue
+                if key not in self._clients:
+                    try:
+                        self._clients[key] = self.client_factory(key)
+                    except Exception as exc:
+                        last_error = exc
+                        continue
+                client = self._clients[key]
+
+            try:
+                res = call_fn(client)
+                with self._lock:
+                    self._current_index = idx
+                return res
+            except Exception as exc:
+                last_error = exc
+                if self._is_rotatable_error(exc):
+                    with self._lock:
+                        self._cooldown_until[key] = time.monotonic() + self.cooldown_seconds
+                        self._current_index = (idx + 1) % total_keys
+                    LOG.warning(
+                        "[ROUTER] %s key %d/%d encountered limit/error (%s). Switching to backup key...",
+                        self.provider.upper(), idx + 1, total_keys, exc
+                    )
+                    time.sleep(0.5)
+                else:
+                    raise
+
+        raise last_error
+
+    @staticmethod
+    def _is_rotatable_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        status_code = getattr(exc, 'status_code', None) or getattr(getattr(exc, 'response', None), 'status_code', None)
+        if status_code in (429, 503, 403, 504):
+            return True
+        rotatable_indicators = (
+            '429', '503', '504', 'rate limit', 'rate_limit', 'quota', 'resource_exhausted',
+            'resourceexhausted', 'too many requests', 'high demand', 'temporarily unavailable',
+            'deadline expired', 'deadline_exceeded', 'project has been denied access', 'permission_denied'
+        )
+        return any(ind in msg for ind in rotatable_indicators)
+
+
+def _build_gemini_thinking_config(model: str):
+    from google.genai import types
+    if model.startswith('gemini-2.5-flash'):
+        return types.ThinkingConfig(thinking_budget=0)
+    elif (model.startswith('gemini-3') or 'thinking' in model) and 'flash' in model:
+        return types.ThinkingConfig(thinking_level='minimal')
+    return None
+
+
 class LLMRouter:
     """Manages multi-provider LLM inference routing among Groq, Cerebras, and Gemini with automatic failover."""
 
@@ -91,89 +228,142 @@ class LLMRouter:
         *,
         groq_client=None,
         cerebras_client=None,
-        gemini_client=None
+        gemini_client=None,
+        groq_clients: Optional[list] = None,
+        cerebras_clients: Optional[list] = None,
+        gemini_clients: Optional[list] = None,
     ):
         self.config = config or LLMConfig()
         self._groq_client = groq_client
         self._cerebras_client = cerebras_client
         self._gemini_client = gemini_client
 
-    def _get_groq_client(self):
-        if self._groq_client is not None:
-            return self._groq_client
-        key = os.environ.get(self.config.groq_api_key_env, '').strip()
-        if not key:
-            raise ValueError(f"Environment variable {self.config.groq_api_key_env} is not set")
+        # Initialize pools for each provider
+        groq_keys = self._parse_keys(self.config.groq_api_key_env)
+        cerebras_keys = self._parse_keys(self.config.cerebras_api_key_env)
+        gemini_keys = self._parse_keys(self.config.gemini_api_key_env)
+
+        self._groq_pool = ProviderKeyPool(
+            'groq', groq_keys, self._create_groq_client,
+            explicit_client=groq_client if groq_clients is None else None
+        )
+        self._cerebras_pool = ProviderKeyPool(
+            'cerebras', cerebras_keys, self._create_cerebras_client,
+            explicit_client=cerebras_client if cerebras_clients is None else None
+        )
+        self._gemini_pool = ProviderKeyPool(
+            'gemini', gemini_keys, self._create_gemini_client,
+            explicit_client=gemini_client if gemini_clients is None else None
+        )
+
+        if groq_clients:
+            self._groq_pool.keys = [f"mock_groq_{i}" for i in range(len(groq_clients))]
+            self._groq_pool._clients = {k: c for k, c in zip(self._groq_pool.keys, groq_clients)}
+        if cerebras_clients:
+            self._cerebras_pool.keys = [f"mock_cerebras_{i}" for i in range(len(cerebras_clients))]
+            self._cerebras_pool._clients = {k: c for k, c in zip(self._cerebras_pool.keys, cerebras_clients)}
+        if gemini_clients:
+            self._gemini_pool.keys = [f"mock_gemini_{i}" for i in range(len(gemini_clients))]
+            self._gemini_pool._clients = {k: c for k, c in zip(self._gemini_pool.keys, gemini_clients)}
+
+    @staticmethod
+    def _parse_keys(env_var_name: str) -> list[str]:
+        raw = os.environ.get(env_var_name, '').strip()
+        if not raw and os.name == 'nt':
+            try:
+                import winreg
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Environment') as key:
+                    raw = (winreg.QueryValueEx(key, env_var_name)[0] or '').strip()
+            except Exception:
+                pass
+        if not raw:
+            return []
+        normalized = raw.replace('\n', ',').replace(';', ',')
+        return [k.strip() for k in normalized.split(',') if k.strip()]
+
+    def _create_groq_client(self, key: str):
         import groq
-        self._groq_client = groq.Groq(api_key=key, timeout=5.0)
-        return self._groq_client
+        return groq.Groq(api_key=key, timeout=5.0)
 
-    def _get_cerebras_client(self):
-        if self._cerebras_client is not None:
-            return self._cerebras_client
-        key = os.environ.get(self.config.cerebras_api_key_env, '').strip()
-        if not key:
-            raise ValueError(f"Environment variable {self.config.cerebras_api_key_env} is not set")
+    def _create_cerebras_client(self, key: str):
         from cerebras.cloud.sdk import Cerebras
-        self._cerebras_client = Cerebras(api_key=key)
-        return self._cerebras_client
+        return Cerebras(api_key=key)
 
-    def _get_gemini_client(self):
-        if self._gemini_client is not None:
-            return self._gemini_client
-        key = os.environ.get(self.config.gemini_api_key_env, '').strip()
-        if not key:
-            raise ValueError(f"Environment variable {self.config.gemini_api_key_env} is not set")
+    def _create_gemini_client(self, key: str):
         from google import genai
         from google.genai import types
-        self._gemini_client = genai.Client(
+        return genai.Client(
             api_key=key,
             vertexai=False,
             http_options=types.HttpOptions(
                 base_url='https://generativelanguage.googleapis.com',
-                timeout=10000,
+                timeout=15000,
                 retry_options=types.HttpRetryOptions(attempts=1)
             )
         )
-        return self._gemini_client
+
+    def _get_groq_client(self):
+        if self._groq_client is not None:
+            return self._groq_client
+        client = self._groq_pool.get_current_client()
+        if client is None:
+            raise ValueError(f"Environment variable {self.config.groq_api_key_env} is not set")
+        return client
+
+    def _get_cerebras_client(self):
+        if self._cerebras_client is not None:
+            return self._cerebras_client
+        client = self._cerebras_pool.get_current_client()
+        if client is None:
+            raise ValueError(f"Environment variable {self.config.cerebras_api_key_env} is not set")
+        return client
+
+    def _get_gemini_client(self):
+        if self._gemini_client is not None:
+            return self._gemini_client
+        client = self._gemini_pool.get_current_client()
+        if client is None:
+            raise ValueError(f"Environment variable {self.config.gemini_api_key_env} is not set")
+        return client
 
     def _call_groq(self, prompt: str, system_prompt: str, max_tokens: int) -> str:
-        client = self._get_groq_client()
         effective_sys = _build_effective_system_prompt(system_prompt)
         messages = []
         if effective_sys:
             messages.append({'role': 'system', 'content': effective_sys})
         messages.append({'role': 'user', 'content': prompt})
 
-        # Try configured model; if 404 (model deprecated), try active Groq compound model
         model = self.config.groq_model
-        try:
-            res = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=0.7
-            )
-            content = res.choices[0].message.content or ''
-            return _clean_and_truncate(content)
-        except Exception as exc:
-            # If model name not found (e.g. llama-3.1-8b-instant replaced), try compound-mini
-            if 'model_not_found' in str(exc) or '404' in str(exc):
-                try:
-                    res = client.chat.completions.create(
-                        model='groq/compound-mini',
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=0.7
-                    )
-                    content = res.choices[0].message.content or ''
-                    return _clean_and_truncate(content)
-                except Exception:
-                    pass
-            raise
+
+        def _do_call(client):
+            try:
+                res = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=0.7
+                )
+                content = res.choices[0].message.content or ''
+                return _clean_and_truncate(content)
+            except Exception as exc:
+                # If model name not found (e.g. llama-3.1-8b-instant replaced), try compound-mini
+                if 'model_not_found' in str(exc) or '404' in str(exc):
+                    try:
+                        res = client.chat.completions.create(
+                            model='groq/compound-mini',
+                            messages=messages,
+                            max_tokens=max_tokens,
+                            temperature=0.7
+                        )
+                        content = res.choices[0].message.content or ''
+                        return _clean_and_truncate(content)
+                    except Exception:
+                        pass
+                raise
+
+        return self._groq_pool.execute_with_failover(_do_call)
 
     def _call_cerebras(self, prompt: str, system_prompt: str, max_tokens: int) -> str:
-        client = self._get_cerebras_client()
         effective_sys = _build_effective_system_prompt(system_prompt)
         messages = []
         if effective_sys:
@@ -181,89 +371,124 @@ class LLMRouter:
         messages.append({'role': 'user', 'content': prompt})
 
         model = self.config.cerebras_model
-        try:
-            res = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=0.7
-            )
-            content = res.choices[0].message.content or ''
-            return _clean_and_truncate(content)
-        except Exception as exc:
-            if 'model_not_found' in str(exc) or '404' in str(exc):
-                try:
-                    res = client.chat.completions.create(
-                        model='qwen-3.8-27b',
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=0.7
-                    )
-                    content = res.choices[0].message.content or ''
-                    return _clean_and_truncate(content)
-                except Exception:
-                    pass
-            raise
+
+        def _do_call(client):
+            try:
+                res = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=0.7
+                )
+                content = res.choices[0].message.content or ''
+                return _clean_and_truncate(content)
+            except Exception as exc:
+                if 'model_not_found' in str(exc) or '404' in str(exc):
+                    try:
+                        res = client.chat.completions.create(
+                            model='qwen-3.8-27b',
+                            messages=messages,
+                            max_tokens=max_tokens,
+                            temperature=0.7
+                        )
+                        content = res.choices[0].message.content or ''
+                        return _clean_and_truncate(content)
+                    except Exception:
+                        pass
+                raise
+
+        return self._cerebras_pool.execute_with_failover(_do_call)
 
     def _build_gemini_options(self, model: str, system_prompt: str, max_tokens: int):
         from google.genai import types
         effective_sys = _build_effective_system_prompt(system_prompt)
-        options = types.GenerateContentConfig(
+        return types.GenerateContentConfig(
             system_instruction=effective_sys if effective_sys else None,
             max_output_tokens=max_tokens,
             response_mime_type='text/plain',
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            thinking_config=_build_gemini_thinking_config(model),
         )
-        if model.startswith('gemini-2.5-flash'):
-            options.thinking_config = types.ThinkingConfig(thinking_budget=0)
-        elif model.startswith('gemini-3') and 'flash' in model:
-            options.thinking_config = types.ThinkingConfig(thinking_level='minimal')
-        return options
 
     def _call_gemini(self, prompt: str, system_prompt: str, max_tokens: int) -> str:
-        client = self._get_gemini_client()
         model = self.config.gemini_model
         options = self._build_gemini_options(model, system_prompt, max_tokens)
 
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=options
-            )
-            text = response.text or ''
-            return _clean_and_truncate(text)
-        except Exception as exc:
-            # If configured gemini-2.5-flash is no longer supported for new users, try gemini-3.6-flash
-            if 'not_found' in str(exc).lower() or 'no longer available' in str(exc).lower():
-                try:
-                    fallback_options = self._build_gemini_options('gemini-3.6-flash', system_prompt, max_tokens)
-                    response = client.models.generate_content(
-                        model='gemini-3.6-flash',
-                        contents=prompt,
-                        config=fallback_options
-                    )
-                    text = response.text or ''
-                    return _clean_and_truncate(text)
-                except Exception:
-                    pass
-            raise
+        def _do_call(client):
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=options
+                )
+                text = response.text or ''
+                return _clean_and_truncate(text)
+            except Exception as exc:
+                # If configured gemini model is no longer supported for new users, try alternatives
+                if 'not_found' in str(exc).lower() or 'no longer available' in str(exc).lower():
+                    for fallback_model in ('gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-flash-latest'):
+                        if fallback_model == model:
+                            continue
+                        try:
+                            fallback_options = self._build_gemini_options(fallback_model, system_prompt, max_tokens)
+                            response = client.models.generate_content(
+                                model=fallback_model,
+                                contents=prompt,
+                                config=fallback_options
+                            )
+                            text = response.text or ''
+                            return _clean_and_truncate(text)
+                        except Exception:
+                            pass
+                raise
+
+        return self._gemini_pool.execute_with_failover(_do_call)
 
     def _call_gemini_structured(self, prompt: str, system_prompt: str, max_tokens: int) -> dict:
         """Use the provider's JSON response mode; no conversational fallback is valid here."""
         from google.genai import types
-        client = self._get_gemini_client()
         options = types.GenerateContentConfig(
             system_instruction=system_prompt or None,
             max_output_tokens=max_tokens,
             response_mime_type='application/json',
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            thinking_config=_build_gemini_thinking_config(self.config.gemini_model),
         )
-        response = client.models.generate_content(model=self.config.gemini_model, contents=prompt, config=options)
-        value = json.loads(response.text or '')
-        if not isinstance(value, dict):
-            raise ValueError('Structured response must be a JSON object')
-        return value
+
+        def _do_call(client):
+            try:
+                response = client.models.generate_content(
+                    model=self.config.gemini_model, contents=prompt, config=options
+                )
+            except Exception as exc:
+                if 'not_found' in str(exc).lower() or 'no longer available' in str(exc).lower():
+                    for fallback_model in ('gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-flash-latest'):
+                        if fallback_model == self.config.gemini_model:
+                            continue
+                        try:
+                            fallback_options = types.GenerateContentConfig(
+                                system_instruction=system_prompt or None,
+                                max_output_tokens=max_tokens,
+                                response_mime_type='application/json',
+                                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                                thinking_config=_build_gemini_thinking_config(fallback_model),
+                            )
+                            response = client.models.generate_content(
+                                model=fallback_model, contents=prompt, config=fallback_options
+                            )
+                            break
+                        except Exception:
+                            pass
+                    else:
+                        raise
+                else:
+                    raise
+            value = json.loads(response.text or '')
+            if not isinstance(value, dict):
+                raise ValueError('Structured response must be a JSON object')
+            return value
+
+        return self._gemini_pool.execute_with_failover(_do_call)
 
     def _call_openai_compatible_structured(self, client, model: str, prompt: str,
                                            system_prompt: str, max_tokens: int) -> dict:
@@ -280,6 +505,20 @@ class LLMRouter:
             raise ValueError('Structured response must be a JSON object')
         return value
 
+    def _call_groq_structured(self, prompt: str, system_prompt: str, max_tokens: int) -> dict:
+        return self._groq_pool.execute_with_failover(
+            lambda client: self._call_openai_compatible_structured(
+                client, self.config.groq_model, prompt, system_prompt, max_tokens
+            )
+        )
+
+    def _call_cerebras_structured(self, prompt: str, system_prompt: str, max_tokens: int) -> dict:
+        return self._cerebras_pool.execute_with_failover(
+            lambda client: self._call_openai_compatible_structured(
+                client, self.config.cerebras_model, prompt, system_prompt, max_tokens
+            )
+        )
+
     def generate_structured_response(self, prompt: str, system_prompt: str = '',
                                      task: str = 'reasoning', max_tokens: int = 500) -> dict:
         """Return provider-enforced JSON or fail safely; never use text/offline fallbacks."""
@@ -287,15 +526,11 @@ class LLMRouter:
             raise ValueError('Structured prompt must be nonempty')
         attempts = (
             lambda: self._call_gemini_structured(prompt, system_prompt, max_tokens),
-            lambda: self._call_openai_compatible_structured(
-                self._get_cerebras_client(), self.config.cerebras_model, prompt, system_prompt, max_tokens),
-            lambda: self._call_openai_compatible_structured(
-                self._get_groq_client(), self.config.groq_model, prompt, system_prompt, max_tokens),
+            lambda: self._call_cerebras_structured(prompt, system_prompt, max_tokens),
+            lambda: self._call_groq_structured(prompt, system_prompt, max_tokens),
         ) if task == 'reasoning' else (
-            lambda: self._call_openai_compatible_structured(
-                self._get_groq_client(), self.config.groq_model, prompt, system_prompt, max_tokens),
-            lambda: self._call_openai_compatible_structured(
-                self._get_cerebras_client(), self.config.cerebras_model, prompt, system_prompt, max_tokens),
+            lambda: self._call_groq_structured(prompt, system_prompt, max_tokens),
+            lambda: self._call_cerebras_structured(prompt, system_prompt, max_tokens),
             lambda: self._call_gemini_structured(prompt, system_prompt, max_tokens),
         )
         last_error = None
@@ -305,6 +540,184 @@ class LLMRouter:
             except Exception as exc:
                 last_error = exc
         raise RuntimeError('No structured AI provider is available') from last_error
+
+    def generate_browser_structured_response(self, provider: str, prompt: str,
+                                             system_prompt: str = '', max_tokens: int = 500,
+                                             usage_callback=None, before_call=None,
+                                             max_provider_attempts: int = 2):
+        """Use exactly one owner-selected provider for browser page data; never fail over."""
+        if provider not in {'gemini', 'cerebras', 'groq'}:
+            raise ValueError('Unknown browser decision provider')
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError('Browser decision prompt must be nonempty')
+        if type(max_tokens) is not int or not 1 <= max_tokens <= 2_000:
+            raise ValueError('Browser decision max_tokens must be between 1 and 2000')
+        if type(max_provider_attempts) is not int or not 1 <= max_provider_attempts <= 2:
+            raise ValueError('Browser provider attempts must be between 1 and 2')
+        if usage_callback is not None and not callable(usage_callback):
+            raise ValueError('usage_callback must be callable')
+        if before_call is not None and not callable(before_call):
+            raise ValueError('before_call must be callable')
+        model = {
+            'gemini': self.config.gemini_model,
+            'cerebras': self.config.cerebras_model,
+            'groq': self.config.groq_model,
+        }[provider]
+
+        attempts = 0
+        pending_success = []
+
+        def _report(attempt_id, actual_model, usage, latency_ms, outcome):
+            if usage_callback is None:
+                return
+            from browser.metrics import ProviderCallUsage
+            input_tokens = getattr(usage, 'prompt_token_count', None) if provider == 'gemini' else getattr(usage, 'prompt_tokens', None)
+            output_tokens = getattr(usage, 'candidates_token_count', None) if provider == 'gemini' else getattr(usage, 'completion_tokens', None)
+            cached_tokens = getattr(usage, 'cached_content_token_count', None) if provider == 'gemini' else getattr(usage, 'prompt_tokens_details', None)
+            if provider != 'gemini' and cached_tokens is not None:
+                cached_tokens = getattr(cached_tokens, 'cached_tokens', None)
+            thinking_tokens = getattr(usage, 'thoughts_token_count', None) if provider == 'gemini' else None
+            def count(value):
+                return value if type(value) is int and 0 <= value <= 10_000_000 else None
+            record = ProviderCallUsage(
+                attempt_id=attempt_id, provider=provider, model_requested=model,
+                model_actual=actual_model, input_tokens=count(input_tokens), output_tokens=count(output_tokens),
+                cached_tokens=count(cached_tokens), thinking_tokens=count(thinking_tokens),
+                latency_ms=max(0, min(3_600_000, latency_ms)), outcome=outcome,
+            )
+            try:
+                usage_callback(record)
+            except Exception:
+                # Optional accounting must not change browser action authority or block Stop.
+                pass
+
+        def _attempt(client, actual_model, call):
+            nonlocal attempts
+            if attempts >= max_provider_attempts:
+                raise RuntimeError('Browser provider attempt limit reached before another request.')
+            attempt_id = secrets.token_urlsafe(24)
+            reservation = {
+                'provider': provider, 'model': actual_model, 'prompt': prompt,
+                'system_prompt': system_prompt,
+                'max_output_tokens': max_tokens, 'attempt_id': attempt_id,
+            }
+            if before_call is not None:
+                before_call(reservation)
+            attempts += 1
+            started = time.monotonic()
+            try:
+                response = call(client)
+            except Exception as exc:
+                outcome = 'timeout' if 'timeout' in type(exc).__name__.lower() else 'provider_error'
+                _report(attempt_id, None, None,
+                        max(0, round((time.monotonic() - started) * 1_000)), outcome)
+                raise
+            usage = getattr(response, 'usage_metadata', None) if provider == 'gemini' else getattr(response, 'usage', None)
+            pending_success.append((attempt_id, actual_model, usage,
+                                    max(0, round((time.monotonic() - started) * 1_000))))
+            return response
+
+        def _do_call(client):
+            if provider == 'gemini':
+                from google.genai import types
+                thinking_cfg = _build_gemini_thinking_config(model)
+                try:
+                    response = _attempt(client, model, lambda c: c.models.generate_content(
+                        model=model, contents=prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_prompt or None, max_output_tokens=max_tokens,
+                            response_mime_type='application/json',
+                            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                            thinking_config=thinking_cfg,
+                        )))
+                except Exception as exc:
+                    if 'not_found' in str(exc).lower() or 'no longer available' in str(exc).lower():
+                        for fallback_model in ('gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-flash-latest'):
+                            if fallback_model == model:
+                                continue
+                            if attempts >= max_provider_attempts:
+                                break
+                            try:
+                                fallback_thinking = _build_gemini_thinking_config(fallback_model)
+                                response = _attempt(client, fallback_model, lambda c: c.models.generate_content(
+                                    model=fallback_model, contents=prompt,
+                                    config=types.GenerateContentConfig(
+                                        system_instruction=system_prompt or None, max_output_tokens=max_tokens,
+                                        response_mime_type='application/json',
+                                        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                                        thinking_config=fallback_thinking,
+                                    )))
+                                break
+                            except Exception as fallback_exc:
+                                if attempts >= max_provider_attempts or not (
+                                        'not_found' in str(fallback_exc).lower()
+                                        or 'no longer available' in str(fallback_exc).lower()):
+                                    raise
+                        else:
+                            raise
+                    else:
+                        raise
+                try:
+                    raw = response.text or ''
+                except Exception:
+                    for attempt_id, attempted_model, attempt_usage, latency in pending_success:
+                        _report(attempt_id, attempted_model, attempt_usage, latency, 'invalid_response')
+                    pending_success.clear()
+                    raise
+                usage = getattr(response, 'usage_metadata', None)
+                actual_model = getattr(response, 'model_version', None) or getattr(response, 'model', None) or model
+            else:
+                messages = []
+                if system_prompt:
+                    messages.append({'role': 'system', 'content': system_prompt})
+                messages.append({'role': 'user', 'content': prompt})
+                response = _attempt(client, model, lambda c: c.chat.completions.create(
+                    model=model, messages=messages, temperature=0.1, max_tokens=max_tokens,
+                    response_format={'type': 'json_object'},
+                ))
+                try:
+                    raw = response.choices[0].message.content or ''
+                except Exception:
+                    for attempt_id, attempted_model, attempt_usage, latency in pending_success:
+                        _report(attempt_id, attempted_model, attempt_usage, latency, 'invalid_response')
+                    pending_success.clear()
+                    raise
+                usage = getattr(response, 'usage', None)
+                actual_model = getattr(response, 'model', None) or model
+            try:
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    raise ValueError('Structured response must be a JSON object')
+            except Exception:
+                for attempt_id, attempted_model, attempt_usage, latency in pending_success:
+                    _report(attempt_id, attempted_model, attempt_usage, latency, 'invalid_response')
+                pending_success.clear()
+                raise
+            for attempt_id, attempted_model, attempt_usage, latency in pending_success:
+                _report(attempt_id, attempted_model, attempt_usage, latency, 'success')
+            latency_ms = pending_success[-1][3] if pending_success else 0
+            pending_success.clear()
+            return BrowserStructuredResponse(
+                data=data, provider=provider, model=actual_model,
+                input_tokens=(getattr(usage, 'prompt_token_count', None) if provider == 'gemini'
+                              else getattr(usage, 'prompt_tokens', None)),
+                output_tokens=(getattr(usage, 'candidates_token_count', None) if provider == 'gemini'
+                               else getattr(usage, 'completion_tokens', None)),
+                latency_ms=max(0, latency_ms),
+                requested_model=model,
+            )
+
+        pool = {
+            'gemini': self._gemini_pool,
+            'cerebras': self._cerebras_pool,
+            'groq': self._groq_pool,
+        }[provider]
+
+        try:
+            return pool.execute_with_failover(_do_call, max_attempts=max_provider_attempts)
+        except Exception as exc:
+            raise RuntimeError(f'No response from the selected browser provider ({provider}).') from exc
+
 
     def generate_response(
         self,

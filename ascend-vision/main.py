@@ -1,6 +1,7 @@
 """Phase 4: local hold logging and asynchronous focus-only roast feedback."""
 import argparse
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import logging
 import math
 import os
@@ -75,6 +76,15 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
     manager = None
     controls = None
     feedback = None
+    context_runtime = None
+    context_collector = None
+    activity_history_store = None
+    activity_summary_provider = None
+    browser_voice_notifier = None
+    mission_reader = None
+    activity_summary_recorder = None
+    last_activity_sample = None
+    face_tracker_available = face_tracker is not None
     resources = ExitStack()
     focus_ui_bridge = None
     if fairy_ui:
@@ -136,6 +146,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         if face_tracker is None:
             try:
                 face_tracker = FaceMeshTracker(config.face)
+                face_tracker_available = True
                 resources.callback(face_tracker.close)
                 face_tracker.warmup(config.camera.width, config.camera.height)
             except ValueError:
@@ -143,6 +154,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     def detect(self, *args): return []
                     def close(self): pass
                 face_tracker = DummyFaceTracker()
+                face_tracker_available = False
 
         database = resources.enter_context(Database(config.storage.database,
                                                      timeout=config.storage.busy_timeout_seconds))
@@ -150,6 +162,95 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                                  update_seconds=config.storage.update_seconds)
         resources.callback(manager.close)
         manager.start(config.sessions.initial_mode)
+        try:
+            from assistant.activity_summary import ActivityHistoryStore, render_daily_summary
+            activity_history_store = ActivityHistoryStore(
+                Path(config.storage.database).parent / 'activity_history.db',
+                timeout_seconds=config.storage.busy_timeout_seconds,
+            )
+            def activity_summary_provider():
+                from zoneinfo import ZoneInfo
+                now = datetime.now(timezone.utc)
+                zone = ZoneInfo(config.dashboard.timezone)
+                local_now = now.astimezone(zone)
+                local_start = datetime.combine(local_now.date(), datetime.min.time(), tzinfo=zone)
+                next_start = datetime.combine(local_now.date() + timedelta(days=1), datetime.min.time(), tzinfo=zone)
+                mission_line = "Core mission completions could not be verified because authenticated Core access is unavailable."
+                if mission_reader is not None:
+                    try:
+                        completions = mission_reader.read_completion_history(
+                            local_start.astimezone(timezone.utc), next_start.astimezone(timezone.utc),
+                        )
+                        if completions:
+                            names = "; ".join(
+                                f"{item.name} ({item.completed_at.astimezone(zone).strftime('%H:%M')})"
+                                for item in completions[:8]
+                            )
+                            mission_line = f"Core-confirmed mission completions today: {names}."
+                            if len(completions) > 8:
+                                mission_line += f" Plus {len(completions) - 8} more."
+                        else:
+                            mission_line = "Core-confirmed mission completions today: none."
+                    except Exception:
+                        mission_line = "Core mission completions could not be verified right now."
+                summary = render_daily_summary(
+                    activity_history_store, timezone_name=config.dashboard.timezone, now=now,
+                )
+                return f"{summary} {mission_line}"
+        except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+            LOG.warning('Daily activity history unavailable (%s)', type(exc).__name__)
+        desk_region_store = None
+        if config.companion_context.enabled:
+            from assistant.context_runtime import ContextRuntime
+            from assistant.activity_summary import ActivitySummaryRecorder
+            from integrations.context_collector import CompanionContextCollector
+            from integrations.context_ipc import ContextPipeServer
+            from integrations.desktop_activity import WindowsActivityAdapter
+            from integrations.desk_presence import DeskRegionStore
+
+            context_runtime = ContextRuntime(
+                device_id=(os.getenv("ASCEND_DEVICE_ID", "ascend-vision-desktop").strip()
+                           or "ascend-vision-desktop"),
+                desk_calibration_available=config.runtime.preview,
+            )
+            desk_region_store = DeskRegionStore(
+                Path(config.storage.database).parent / "desk_region.json",
+            )
+            context_runtime.set_desk_region(desk_region_store.load())
+            resources.callback(context_runtime.clear)
+            try:
+                if activity_history_store is None:
+                    raise RuntimeError('activity history store is unavailable')
+                activity_summary_recorder = ActivitySummaryRecorder(
+                    activity_history_store, timezone_name=config.dashboard.timezone,
+                )
+            except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+                LOG.warning('Daily activity aggregation unavailable (%s)', type(exc).__name__)
+            context_collector = CompanionContextCollector(
+                context_runtime,
+                WindowsActivityAdapter(idle_after_seconds=config.companion_context.idle_after_seconds),
+                desktop_poll_seconds=config.companion_context.desktop_poll_seconds,
+                absence_dwell_seconds=config.companion_context.absence_dwell_seconds,
+                return_dwell_seconds=config.companion_context.return_dwell_seconds,
+            )
+            try:
+                context_server = ContextPipeServer(context_runtime)
+                context_server.start()
+                resources.callback(context_server.close)
+                LOG.info("Current laptop context is available to the local dashboard.")
+            except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+                LOG.warning("Local context dashboard IPC unavailable (%s)", type(exc).__name__)
+            if config.companion_context.share_with_phone:
+                from integrations.context_publisher import build_context_publisher
+
+                context_publisher = build_context_publisher(
+                    context_runtime, sharing_enabled=True,
+                )
+                if context_publisher is None:
+                    raise RuntimeError('Enabled phone context sharing did not create a publisher')
+                resources.callback(context_publisher.close)
+                context_publisher.start()
+                LOG.info('Redacted laptop context sharing is enabled for the paired phone account.')
         chat_session_started_at = time.perf_counter()
         controls = DesktopControls(config.sessions, manager)
         resources.callback(controls.close)
@@ -164,30 +265,154 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             LOG.warning('Assistant memory unavailable (%s); chat remains stateless', type(exc).__name__)
             memory_store = UnavailableMemoryStore()
         core_base_url = (os.getenv("ASCEND_CORE_BASE_URL") or os.getenv("ASCEND_BASE_URL", "http://localhost:8000")).strip()
+        token_store = None
+        context_store = None
+        configured_character_id = os.getenv(config.ascend.character_id_env)
+        if config.ascend.enabled:
+            try:
+                from integrations.vision_context import VisionContextStore
+                from integrations.vision_token_store import VisionTokenStore
+                token_store = VisionTokenStore()
+                context_store = VisionContextStore()
+            except Exception as exc:
+                LOG.warning('Core read authorization unavailable (%s)', type(exc).__name__)
         if assistant_service is None:
             status_runtime = None
             status_credential = os.getenv("ASCEND_STATUS_READ_CREDENTIAL", "").strip()
-            if config.ascend.enabled and status_credential:
+            if config.ascend.enabled:
                 try:
-                    reader = StatusShelfReader(
-                        core_base_url, status_credential,
-                        timeout_seconds=min(config.ascend.timeout_seconds, 3.0),
-                    )
                     status_runtime = ToolRuntime()
-                    status_runtime.register(
-                        ToolSpec("hub_status", 1, "read-only", frozenset(), ShelfSnapshot),
-                        reader.read,
-                    )
                 except ValueError as exc:
-                    LOG.warning('Hub status tool unavailable (%s)', type(exc).__name__)
+                    LOG.warning('Core read tools unavailable (%s)', type(exc).__name__)
+                    status_runtime = None
+                if status_runtime is not None:
+                    if status_credential:
+                        try:
+                            reader = StatusShelfReader(
+                                core_base_url, status_credential,
+                                timeout_seconds=min(config.ascend.timeout_seconds, 3.0),
+                            )
+                            status_runtime.register(
+                                ToolSpec("hub_status", 1, "read-only", frozenset(), ShelfSnapshot),
+                                reader.read,
+                            )
+                        except ValueError as exc:
+                            LOG.warning('Hub status tool unavailable (%s)', type(exc).__name__)
+                    try:
+                        from integrations.vision_context import resolve_character_id
+                        from integrations.vision_query_reader import MissionSnapshot, VisionMissionReader
+
+                        def mission_token():
+                            token = token_store.load() if token_store is not None else None
+                            return token.access_token if token is not None else None
+
+                        def mission_character():
+                            token = token_store.load() if token_store is not None else None
+                            auth_context = context_store.load() if context_store is not None else None
+                            return resolve_character_id(configured_character_id, auth_context, token)
+
+                        mission_reader = VisionMissionReader(
+                            core_base_url, mission_token, mission_character,
+                            timeout_seconds=min(config.ascend.timeout_seconds, 3.0),
+                        )
+                        status_runtime.register(
+                            ToolSpec("missions_summary", 1, "read-only", frozenset(), MissionSnapshot),
+                            mission_reader.read_missions,
+                        )
+                    except ValueError as exc:
+                        LOG.warning('Core mission reader unavailable (%s)', type(exc).__name__)
+            screen_auditor = None
+            try:
+                from screen_auditor import ScreenAuditor
+                screen_auditor = ScreenAuditor(
+                    feedback_service=feedback,
+                    interval_seconds=config.screen_audit.interval_seconds,
+                )
+                resources.callback(screen_auditor.stop)
+                if config.screen_audit.enabled:
+                    screen_auditor.start()
+            except Exception as exc:
+                LOG.warning('Screen inspection unavailable (%s)', type(exc).__name__)
+            browser_task_client = None
+            if config.browser_automation.enabled:
+                try:
+                    from browser.main import start_browser_broker
+                    browser_task_client = start_browser_broker(
+                        config.browser_automation, config.llm, resources,
+                    )
+                except Exception as exc:
+                    LOG.warning('Local browser research unavailable (%s)', type(exc).__name__)
+            if browser_task_client is not None:
+                if config.browser_automation.remote_enabled:
+                    try:
+                        from integrations.browser_task_worker import build_browser_task_worker
+                        browser_task_worker = build_browser_task_worker(
+                            config.browser_automation, browser_task_client, llm_config=config.llm,
+                        )
+                        if browser_task_worker is not None:
+                            resources.callback(browser_task_worker.stop)
+                            browser_task_worker.start()
+                            LOG.info('Remote browser task worker started; Core access is outbound-only')
+                    except Exception as exc:
+                        LOG.warning('Remote browser task worker unavailable (%s)', type(exc).__name__)
+                try:
+                    from integrations.browser_voice_notifier import BrowserVoiceCompletionNotifier
+
+                    def voice_session_is_current(session_key):
+                        return (not getattr(manager, 'quit_requested', False)
+                                and session_key[1] == 'voice'
+                                and session_key[2] == str(getattr(manager, 'session_id', 'default')))
+
+                    browser_voice_notifier = BrowserVoiceCompletionNotifier(
+                        browser_task_client, feedback, voice_session_is_current,
+                        task_timeout_seconds=config.browser_automation.task_timeout_seconds,
+                    )
+                except Exception as exc:
+                    LOG.warning('Browser voice result delivery unavailable (%s)', type(exc).__name__)
             assistant_service = AssistantService(
                 config.feedback, config.llm, memory_store=memory_store,
                 tool_runtime=status_runtime,
+                context_provider=context_runtime,
+                screen_inspector=screen_auditor,
+                phone_context_sharing_enabled=config.companion_context.share_with_phone,
+                daily_summary_provider=activity_summary_provider,
+                browser_task_client=browser_task_client,
+                browser_automation_config=config.browser_automation,
+                browser_task_submitted=(browser_voice_notifier.watch if browser_voice_notifier else None),
             )
         bind_assistant = getattr(feedback, 'bind_assistant', None)
         if callable(bind_assistant):
             bind_assistant(assistant_service)
         feedback.start()
+        if browser_voice_notifier is not None:
+            browser_voice_notifier.start()
+            resources.callback(browser_voice_notifier.stop)
+        from integrations.notification_worker import build_notification_worker
+        notification_worker = build_notification_worker()
+        if notification_worker is not None:
+            resources.callback(notification_worker.stop)
+            notification_worker.start()
+            LOG.info('Companion notification worker started; dispatching generic push alerts outbound-only')
+        phone_chat_config = getattr(config, 'phone_chat', None)
+        if phone_chat_config is not None and phone_chat_config.enabled:
+            from assistant.phone_handler import PhoneMessageHandler
+            from integrations.phone_worker import GeminiAudioTranscriber, build_phone_worker
+
+            phone_owner_id = os.getenv(phone_chat_config.owner_id_env, '').strip()
+            audio_transcriber = None
+            if phone_chat_config.voice_upload_enabled:
+                audio_transcriber = GeminiAudioTranscriber(
+                    api_key=os.getenv(config.llm.gemini_api_key_env, '').strip().split(',')[0].strip(),
+                    model=config.llm.gemini_model,
+                )
+            phone_handler = PhoneMessageHandler(assistant_service, owner_id=phone_owner_id,
+                                                audio_transcriber=audio_transcriber)
+            phone_worker = build_phone_worker(phone_chat_config, phone_handler)
+            if phone_worker is None:
+                raise RuntimeError('Enabled phone chat did not create its worker')
+            resources.callback(phone_worker.stop)
+            phone_worker.start()
+            LOG.info('Phone chat worker started; Core queue access is outbound-only')
         expression_tracker = ExpressionTracker(cooldown_seconds=45.0)
         ascend_client = None
         ascend_character_id = None
@@ -338,16 +563,6 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
 
             resources.callback(stop_core_monitor)
 
-        screen_auditor = None
-        if getattr(config, 'screen_audit', None) and config.screen_audit.enabled:
-            try:
-                from screen_auditor import ScreenAuditor
-                screen_auditor = ScreenAuditor(feedback, interval_seconds=config.screen_audit.interval_seconds)
-                resources.callback(screen_auditor.stop)
-                screen_auditor.start()
-            except Exception as aud_err:
-                LOG.warning("Failed to start screen auditor: %s", aud_err)
-
         def send_ascend_command(text: str):
             from integrations.ascend_client import AscendConnectionState
             if ascend_client is None or not ascend_character_id:
@@ -377,7 +592,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             submit_chat = getattr(feedback, 'submit_chat', None)
             if submit_chat is not None:
                 submit_chat(text, ctx, max_words=config.voice_commands.max_reply_words,
-                             cooldown=config.voice_commands.chat_cooldown_seconds)
+                             cooldown=config.voice_commands.chat_cooldown_seconds,
+                             session_key=("local", "voice", str(getattr(manager, "session_id", "default"))))
 
         def route_automation(text: str):
             if automation_proposals is None:
@@ -476,12 +692,80 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             resources.callback(voice_listener.close)
             voice_listener.start()
 
+        companion_runtime = None
+        shadow_mode = bool(getattr(config.companion_context, 'shadow_mode_enabled', False))
+        if context_runtime is not None and (
+                config.companion_context.proactive_enabled or shadow_mode):
+            from assistant.companion_policy import CompanionPolicy, CompanionPreferences
+            from assistant.companion_runtime import CompanionRuntime
+            from assistant.intervention_delivery import InterventionDelivery
+            agent_needs_input_provider = lambda: ()
+            if config.companion_context.agent_needs_input_enabled:
+                status_credential = os.getenv("ASCEND_STATUS_READ_CREDENTIAL", "").strip()
+                if status_credential:
+                    from integrations.status_shelf import AgentNeedsInputProvider
+                    status_reader = StatusShelfReader(
+                        (os.getenv("ASCEND_CORE_BASE_URL") or os.getenv("ASCEND_BASE_URL", "http://localhost:8000")).strip(),
+                        status_credential,
+                        timeout_seconds=min(getattr(config.ascend, "timeout_seconds", 3.0), 3.0),
+                    )
+                    agent_needs_input_provider = AgentNeedsInputProvider(status_reader)
+                    agent_needs_input_provider.start()
+                    resources.callback(agent_needs_input_provider.close)
+                else:
+                    LOG.warning('Agent needs-input rule is enabled but its dedicated shelf credential is unavailable.')
+
+            def companion_preferences():
+                recording = bool(getattr(voice_listener, 'is_recording', False))
+                transcribing = bool(getattr(voice_listener, 'is_transcribing', False))
+                session_id, session_mode, session_started_at = manager.session_snapshot()
+                return CompanionPreferences(
+                    enabled=(config.companion_context.proactive_enabled or shadow_mode),
+                    mode=config.companion_context.mode,
+                    break_suggestion_enabled=config.companion_context.break_suggestion_enabled,
+                    desk_checkin_enabled=config.companion_context.desk_checkin_enabled,
+                    agent_needs_input_enabled=config.companion_context.agent_needs_input_enabled,
+                    focus_session_id=(str(session_id)
+                                      if session_mode == 'focus' and session_id is not None
+                                      else None),
+                    focus_session_started_at=(session_started_at
+                                              if session_mode == 'focus' else None),
+                    local_speech_enabled=bool(getattr(feedback, 'enabled', False)),
+                    user_speaking=recording or transcribing,
+                    vision_speaking=bool(getattr(feedback, 'is_speaking', lambda: False)()),
+                    speech_queue_busy=bool(getattr(feedback, 'has_pending_noncompanion_speech', lambda: False)()),
+                )
+
+            delivery = InterventionDelivery(
+                receipt_path=Path(config.storage.database).parent / "companion_delivery.sqlite3",
+            )
+            resources.callback(delivery.close)
+            from integrations.notification_publisher import build_notification_publisher
+            notification_publisher = build_notification_publisher()
+            if notification_publisher is not None:
+                resources.callback(notification_publisher.close)
+                notification_publisher.start()
+            companion_runtime = CompanionRuntime(
+                context_runtime,
+                CompanionPolicy(
+                    break_interval_seconds=config.companion_context.break_interval_minutes * 60,
+                    desk_absence_seconds=config.companion_context.desk_absence_minutes * 60,
+                ),
+                delivery, companion_preferences, feedback,
+                shadow_mode=shadow_mode,
+                agent_needs_input_provider=agent_needs_input_provider,
+                notification_publisher=notification_publisher,
+            )
+            LOG.info('Local companion rules running in %s mode (shadow=%s).',
+                     config.companion_context.mode, shadow_mode)
+
         from integrations.chat_ipc import ChatIpcQueue
         from integrations.chat_runtime import ChatRuntimeBridge
 
         def handle_dashboard_chat(text: str) -> str:
             return assistant_service.respond(
                 text, chat_context(text), max_words=config.voice_commands.max_reply_words,
+                session_key=("local", "dashboard", "local-dashboard"),
             ).text
 
         try:
@@ -501,6 +785,55 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
 
             cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
             window_created = True
+            calibration_drag = {
+                "start": None, "end": None,
+                "frame_width": config.camera.width, "frame_height": config.camera.height,
+            }
+            calibration_notice = {"text": ""}
+
+            def on_preview_mouse(event, x, y, _flags, _parameter):
+                if context_runtime is None or not context_runtime.desk_calibrating:
+                    return
+                frame_width = calibration_drag["frame_width"]
+                frame_height = calibration_drag["frame_height"]
+                image_width, image_height = frame_width, frame_height
+                try:
+                    image_rect = cv2.getWindowImageRect(WINDOW)
+                    if image_rect[2] > 0 and image_rect[3] > 0:
+                        image_width, image_height = image_rect[2], image_rect[3]
+                except (AttributeError, cv2.error):
+                    pass
+                frame_x = max(0, min(frame_width, round(x * frame_width / image_width)))
+                frame_y = max(0, min(frame_height, round(y * frame_height / image_height)))
+                if event == cv2.EVENT_LBUTTONDOWN:
+                    calibration_notice["text"] = ""
+                    calibration_drag["start"] = (frame_x, frame_y)
+                    calibration_drag["end"] = (frame_x, frame_y)
+                elif event == cv2.EVENT_MOUSEMOVE and calibration_drag["start"] is not None:
+                    calibration_drag["end"] = (frame_x, frame_y)
+                elif event == cv2.EVENT_LBUTTONUP and calibration_drag["start"] is not None:
+                    from assistant.context_runtime import DeskRegion
+                    try:
+                        region = DeskRegion.from_drag(
+                            calibration_drag["start"], (frame_x, frame_y),
+                            frame_width, frame_height,
+                        )
+                        desk_region_store.save(region)
+                        context_runtime.set_desk_region(region)
+                        calibration_notice["text"] = ""
+                        LOG.info("Desk region calibration saved locally.")
+                    except (OSError, ValueError) as exc:
+                        calibration_notice["text"] = (
+                            "Selection too small; drag a larger area." if isinstance(exc, ValueError)
+                            else "Could not save the desk area; try again."
+                        )
+                        LOG.info("Desk region selection rejected (%s)", type(exc).__name__)
+                    finally:
+                        calibration_drag["start"] = None
+                        calibration_drag["end"] = None
+
+            if context_runtime is not None:
+                cv2.setMouseCallback(WINDOW, on_preview_mouse)
             try:
                 cv2.setWindowProperty(WINDOW, cv2.WND_PROP_TOPMOST, 1)
             except Exception:
@@ -515,6 +848,24 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         if voice_listener is not None and hasattr(voice_listener, 'enabled'):
                             voice_listener.enabled = not voice_listener.enabled
             manager.process_commands()
+            if context_collector is not None:
+                context_now = time.monotonic()
+                context_collector.sample_desktop(context_now)
+                context_collector.sample_session_mode(manager.mode, context_now)
+                if (activity_summary_recorder is not None
+                        and (last_activity_sample is None
+                             or context_now - last_activity_sample >= config.companion_context.desktop_poll_seconds)):
+                    try:
+                        activity_summary_recorder.record(
+                            context_runtime.read_snapshot(),
+                            wall_time=datetime.now(timezone.utc),
+                            monotonic_time=context_now,
+                        )
+                    except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+                        LOG.warning('Daily activity sample skipped (%s)', type(exc).__name__)
+                    last_activity_sample = context_now
+                if companion_runtime is not None:
+                    companion_runtime.tick()
             feedback.set_session(manager.session_id if manager.mode == 'focus' and not manager.quit_requested else None)
             collect_feedback()
             controls.refresh()
@@ -532,6 +883,9 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             dropped += max(0, packet.sequence - sequence - 1)
             sequence = packet.sequence
             consumed += 1
+            if window_created:
+                calibration_drag["frame_width"] = packet.image.shape[1]
+                calibration_drag["frame_height"] = packet.image.shape[0]
             if (consumed - 1) % config.detector.every_n_frames:
                 skipped += 1
             else:
@@ -579,6 +933,19 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 face_landmarks = face_landmarks_list[0] if face_landmarks_list else []
                 face_blendshapes = face_blendshapes_list[0] if face_blendshapes_list else {}
                 face_frames += bool(face_landmarks)
+                if context_collector is not None:
+                    from integrations.desk_presence import face_center_in_region, is_camera_frame_usable
+                    desk_region = context_runtime.desk_region
+                    face_in_desk_region = (
+                        desk_region is not None
+                        and any(face_center_in_region(
+                            landmarks, desk_region, packet.image.shape[1], packet.image.shape[0],
+                        ) for landmarks in face_landmarks_list)
+                    )
+                    context_collector.observe_face(
+                        face_in_desk_region, packet.monotonic_time,
+                        source_available=face_tracker_available and is_camera_frame_usable(packet.image),
+                    )
 
                 phone_detected = (box is not None)
                 phone_orientation = classify_phone_orientation(box, hand_landmarks, face_landmarks) if box is not None else 'NONE'
@@ -722,6 +1089,24 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                              (time.perf_counter() - packet.monotonic_time) * 1000)
                 if config.runtime.preview:
                     display = packet.image.copy()
+                    if context_runtime is not None:
+                        desk_region = context_runtime.desk_region
+                        if desk_region is not None:
+                            height, width = display.shape[:2]
+                            cv2.rectangle(
+                                display,
+                                (round(desk_region.left * width), round(desk_region.top * height)),
+                                (round(desk_region.right * width), round(desk_region.bottom * height)),
+                                (60, 220, 120), 2,
+                            )
+                        if context_runtime.desk_calibrating:
+                            if calibration_drag["start"] is not None and calibration_drag["end"] is not None:
+                                cv2.rectangle(display, calibration_drag["start"], calibration_drag["end"],
+                                              (0, 210, 255), 2)
+                            notice = calibration_notice["text"] or "Drag a rectangle around your desk; Esc cancels"
+                            cv2.putText(display, notice,
+                                        (10, display.shape[0] - 18), cv2.FONT_HERSHEY_SIMPLEX,
+                                        .55, (0, 210, 255), 2)
                     for hand in hand_landmarks:
                         for index, (x, y, z) in enumerate(hand):
                             if not (float('-inf') < x < float('inf') and float('-inf') < y < float('inf')):
@@ -965,6 +1350,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             if config.runtime.preview:
                 key = cv2.waitKey(1) & 0xFF
                 if key in (27, ord('q'), ord('Q')):
+                    if context_runtime is not None and context_runtime.desk_calibrating:
+                        context_runtime.cancel_desk_calibration()
+                        calibration_drag["start"] = None
+                        calibration_drag["end"] = None
+                        continue
                     break
                 if key == ord(' '):
                     manager.request('toggle')

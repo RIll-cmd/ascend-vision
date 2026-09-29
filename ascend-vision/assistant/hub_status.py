@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import re
 
-from integrations.status_shelf import ShelfService, ShelfSnapshot
+from integrations.status_shelf import MAX_SNAPSHOT_AGE, ShelfService, ShelfSnapshot
 
 
 _STATUS_WORDS = re.compile(
-    r"\b(?:status|statuses|activity|doing|working|running|active|idle|online|offline|available|finish|finished|complete|completed|done|blocked|stuck|progress)\b",
+    r"\b(?:status|statuses|activity|doing|working|running|active|idle|online|offline|available|availability|finish|finished|complete|completed|done|blocked|stuck|progress)\b",
     re.I,
 )
 _SUBJECT_WORDS = re.compile(
@@ -19,17 +20,25 @@ _SUBJECT_WORDS = re.compile(
 _COMPLETION_WORDS = re.compile(r"\b(?:finish|finished|done|completed|complete)\b", re.I)
 _AGENT_NAME = (
     r"[A-Za-z][A-Za-z0-9_-]*"
-    r"(?:\s+(?!(?i:still|currently|now)\b)[A-Za-z][A-Za-z0-9_-]*){0,2}"
+    r"(?:\s+(?!(?i:still|currently|now|right|today|tomorrow|yesterday|tonight|please|at|as|this|in|on|for|since|before|after|during|by|recently|earlier|last|next|morning|afternoon|evening|night|moment)\b)[A-Za-z][A-Za-z0-9_-]*){0,2}"
 )
 _EXPLICIT_NAMES = (
     re.compile(
         rf"\b(?i:what\s+is|what's|how\s+is|how's|show|tell\s+me|check|display)\s+"
         rf"(?:(?i:about|on)\s+)?"
-        rf"(?P<name>{_AGENT_NAME})['’]s\s+(?i:status|activity|progress)\b"
+        rf"(?P<name>{_AGENT_NAME})['’]s\s+(?i:status|activity|progress|availability)\b"
     ),
     re.compile(
         r"\b(?P<name>(?:[A-Z][A-Za-z0-9_-]*\s+){0,2}[A-Za-z][A-Za-z0-9_-]*)"
-        r"['’]s\s+(?i:status|activity|progress)\b"
+        r"['’]s\s+(?i:status|activity|progress|availability)\b"
+    ),
+    re.compile(
+        rf"\b(?i:what\s+is|what's|how\s+is|how's|show|tell\s+me|check|display)\s+"
+        rf"(?i:the\s+)?(?i:status|activity|progress|availability)\s+(?i:of)\s+(?P<name>{_AGENT_NAME})\b"
+    ),
+    re.compile(
+        rf"\b(?i:what\s+is|what's|how\s+is|how's|show|tell\s+me|check|display)\s+"
+        rf"(?P<name>{_AGENT_NAME})\s+(?i:availability)\b"
     ),
     re.compile(
         rf"\b(?i:what\s+is|what's|how\s+is|how's|is|are|has|have|did)\s+"
@@ -78,11 +87,11 @@ def parse_status_intent(text: str) -> StatusIntent | None:
         return None
     if re.search(r"\bmy\s+vision\b", text, re.I):
         return None
+    if re.search(r"\b(?:working|doing)\s+on\s+(?:vision|core)\b", text, re.I):
+        return None
+    if re.search(r"\b(?:my|your|our|his|her|their)\s+(?:codex|vision|core)\s+(?:subscription|account|plan|license|billing|usage)\b", text, re.I):
+        return None
     matches: list[tuple[int, int, str]] = []
-    for pattern, name in _TARGETS:
-        for match in pattern.finditer(text):
-            if not any(match.start() < end and match.end() > start for start, end, _ in matches):
-                matches.append((match.start(), match.end(), name))
     for pattern in _EXPLICIT_NAMES:
         for match in pattern.finditer(text):
             start, end = match.span("name")
@@ -96,6 +105,19 @@ def parse_status_intent(text: str) -> StatusIntent | None:
                 for existing_start, existing_end, _ in matches
             ):
                 matches.append((start, end, name))
+    for pattern, name in _TARGETS:
+        for match in pattern.finditer(text):
+            start, end = match.span()
+            if any(start < existing_end and end > existing_start for existing_start, existing_end, _ in matches):
+                continue
+            prefix, suffix = text[:start], text[end:]
+            if re.search(r"\b(?:my|your|our|his|her|their)\s+$", prefix, re.I):
+                continue
+            if re.match(r"\s+(?:subscription|account|plan|license|billing|usage)\b", suffix, re.I):
+                continue
+            if re.search(r"\b(?:working|doing)\s+on\s+$", prefix, re.I):
+                continue
+            matches.append((start, end, name))
     if not matches and not _SUBJECT_WORDS.search(text):
         return None
     targets = tuple(dict.fromkeys(name for _, _, name in sorted(matches)))
@@ -120,7 +142,19 @@ def _matches(service: ShelfService, target: str) -> bool:
     return " " + target + " " in haystack
 
 
-def render_status_answer(intent: StatusIntent, snapshot: ShelfSnapshot) -> str:
+def render_status_answer(intent: StatusIntent, snapshot: ShelfSnapshot, *, now: datetime | None = None) -> str:
+    current = now or datetime.now(timezone.utc)
+    if (snapshot.generated_at.tzinfo is None or snapshot.generated_at.utcoffset() is None
+            or current.tzinfo is None or current.utcoffset() is None):
+        return "I cannot verify Ascend Hub AI status because the shelf timestamp is invalid."
+    age_seconds = int((current.astimezone(timezone.utc) - snapshot.generated_at.astimezone(timezone.utc)).total_seconds())
+    if age_seconds < -5 or age_seconds > MAX_SNAPSHOT_AGE.total_seconds():
+        age_label = f"{max(age_seconds, 0)} seconds" if age_seconds < 3600 else f"{max(age_seconds, 0) // 3600} hours"
+        return f"I cannot verify Ascend Hub AI status because its status shelf snapshot is stale or future-dated ({age_label} old)."
+    age_seconds = max(0, age_seconds)
+    age_text = f"{age_seconds} seconds ago" if age_seconds < 60 else (
+        f"{age_seconds // 60} minutes ago" if age_seconds < 3600 else f"{age_seconds // 3600} hours ago"
+    )
     if intent.targets:
         services = [row for row in snapshot.services
                     if any(_matches(row, target) for target in intent.targets)]
@@ -128,12 +162,12 @@ def render_status_answer(intent: StatusIntent, snapshot: ShelfSnapshot) -> str:
                    if not any(_matches(row, target) for row in snapshot.services)]
         if not services:
             names = ", ".join(_KNOWN_NAMES.get(target, target.title()) for target in missing)
-            return f"I couldn't find {names} in Ascend Hub's status shelf."
+            return f"I couldn't find {names} in Ascend Hub's status shelf. Source: shelf updated {age_text}."
     else:
         services = [row for row in snapshot.services
                     if row.service_type in {"agent", "assistant", "bot", "vision"}]
         if not services:
-            return "Ascend Hub has no AI agent status to report."
+            return f"Ascend Hub has no AI agent status to report. Source: shelf updated {age_text}."
         missing = []
 
     services.sort(key=lambda row: (_name(row), row.instance_id))
@@ -153,6 +187,24 @@ def render_status_answer(intent: StatusIntent, snapshot: ShelfSnapshot) -> str:
     if len(services) > len(shown):
         answer += f" {len(services) - len(shown)} more instances are on the shelf."
     if intent.asks_completion:
-        outcome = "their last tasks" if len(intent.targets) > 1 else "its last task"
-        answer += f" The current status does not confirm whether {outcome} finished."
-    return answer
+        if any(row.completions for row in services):
+            completion_parts = []
+            for row in shown:
+                label = _name(row)
+                if duplicate_names[label] > 1:
+                    label += f" ({row.instance_id})"
+                if row.completions:
+                    latest = max(row.completions, key=lambda completion: completion.finished_at)
+                    outcome = {
+                        "succeeded": "succeeded",
+                        "failed": "failed",
+                        "cancelled": "was cancelled",
+                    }[latest.outcome]
+                    completion_parts.append(f"The latest recorded work for {label} {outcome}")
+                else:
+                    completion_parts.append(f"The current status does not confirm whether {label}'s last task finished")
+            answer += " " + "; ".join(completion_parts) + "."
+        else:
+            outcome = "their last tasks" if len(intent.targets) > 1 else "its last task"
+            answer += f" The current status does not confirm whether {outcome} finished."
+    return f"{answer} Source: Ascend Hub status shelf, updated {age_text}."

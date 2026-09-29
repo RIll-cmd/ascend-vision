@@ -12,26 +12,42 @@ from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, render_template, request
 
 from config import load_config
+from assistant.activity_summary import ActivityHistoryStore, RETENTION_DAYS
 from assistant.memory import MemoryStore
 from dashboard_stats import DashboardError, get_zone, read_stats
 from integrations.ascend_client import AscendClient, AscendConnectionState
 from integrations.chat_ipc import ChatIpcQueue
+from integrations.context_ipc import ContextPipeClient
 from integrations.vision_context import VisionAuthContext, VisionContextStore
 from integrations.vision_token_store import VisionToken, VisionTokenStore
 
 LOG = logging.getLogger(__name__)
 
 
-def create_app(config, chat_queue=None, memory_store=None):
+def create_app(config, chat_queue=None, memory_store=None, context_client=None,
+               activity_history_store=None, browser_client=None):
     app = Flask(__name__)
     app.config.update(TRUSTED_HOSTS=['127.0.0.1', 'localhost'])
     queue = chat_queue if chat_queue is not None else ChatIpcQueue(
         Path(config.storage.database).parent / 'chat_ipc.db')
+    if context_client is None:
+        try:
+            context_client = ContextPipeClient()
+        except (ImportError, OSError, RuntimeError, ValueError):
+            context_client = None
     if memory_store is None:
         try:
             memory_store = MemoryStore(Path(config.storage.database).parent / 'assistant_memory.db')
         except Exception as exc:
             LOG.warning('Dashboard memory unavailable (%s)', type(exc).__name__)
+    if activity_history_store is None:
+        try:
+            activity_history_store = ActivityHistoryStore(
+                Path(config.storage.database).parent / 'activity_history.db',
+                timeout_seconds=config.storage.busy_timeout_seconds,
+            )
+        except Exception as exc:
+            LOG.warning('Activity history unavailable (%s)', type(exc).__name__)
 
     def memory_error(exc):
         if isinstance(exc, ValueError):
@@ -43,10 +59,156 @@ def create_app(config, chat_queue=None, memory_store=None):
     def request_too_large(_error):
         return jsonify(error='Request is too large.'), 400
 
+    @app.get('/api/context')
+    def current_context():
+        if context_client is None:
+            return jsonify(error='Laptop context is unavailable.'), 503
+        try:
+            return jsonify(snapshot=context_client.snapshot())
+        except Exception as exc:
+            LOG.info('Laptop context read failed (%s)', type(exc).__name__)
+            return jsonify(error='Laptop context is unavailable.'), 503
+
+    @app.get('/api/context/desk-region')
+    def desk_region_status():
+        if context_client is None:
+            return jsonify(error='Laptop context is unavailable.'), 503
+        try:
+            return jsonify(desk_region=context_client.desk_region_status())
+        except Exception as exc:
+            LOG.info('Desk calibration state read failed (%s)', type(exc).__name__)
+            return jsonify(error='Laptop context is unavailable.'), 503
+
+    @app.get('/api/context/companion-decisions')
+    def companion_decisions():
+        if context_client is None:
+            return jsonify(error='Laptop context is unavailable.'), 503
+        try:
+            return jsonify(decisions=context_client.companion_decisions())
+        except Exception as exc:
+            LOG.info('Companion decision read failed (%s)', type(exc).__name__)
+            return jsonify(error='Laptop context is unavailable.'), 503
+
+    @app.post('/api/context/desk-region/calibration')
+    def desk_region_calibration():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {'enabled'} or type(payload['enabled']) is not bool:
+            return jsonify(error='enabled must be a boolean.'), 400
+        if context_client is None:
+            return jsonify(error='Laptop context is unavailable.'), 503
+        try:
+            if payload['enabled']:
+                if not context_client.begin_desk_calibration():
+                    return jsonify(error='Calibration cannot start. Resume context and make sure the live preview is available.'), 409
+                return jsonify(calibrating=True)
+            context_client.cancel_desk_calibration()
+            return jsonify(calibrating=False)
+        except Exception as exc:
+            LOG.info('Desk calibration command failed (%s)', type(exc).__name__)
+            return jsonify(error='Laptop context is unavailable.'), 503
+    @app.post('/api/context/intent')
+    def declare_context_intent():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or payload.keys() - {'intent', 'duration_seconds'}:
+            return jsonify(error='Invalid context correction.'), 400
+        intent = payload.get('intent')
+        if intent not in {'focus', 'break', 'research', 'meeting'}:
+            return jsonify(error='Choose focus, break, research, or meeting.'), 400
+        duration = payload.get('duration_seconds', 900)
+        if (isinstance(duration, bool) or not isinstance(duration, (int, float))
+                or not 1 <= duration <= 12 * 60 * 60):
+            return jsonify(error='Duration must be between 1 second and 12 hours.'), 400
+        if context_client is None:
+            return jsonify(error='Laptop context is unavailable.'), 503
+        try:
+            declaration_id = context_client.declare_intent(intent, duration_seconds=duration)
+            return jsonify(declarationId=declaration_id)
+        except Exception as exc:
+            LOG.info('Laptop context correction failed (%s)', type(exc).__name__)
+            return jsonify(error='Laptop context is unavailable.'), 503
+
+    @app.post('/api/context/clear')
+    def clear_context():
+        payload = request.get_json(silent=True)
+        if payload not in ({}, None):
+            return jsonify(error='Invalid clear-context request.'), 400
+        if context_client is None:
+            return jsonify(error='Laptop context is unavailable.'), 503
+        try:
+            context_client.clear()
+            return jsonify(cleared=True)
+        except Exception as exc:
+            LOG.info('Laptop context clear failed (%s)', type(exc).__name__)
+            return jsonify(error='Laptop context is unavailable.'), 503
+
+    @app.post('/api/context/intent/clear')
+    def undo_context_intent():
+        payload = request.get_json(silent=True)
+        if payload not in ({}, None):
+            return jsonify(error='Invalid intent undo request.'), 400
+        if context_client is None:
+            return jsonify(error='Laptop context is unavailable.'), 503
+        try:
+            context_client.clear_intent()
+            return jsonify(cleared=True)
+        except Exception as exc:
+            LOG.info('Laptop context intent undo failed (%s)', type(exc).__name__)
+            return jsonify(error='Laptop context is unavailable.'), 503
+
+    @app.post('/api/context/snooze')
+    def snooze_context():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or payload.keys() - {'duration_seconds'}:
+            return jsonify(error='Invalid snooze request.'), 400
+        duration = payload.get('duration_seconds', 1800)
+        if (isinstance(duration, bool) or not isinstance(duration, (int, float))
+                or not 1 <= duration <= 12 * 60 * 60):
+            return jsonify(error='Snooze must be between 1 second and 12 hours.'), 400
+        if context_client is None:
+            return jsonify(error='Laptop context is unavailable.'), 503
+        try:
+            context_client.set_snooze(duration_seconds=duration)
+            return jsonify(snoozed=True)
+        except Exception as exc:
+            LOG.info('Laptop context snooze failed (%s)', type(exc).__name__)
+            return jsonify(error='Laptop context is unavailable.'), 503
+
+    @app.post('/api/context/snooze/clear')
+    def clear_context_snooze():
+        payload = request.get_json(silent=True)
+        if payload not in ({}, None):
+            return jsonify(error='Invalid snooze clear request.'), 400
+        if context_client is None:
+            return jsonify(error='Laptop context is unavailable.'), 503
+        try:
+            context_client.clear_snooze()
+            return jsonify(cleared=True)
+        except Exception as exc:
+            LOG.info('Laptop context snooze clear failed (%s)', type(exc).__name__)
+            return jsonify(error='Laptop context is unavailable.'), 503
+
+    @app.post('/api/context/pause')
+    def pause_context():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {'paused'} or type(payload['paused']) is not bool:
+            return jsonify(error='paused must be a boolean.'), 400
+        if context_client is None:
+            return jsonify(error='Laptop context is unavailable.'), 503
+        try:
+            context_client.set_paused(payload['paused'])
+            return jsonify(paused=payload['paused'])
+        except Exception as exc:
+            LOG.info('Laptop context pause failed (%s)', type(exc).__name__)
+            return jsonify(error='Laptop context is unavailable.'), 503
+
     @app.before_request
     def local_requests_only():
+        max_bytes = 11 * 1024 * 1024 if (
+            request.path == '/api/browser/tasks'
+            and getattr(getattr(config, 'browser_automation', None), 'b3_enabled', False)
+        ) else 20_000 if request.path.startswith(('/api/chat/', '/api/browser/')) else 1_024
+        request.max_content_length = max_bytes
         if request.content_length is not None:
-            max_bytes = 20_000 if request.path.startswith('/api/chat/') else 1_024
             if request.content_length > max_bytes:
                 abort(413)
         if request.headers.get('Sec-Fetch-Site') == 'cross-site':
@@ -77,7 +239,9 @@ def create_app(config, chat_queue=None, memory_store=None):
         return render_template('dashboard.html', today=today.isoformat(),
             start=(today-timedelta(days=config.dashboard.default_days-1)).isoformat(),
             refresh=config.dashboard.refresh_seconds, zone=config.dashboard.timezone,
-            core_url=core_url, local_auto_connect=_is_local_core_url(core_url))
+            core_url=core_url, local_auto_connect=_is_local_core_url(core_url),
+            browser_enabled=bool(getattr(getattr(config, 'browser_automation', None), 'enabled', False)),
+            browser_b3_enabled=bool(getattr(getattr(config, 'browser_automation', None), 'b3_enabled', False)))
 
     @app.get('/api/stats')
     def statistics():
@@ -95,6 +259,115 @@ def create_app(config, chat_queue=None, memory_store=None):
         except DashboardError as exc:
             LOG.warning('Dashboard read failed (%s)', type(exc).__name__)
             return jsonify(error=str(exc)), 503
+
+    def activity_history_error(exc):
+        if isinstance(exc, ValueError):
+            return jsonify(error=str(exc)), 400
+        LOG.warning('Activity history request failed (%s)', type(exc).__name__)
+        return jsonify(error='Daily reflection is temporarily unavailable.'), 503
+
+    @app.get('/api/activity-history')
+    def activity_history():
+        if activity_history_store is None:
+            return jsonify(error='Daily reflection is temporarily unavailable.'), 503
+        try:
+            if request.args.keys() - {'date'} or any(len(values) != 1 for _, values in request.args.lists()):
+                raise ValueError('Invalid activity-history date')
+            zone = get_zone(config.dashboard.timezone)
+            today = datetime.now(timezone.utc).astimezone(zone).date()
+            selected = date.fromisoformat(request.args.get('date', today.isoformat()))
+            first_retained = today - timedelta(days=RETENTION_DAYS - 1)
+            if selected > today or selected < first_retained:
+                raise ValueError('Choose a date within the last 30 days.')
+            start = max(first_retained, selected - timedelta(days=6))
+            summaries = activity_history_store.list_summaries(
+                start, selected, timezone_name=config.dashboard.timezone,
+            )
+            return jsonify(
+                enabled=activity_history_store.enabled,
+                collection_available=config.companion_context.enabled,
+                retention_days=RETENTION_DAYS,
+                score_enabled=False,
+                score=None,
+                confirmed_outcomes_available=False,
+                confirmed_outcomes_note=(
+                    'Core-confirmed mission outcomes are not in this local aggregate endpoint. '
+                    'Vision daily reflection may show them when authenticated access is available.'
+                ),
+                days=[summary.as_dict() for summary in summaries],
+            )
+        except ValueError as exc:
+            return activity_history_error(exc)
+        except Exception as exc:
+            return activity_history_error(exc)
+
+    @app.put('/api/activity-history/settings')
+    def set_activity_history_enabled():
+        if activity_history_store is None:
+            return jsonify(error='Daily reflection is temporarily unavailable.'), 503
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != {'enabled'} or type(payload['enabled']) is not bool:
+            return jsonify(error='enabled must be a boolean.'), 400
+        try:
+            if payload['enabled']:
+                activity_history_store.purge_expired()
+            return jsonify(enabled=activity_history_store.set_enabled(payload['enabled']),
+                           retention_days=RETENTION_DAYS)
+        except Exception as exc:
+            return activity_history_error(exc)
+
+    @app.get('/api/activity-history/export')
+    def export_activity_history():
+        if activity_history_store is None:
+            return jsonify(error='Daily reflection is temporarily unavailable.'), 503
+        try:
+            summaries = activity_history_store.export(timezone_name=config.dashboard.timezone)
+            response = jsonify(summaries=summaries, retention_days=RETENTION_DAYS)
+            response.headers['Content-Disposition'] = 'attachment; filename="vision-activity-history.json"'
+            return response
+        except Exception as exc:
+            return activity_history_error(exc)
+
+    @app.delete('/api/activity-history')
+    def delete_activity_history():
+        if activity_history_store is None:
+            return jsonify(error='Daily reflection is temporarily unavailable.'), 503
+        try:
+            return jsonify(deleted=activity_history_store.delete_all())
+        except Exception as exc:
+            return activity_history_error(exc)
+
+    @app.post('/api/activity-history/corrections')
+    def correct_activity_history():
+        if activity_history_store is None:
+            return jsonify(error='Daily reflection is temporarily unavailable.'), 503
+        payload = request.get_json(silent=True)
+        if (not isinstance(payload, dict) or set(payload) != {'date', 'metric', 'remove_minutes'}
+                or not isinstance(payload.get('date'), str)
+                or payload.get('metric') not in {
+                    'focus_session_seconds', 'declared_break_seconds', 'entertainment_category_seconds'
+                }
+                or isinstance(payload.get('remove_minutes'), bool)
+                or not isinstance(payload.get('remove_minutes'), int)
+                or not 1 <= payload['remove_minutes'] <= 1440):
+            return jsonify(error='Choose a saved day, metric, and 1–1440 minutes to remove.'), 400
+        try:
+            selected = date.fromisoformat(payload['date'])
+            today = datetime.now(timezone.utc).astimezone(get_zone(config.dashboard.timezone)).date()
+            if selected > today:
+                raise ValueError('A future day cannot be corrected.')
+            correction = activity_history_store.correct(
+                selected, config.dashboard.timezone, payload['metric'],
+                -payload['remove_minutes'] * 60,
+            )
+            return jsonify(correction={
+                'id': correction.correction_id,
+                'metric': correction.metric,
+                'removed_seconds': correction.removed_seconds,
+                'created_at': correction.created_at,
+            })
+        except Exception as exc:
+            return activity_history_error(exc)
 
     @app.post('/api/chat/messages')
     def enqueue_chat_message():
@@ -349,6 +622,24 @@ def create_app(config, chat_queue=None, memory_store=None):
         except Exception as exc:
             LOG.error('Failed to start camera: %s', exc)
             return jsonify(error=str(exc)), 500
+
+    browser_config = getattr(config, 'browser_automation', None)
+    browser_file_store = None
+    if browser_config is not None and browser_config.b3_enabled:
+        try:
+            from browser.files import BrowserTaskFiles
+            browser_file_store = BrowserTaskFiles()
+        except Exception as exc:
+            LOG.info('Browser file handoff unavailable (%s)', type(exc).__name__)
+    if browser_config is not None and browser_config.enabled and browser_client is None:
+        try:
+            from browser.ipc import BrowserIpcClient
+            browser_client = BrowserIpcClient.from_keyring
+        except Exception as exc:
+            LOG.info('Dashboard browser broker unavailable (%s)', type(exc).__name__)
+    if browser_config is not None:
+        from browser.dashboard_routes import register_browser_routes
+        register_browser_routes(app, browser_client, browser_config, file_store=browser_file_store)
 
     return app
 

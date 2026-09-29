@@ -44,7 +44,8 @@ def agent(*, state="working", heartbeat=NOW, service_id="codex-cli", instance_id
         "stateSince": NOW.isoformat(),
         "lastHeartbeatAt": heartbeat.isoformat() if heartbeat else None,
         "staleAfterSeconds": 30,
-        "activity": {"kind": "operation", "label": "run tests"} if state == "working" else None,
+        "activity": {"kind": "operation", "label": "run tests",
+                     "startedAt": NOW.isoformat()} if state == "working" else None,
     }
 
 
@@ -71,6 +72,59 @@ def test_reader_uses_dedicated_read_credential_and_parses_fresh_shelf():
     assert captured["timeout"] == 2.0
     assert snapshot.services[0].state == "working"
     assert snapshot.services[0].service_id == "codex-cli"
+    assert snapshot.services[0].completions == ()
+
+
+def test_reader_parses_only_safe_bounded_completion_summaries():
+    payload = shelf(agent() | {"completions": [
+        {"outcome": "failed", "finishedAt": NOW.isoformat(), "label": "Build release"},
+    ]})
+
+    snapshot_value = StatusShelfReader(
+        "https://core.local", "reader.secret", opener=lambda *_args, **_kwargs: FakeResponse(payload),
+    ).read(now=NOW)
+
+    completion = snapshot_value.services[0].completions[0]
+    assert (completion.outcome, completion.finished_at, completion.label) == ("failed", NOW, "Build release")
+
+
+def test_reader_accepts_only_explicit_operation_scoped_needs_input_evidence():
+    row = agent() | {
+        "issue": {"code": "needs_input", "message": "A decision is needed.",
+                  "retryable": False, "operationRef": "0123456789abcdef"},
+    }
+    snapshot = StatusShelfReader(
+        "https://core.local", "reader.secret",
+        opener=lambda *_args, **_kwargs: FakeResponse(shelf(row)),
+    ).read(now=NOW)
+    assert snapshot.services[0].needs_input_operation_ref == "0123456789abcdef"
+    assert snapshot.services[0].activity_started_at == NOW
+
+
+def test_reader_rejects_needs_input_without_a_current_operation():
+    row = agent(state="idle") | {
+        "issue": {"code": "needs_input", "message": "A decision is needed.",
+                  "retryable": False, "operationRef": "0123456789abcdef"},
+    }
+    reader = StatusShelfReader(
+        "https://core.local", "reader.secret",
+        opener=lambda *_args, **_kwargs: FakeResponse(shelf(row)),
+    )
+    with pytest.raises(StatusShelfError):
+        reader.read(now=NOW)
+
+
+def test_stale_needs_input_remains_readable_but_is_not_exposed_as_actionable_evidence():
+    row = agent(heartbeat=NOW - timedelta(seconds=31)) | {
+        "issue": {"code": "needs_input", "message": "A decision is needed.",
+                  "retryable": False, "operationRef": "0123456789abcdef"},
+    }
+    service = StatusShelfReader(
+        "https://core.local", "reader.secret",
+        opener=lambda *_args, **_kwargs: FakeResponse(shelf(row)),
+    ).read(now=NOW).services[0]
+    assert service.state == "offline"
+    assert service.needs_input_operation_ref is None
 
 
 def test_reader_requires_a_dedicated_credential_before_network_call():
@@ -96,6 +150,11 @@ def test_reader_rejects_remote_plain_http_and_embedded_url_credentials():
     shelf(agent(service_id="<script>")),
     shelf(agent(heartbeat=None, state="working")),
     shelf(agent(heartbeat=NOW + timedelta(seconds=10))),
+    shelf(agent() | {"completions": [{"outcome": "unknown", "finishedAt": NOW.isoformat()}]}),
+    shelf(agent() | {"completions": [{"outcome": "succeeded", "finishedAt": NOW.isoformat(), "operationId": "secret-id"}]}),
+    shelf(agent() | {"completions": [{"outcome": "succeeded", "finishedAt": "2026-09-25T12:00:00", "label": "Build"}]}),
+    shelf(agent() | {"completions": [{"outcome": "succeeded", "finishedAt": NOW.isoformat(), "label": "line\nbreak"}]}),
+    shelf(agent() | {"completions": [{"outcome": "succeeded", "finishedAt": NOW.isoformat()}] * 6}),
 ])
 def test_reader_rejects_malformed_or_contradictory_shelf(payload):
     reader = StatusShelfReader("https://core.local", "reader.secret", opener=lambda *_args, **_kwargs: FakeResponse(payload))

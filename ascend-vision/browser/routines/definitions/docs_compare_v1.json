@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "routine_id": "docs_compare",
+  "version": 1,
+  "title": "Compare documentation pages",
+  "mode": "public_research",
+  "inputs": {
+    "url_a": {"type": "url", "required": true, "max_length": 2048},
+    "url_b": {"type": "url", "required": true, "max_length": 2048},
+    "question": {"type": "text", "required": true, "max_length": 500}
+  },
+  "allowed_origins": ["https://playwright.dev"],
+  "input_path_prefixes": {
+    "url_a": ["/python/docs/"],
+    "url_b": ["/python/docs/"]
+  },
+  "allowed_actions": ["navigate", "observe", "click", "scroll", "back", "wait_for", "ask_user", "finish"],
+  "budget": {"decisions": 16, "actions": 24, "pages": 3, "seconds": 150},
+  "goal_template": "Compare the supplied documentation pages for the requested topic. Cite both observed pages and report missing evidence.",
+  "completion_verifier": "two_documents_v1",
+  "site_adapter": null
+}

@@ -60,6 +60,98 @@
             <button type="submit" id="chat-send">Send <span aria-hidden="true">↗</span></button>
           </div>
         </form>
+        <section id="browser-panel" class="browser-panel" aria-labelledby="browser-heading">
+          <h3 id="browser-heading">Browser research</h3>
+          {% if browser_enabled %}
+          <p class="browser-note">A separate, visible browser can research public pages. The selected model provider receives your goal and bounded page excerpts. {% if browser_b3_enabled %}For an authenticated task, explicitly select one site below. Never type passwords or MFA codes into chat; use the visible browser during takeover. Every form edit, file transfer, or control click pauses for exact review. Some sites may autosave edits immediately; treat typing as a write. Upload only the file selected below; downloads go to <code>%LOCALAPPDATA%\AscendVision\browser\files\downloads</code>. Payment, security changes, and unattended submissions remain unsupported.{% else %}Sign-ins, form actions, file transfer, and phone/Discord control are disabled.{% endif %}</p>
+          <form id="browser-task-form" class="browser-task-form">
+            <label for="browser-task-goal">Research goal</label>
+            <textarea id="browser-task-goal" maxlength="4000" rows="2" required placeholder="Compare these two public documentation pages…"></textarea>
+            {% if browser_b3_enabled %}
+            <fieldset class="browser-b3-options">
+              <legend>Optional signed-in workflow</legend>
+              <label class="browser-b3-toggle"><input id="browser-b3-selected" type="checkbox"> Use one owner-selected site</label>
+              <div id="browser-b3-fields" hidden>
+                <label for="browser-b3-origin">Selected site origin</label>
+                <input id="browser-b3-origin" type="url" maxlength="300" placeholder="https://example.com" autocomplete="url">
+                <label for="browser-b3-profile">Dedicated profile name (optional)</label>
+                <input id="browser-b3-profile" type="text" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,63}" placeholder="work-account" autocomplete="off">
+                <fieldset class="browser-b3-capabilities">
+                  <legend>Allow these actions for this task</legend>
+                  <label><input type="checkbox" value="fill"> Fill text fields</label>
+                  <label><input type="checkbox" value="select"> Change selections</label>
+                  <label><input type="checkbox" value="click"> Click non-link controls</label>
+                  <label><input type="checkbox" value="download"> Download selected files</label>
+                  <label><input type="checkbox" value="upload"> Upload the file selected for this task</label>
+                </fieldset>
+                <label for="browser-b3-upload">One file selected for this task (optional)</label>
+                <input id="browser-b3-upload" type="file">
+              </div>
+            </fieldset>
+            {% endif %}
+            <button type="submit" id="browser-task-submit">Start research</button>
+          </form>
+          <details class="browser-routines-panel">
+            <summary>Reusable routines</summary>
+            <p id="browser-routines-status" class="browser-note">Loading enabled routines…</p>
+            <form id="browser-routine-form" hidden>
+              <label for="browser-routine-picker">Routine</label>
+              <select id="browser-routine-picker"><option value="">No enabled routines</option></select>
+              <div id="browser-routine-inputs"></div>
+              <div class="browser-routine-controls">
+                <button type="submit" id="browser-routine-submit" disabled>Start routine</button>
+                <button type="button" id="browser-routine-disable" class="secondary" disabled>Disable routine</button>
+                <button type="button" id="browser-routine-enable" disabled>Enable accepted routine</button>
+              </div>
+            </form>
+          </details>
+          {% if browser_b3_enabled %}
+          <div class="browser-profile-management">
+            <button type="button" id="browser-profiles-refresh">Load saved profiles</button>
+            <label for="browser-profiles-list">Saved sign-ins</label>
+            <select id="browser-profiles-list"><option value="">No profiles loaded</option></select>
+            <button type="button" id="browser-profile-clear" class="secondary">Clear selected profile</button>
+          </div>
+          {% endif %}
+          <p id="browser-task-status" class="browser-task-status" role="status" aria-live="polite">No browser task is running.</p>
+          <div id="browser-task-controls" class="browser-task-controls" hidden>
+            <button type="button" data-browser-control="pause">Pause</button>
+            <button type="button" data-browser-control="resume">Resume</button>
+            <button type="button" data-browser-control="stop" class="secondary">Stop</button>
+            {% if browser_b3_enabled %}<button type="button" id="browser-save-profile" hidden>Save sign-in for later</button>{% endif %}
+          </div>
+          <section id="browser-action-review" class="browser-action-review" aria-live="polite" hidden>
+            <h4>Review browser action</h4>
+            <p id="browser-action-summary"></p>
+            <pre id="browser-action-value"></pre>
+            <div class="browser-action-buttons">
+              <button type="button" data-browser-decision="approve">Approve this action</button>
+              <button type="button" data-browser-decision="reject" class="secondary">Reject</button>
+            </div>
+          </section>
+          <ol id="browser-task-events" class="browser-task-events" aria-live="polite"></ol>
+          <div id="browser-task-result" class="browser-task-result"></div>
+          <div id="browser-task-feedback" class="browser-task-feedback" hidden>
+            <span>Did this result work?</span>
+            <button type="button" data-browser-feedback="worked">Worked</button>
+            <button type="button" data-browser-feedback="needed_correction">Needed correction</button>
+            <button type="button" data-browser-feedback="did_not_work">Did not work</button>
+          </div>
+          <details class="browser-metrics-panel">
+            <summary>Local reliability metrics</summary>
+            <p>Optional operational counters only. Goals, URLs, page text, findings, credentials, and screenshots are not stored.</p>
+            <label><input id="browser-metrics-enabled" type="checkbox"> Save browser usage counters on this Windows account</label>
+            <div class="browser-metrics-controls">
+              <button type="button" id="browser-metrics-refresh">Refresh summary</button>
+              <button type="button" id="browser-metrics-export">Export fixed-schema JSON</button>
+              <button type="button" id="browser-metrics-clear" class="secondary">Clear saved metrics</button>
+            </div>
+            <output id="browser-metrics-summary" aria-live="polite">Metrics are off.</output>
+          </details>
+          {% else %}
+          <p class="browser-note">Local browser research is currently disabled. When enabled, Vision will use a separate temporary browser for public research only.</p>
+          {% endif %}
+        </section>
         <details id="memory-panel" class="memory-panel">
           <summary>What Vision remembers</summary>
           <p class="memory-note">Chat history lasts only while Vision is running. Only facts you approve stay saved.</p>
@@ -80,6 +172,67 @@
           <p id="memory-status" class="memory-status" role="status" aria-live="polite"></p>
         </details>
       </div>
+    </section>
+    <section class="context-panel" aria-labelledby="context-heading">
+      <div class="context-heading">
+        <p class="eyebrow">LIVE LAPTOP CONTEXT</p>
+        <h2 id="context-heading">What Vision knows</h2>
+        <p>Current, coarse signals from this laptop. Corrections expire and are not saved as memories.</p>
+      </div>
+      <p id="context-status" class="context-status" role="status" aria-live="polite">Connecting to Vision…</p>
+      <dl id="context-fields" class="context-fields" aria-live="polite">
+        <div><dt>Webcam observation</dt><dd id="context-presence">Unknown</dd></div>
+        <div><dt>Desktop activity</dt><dd id="context-activity">Unavailable</dd></div>
+        <div><dt>App category</dt><dd id="context-category">Unknown</dd></div>
+        <div><dt>Session mode</dt><dd id="context-session">Unavailable</dd></div>
+        <div><dt>Your intent</dt><dd id="context-intent-value">None</dd></div>
+        <div><dt>Quiet until</dt><dd id="context-snooze-value">Not snoozed</dd></div>
+      </dl>
+      <form id="context-intent-form" class="context-controls">
+        <label for="context-intent-choice">Correct the current intent</label>
+        <select id="context-intent-choice" required>
+          <option value="">Choose intent…</option>
+          <option value="focus">Focus for 1 hour</option>
+          <option value="break">Break for 15 minutes</option>
+          <option value="research">Research for 1 hour</option>
+          <option value="meeting">Meeting for 1 hour</option>
+        </select>
+        <button type="submit" id="context-intent-submit">Set intent</button>
+        <button type="button" id="context-intent-undo">Undo intent</button>
+        <button type="button" id="context-snooze">Stay quiet for 30 minutes</button>
+        <button type="button" id="context-snooze-clear">Cancel quiet time</button>
+        <button type="button" id="context-clear">Clear context</button>
+        <button type="button" id="context-pause">Pause context</button>
+      </form>
+      <div class="desk-calibration">
+        <p id="desk-calibration-status" role="status" aria-live="polite">Desk area is not set up.</p>
+        <p class="context-footnote">Set up the area using the live Vision camera preview: start setup, then drag a rectangle around your desk. Vision counts face presence in that area; it does not identify who is visible. Poor lighting or an obstructed view stays unknown.</p>
+        <button type="button" id="desk-calibration-start">Set up desk area</button>
+        <button type="button" id="desk-calibration-cancel" disabled>Cancel setup</button>
+      </div>
+      <div class="companion-decisions" aria-labelledby="companion-decisions-heading">
+        <h3 id="companion-decisions-heading">Companion rule decisions</h3>
+        <p class="context-footnote">Transient local diagnostics only. No chat text or private prompts are shown. In shadow mode, eligible rules are recorded but never spoken.</p>
+        <ol id="companion-decisions" aria-live="polite"><li>Waiting for Vision…</li></ol>
+      </div>
+      <p class="context-footnote">Pausing stops this new context feature. Existing Vision monitoring follows its current controls.</p>
+    </section>
+    <section class="activity-panel" aria-labelledby="activity-heading">
+      <div class="activity-heading">
+        <p class="eyebrow">OPT-IN · LOCAL DAILY TOTALS</p>
+        <h2 id="activity-heading">Daily reflection</h2>
+        <p>When enabled, Vision keeps only daily totals on this laptop for up to 30 days. It does not save raw sensor events or chat transcripts. Collection also requires Current Laptop Context to be enabled, and is limited to periods when Vision is running and the relevant signal is available.</p>
+      </div>
+      <div class="activity-controls">
+        <label class="activity-opt-in"><input id="activity-history-enabled" type="checkbox"> Save activity summaries</label>
+        <label for="activity-date">Day</label><input id="activity-date" type="date" value="{{ today }}">
+        <button type="button" id="activity-load">Load summary</button>
+        <a class="memory-export" href="/api/activity-history/export" download="vision-activity-history.json">Export activity history</a>
+        <button type="button" class="secondary" id="activity-delete">Delete all saved activity history</button>
+      </div>
+      <p id="activity-status" class="activity-status" role="status" aria-live="polite">Loading activity-history settings…</p>
+      <div id="activity-days" class="activity-days"></div>
+      <p class="activity-footnote">Metrics are labeled Tracked focus-session minutes, Declared break minutes, and Observed entertainment-category minutes. These are separate indicators and may overlap. Uncovered time is shown, not treated as inactivity or failure. This local activity panel does not include Core-confirmed mission outcomes; authenticated Vision daily reflection may show them separately; scoring is disabled.</p>
     </section>
     <form id="filters" class="filters" aria-label="Dashboard filters">
       <div class="field"><label for="start">From</label><input id="start" name="start" type="date" value="{{ start }}" required></div>

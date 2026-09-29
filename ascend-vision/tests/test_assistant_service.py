@@ -33,6 +33,32 @@ def test_assistant_returns_the_provider_answer():
     assert generator.calls == [("Status?", None, 18)]
 
 
+def test_daily_review_uses_deterministic_local_summary_instead_of_llm():
+    generator = Generator("the model must not calculate totals")
+    service = AssistantService(
+        FeedbackConfig(), LLMConfig(), generator=generator,
+        daily_summary_provider=lambda: "Tracked focus-session minutes: 12m 00s. Scoring is disabled.",
+    )
+
+    reply = service.respond("Review my day")
+
+    assert reply.text == "Tracked focus-session minutes: 12m 00s. Scoring is disabled."
+    assert reply.source == "tool"
+    assert generator.calls == []
+
+
+def test_daily_review_does_not_share_local_activity_history_to_phone_sessions():
+    service = AssistantService(
+        FeedbackConfig(), generator=Generator(),
+        daily_summary_provider=lambda: "Private local summary",
+    )
+
+    reply = service.respond("How was my day?", session_key=("owner-1", "phone_pwa", "session-1"))
+
+    assert "local to the laptop" in reply.text.lower()
+    assert reply.source == "offline"
+
+
 @pytest.mark.parametrize("max_words", [1, 2, 9])
 def test_approved_memory_recall_obeys_requested_word_budget(tmp_path, max_words):
     store = MemoryStore(tmp_path / "memory.db")
@@ -158,7 +184,7 @@ def test_assistant_serializes_generator_calls_from_two_channels():
 
 
 def status_runtime(reader=None):
-    moment = datetime(2026, 9, 25, 12, tzinfo=timezone.utc)
+    moment = datetime.now(timezone.utc)
     snapshot = ShelfSnapshot(moment, (
         ShelfService("codex-cli", "desktop", "agent", "working", moment, moment, 30),
     ))
@@ -176,10 +202,12 @@ def test_assistant_answers_hub_status_without_model_or_stale_session_history():
     reply = service.respond("Is Codex CLI still working?")
     service.respond("Hello")
 
-    assert reply.text == "Codex CLI is working."
+    assert reply.text.startswith("Codex CLI is working.")
     assert reply.source == "tool"
     assert len(generator.calls) == 1
     assert generator.calls[0][1] is None
+    assert "status shelf" in reply.text.lower()
+    assert "updated" in reply.text.lower()
 
 
 def test_assistant_reports_unknown_named_agent_from_shelf_without_model():
@@ -189,7 +217,7 @@ def test_assistant_reports_unknown_named_agent_from_shelf_without_model():
 
     reply = service.respond("What is Claude's status?")
 
-    assert reply.text == "I couldn't find Claude in Ascend Hub's status shelf."
+    assert reply.text.startswith("I couldn't find Claude in Ascend Hub's status shelf.")
     assert reply.source == "tool"
     assert generator.calls == []
 

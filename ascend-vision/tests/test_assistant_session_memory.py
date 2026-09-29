@@ -30,6 +30,56 @@ def test_recent_turns_are_process_local(tmp_path):
     assert "recent_turns" not in generator.payloads[-1]
 
 
+def test_local_channels_keep_separate_recent_turns():
+    generator = RecordingGenerator()
+    assistant = AssistantService(FeedbackConfig(), generator=generator)
+    voice = ("local", "voice", "voice-session")
+    dashboard = ("local", "dashboard", "dashboard-session")
+
+    assistant.respond("voice-only detail", session_key=voice)
+    assistant.respond("dashboard question", session_key=dashboard)
+
+    assert "recent_turns" not in generator.payloads[-1]
+    assistant.respond("voice follow-up", session_key=voice)
+    assert generator.payloads[-1]["recent_turns"] == [
+        {"user": "voice-only detail", "assistant": "A useful answer."},
+    ]
+
+
+def test_remote_channel_does_not_receive_laptop_context_or_screen_access():
+    class ContextProvider:
+        def __init__(self):
+            self.calls = 0
+
+        def read_snapshot(self):
+            self.calls += 1
+            return {"activity": "coding", "source": "local"}
+
+    class ScreenInspector:
+        def __init__(self):
+            self.calls = 0
+
+        def inspect_once(self):
+            self.calls += 1
+            raise AssertionError("remote session must not inspect screen")
+
+    provider = ContextProvider()
+    inspector = ScreenInspector()
+    generator = RecordingGenerator()
+    assistant = AssistantService(
+        FeedbackConfig(), generator=generator,
+        context_provider=provider, screen_inspector=inspector,
+    )
+
+    assistant.respond("How is the code going?", session_key=("owner", "discord_dm", "dm-1"))
+    assert "laptop_context" not in generator.payloads[-1]
+    denied = assistant.respond("What is on my screen?", session_key=("owner", "phone_pwa", "chat-1"))
+
+    assert "only be started locally in Vision" in denied.text
+    assert provider.calls == 0
+    assert inspector.calls == 0
+
+
 def test_only_relevant_approved_memory_enters_model_context(tmp_path):
     store = MemoryStore(tmp_path / "memory.db")
     store.approve(store.propose("I prefer green tea"))

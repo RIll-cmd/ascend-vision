@@ -273,8 +273,436 @@ function appendChatMessage(text,kind,status=''){
   content.textContent=text;
   item.append(speaker,content);
   chatMessages.append(item);
+  if(kind==='from-vision'){
+    const browserTask=text.match(/browser task ([a-f0-9-]{16,64})/i);
+    if(browserTask)setBrowserTask(browserTask[1]);
+  }
   const nearBottom=chatMessages.scrollHeight-chatMessages.scrollTop-chatMessages.clientHeight<48;
   if(nearBottom)chatMessages.scrollTop=chatMessages.scrollHeight;
+}
+
+const browserTaskForm=$('browser-task-form');
+const browserTaskGoal=$('browser-task-goal');
+const browserTaskStatus=$('browser-task-status');
+const browserTaskControls=$('browser-task-controls');
+const browserTaskEvents=$('browser-task-events');
+const browserTaskResult=$('browser-task-result');
+const browserActionReview=$('browser-action-review');
+const browserActionSummary=$('browser-action-summary');
+const browserActionValue=$('browser-action-value');
+const browserB3Selected=$('browser-b3-selected');
+const browserB3Fields=$('browser-b3-fields');
+const browserB3Origin=$('browser-b3-origin');
+const browserB3Profile=$('browser-b3-profile');
+const browserB3Upload=$('browser-b3-upload');
+const browserSaveProfile=$('browser-save-profile');
+const browserProfilesRefresh=$('browser-profiles-refresh');
+const browserProfilesList=$('browser-profiles-list');
+const browserProfileClear=$('browser-profile-clear');
+const browserTaskFeedback=$('browser-task-feedback');
+const browserMetricsEnabled=$('browser-metrics-enabled');
+const browserMetricsSummary=$('browser-metrics-summary');
+const browserMetricsRefresh=$('browser-metrics-refresh');
+const browserMetricsClear=$('browser-metrics-clear');
+const browserMetricsExport=$('browser-metrics-export');
+const browserRoutineForm=$('browser-routine-form');
+const browserRoutinePicker=$('browser-routine-picker');
+const browserRoutineInputs=$('browser-routine-inputs');
+const browserRoutinesStatus=$('browser-routines-status');
+const browserRoutineSubmit=$('browser-routine-submit');
+const browserRoutineDisable=$('browser-routine-disable');
+const browserRoutineEnable=$('browser-routine-enable');
+let browserTaskId=null;
+let browserSubmissionId=null;
+let browserTaskHasProfile=false;
+let browserEventCursor=0;
+let browserTaskPollActive=false;
+let browserTaskTimer=null;
+
+function setBrowserTask(id){
+  if(!id||id===browserTaskId)return;
+  browserTaskId=id;
+  browserEventCursor=0;
+  browserTaskEvents?.replaceChildren();
+  browserTaskResult?.replaceChildren();
+  browserTaskFeedback?.setAttribute('hidden','');
+  browserActionReview?.setAttribute('hidden','');
+  browserSaveProfile?.setAttribute('hidden','');
+  if(browserTaskStatus)browserTaskStatus.textContent=`Connecting to browser task ${id}…`;
+  browserTaskControls?.removeAttribute('hidden');
+  pollBrowserTask();
+  if(browserTaskTimer)clearInterval(browserTaskTimer);
+  browserTaskTimer=setInterval(pollBrowserTask,1000);
+}
+
+function renderBrowserResult(result){
+  if(!browserTaskResult)return;
+  browserTaskResult.replaceChildren();
+  if(!result)return;
+  const findings=Array.isArray(result.findings)?result.findings:[];
+  for(const finding of findings){
+    const paragraph=document.createElement('p');
+    paragraph.textContent=String(finding.text||'');
+    browserTaskResult.append(paragraph);
+    const sources=Array.isArray(finding.sources)?finding.sources:[];
+    for(const source of sources){
+      try{
+        const url=new URL(source);
+        if(!['http:','https:'].includes(url.protocol))continue;
+        const link=document.createElement('a');
+        link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';
+        link.textContent=url.href;browserTaskResult.append(link);
+      }catch(_error){ /* Invalid source values are not rendered as links. */ }
+    }
+  }
+  if(result.verification&&typeof result.verification==='object'){
+    const verdict=String(result.verification.verdict||'unknown');
+    const notice=document.createElement('p');
+    notice.textContent=`Routine evidence check: ${verdict}. This checks source coverage; review the answer for correctness.`;
+    browserTaskResult.append(notice);
+  }
+  if(!findings.length&&result.reason){
+    const message=document.createElement('p');message.textContent=String(result.reason);
+    browserTaskResult.append(message);
+  }
+}
+
+function renderBrowserActionProposal(proposal){
+  if(!browserActionReview||!browserActionSummary||!proposal)return;
+  const action=String(proposal.action||'action');
+  const target=String(proposal.target_label||'selected control');
+  const effect=String(proposal.expected_effect||'');
+  browserActionSummary.textContent=`${action} at ${String(proposal.origin||'unknown origin')} — ${target}. ${effect}`;
+  browserActionValue.textContent=typeof proposal.arguments?.value==='string'
+    ? `Value to enter: ${proposal.arguments.value}`
+    : typeof proposal.arguments?.filename==='string'
+      ? `Selected file: ${proposal.arguments.filename} (SHA-256 ${String(proposal.arguments.sha256||'').slice(0,16)}…)`
+      : '';
+  browserActionReview.dataset.actionId=String(proposal.action_id||'');
+  browserActionReview.dataset.proposalDigest=String(proposal.digest||'');
+  browserActionReview.removeAttribute('hidden');
+}
+
+async function pollBrowserTask(){
+  if(!browserTaskId||browserTaskPollActive)return;
+  browserTaskPollActive=true;
+  try{
+    const response=await fetch(`/api/browser/tasks/${encodeURIComponent(browserTaskId)}?after=${browserEventCursor}`,{cache:'no-store'});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok||!payload)throw new Error((payload&&payload.error)||'Browser task status is unavailable.');
+    if(payload.resetRequired)browserTaskEvents?.replaceChildren();
+    for(const event of payload.events||[]){
+      const item=document.createElement('li');item.textContent=String(event.summary||event.state||'');
+      browserTaskEvents?.append(item);
+      if(event.proposal)renderBrowserActionProposal(event.proposal);
+    }
+    browserEventCursor=payload.nextCursor||browserEventCursor;
+    const state=String(payload.state||'unknown');
+    if(browserTaskStatus)browserTaskStatus.textContent=`Browser task ${state}.`;
+    renderBrowserResult(payload.result);
+    if(browserSaveProfile){
+      const takeover=state==='waiting_for_user'&&browserActionReview?.hasAttribute('hidden');
+      if(takeover&&browserTaskHasProfile)browserSaveProfile.removeAttribute('hidden');
+      else browserSaveProfile.setAttribute('hidden','');
+    }
+    if(['completed','partial','failed','cancelled','unknown'].includes(state)){
+      browserTaskControls?.setAttribute('hidden','');
+      if(browserTaskResult?.childElementCount)browserTaskFeedback?.removeAttribute('hidden');
+      if(browserTaskTimer){clearInterval(browserTaskTimer);browserTaskTimer=null;}
+    }
+  }catch(error){
+    if(browserTaskStatus)browserTaskStatus.textContent=error.message;
+  }finally{browserTaskPollActive=false;}
+}
+
+if(browserTaskForm){
+  let enabledBrowserRoutines=[];
+  const renderRoutineInputs=()=>{
+    if(!browserRoutineInputs||!browserRoutinePicker)return;
+    browserRoutineInputs.replaceChildren();
+    const routine=enabledBrowserRoutines.find(item=>`${item.routine_id}:${item.version}`===browserRoutinePicker.value);
+    const schema=routine?.input_schema;
+    if(!routine||!schema||typeof schema!=='object'){
+      if(browserRoutineSubmit)browserRoutineSubmit.disabled=true;
+      if(browserRoutineDisable)browserRoutineDisable.disabled=true;
+      if(browserRoutineEnable)browserRoutineEnable.disabled=true;
+      return;
+    }
+    for(const [name,spec] of Object.entries(schema)){
+      if(!spec||!['url','text'].includes(spec.type)||!Number.isInteger(spec.max_length)||spec.max_length<1||spec.max_length>2048)continue;
+      const wrapper=document.createElement('label');wrapper.className='browser-routine-field';
+      wrapper.textContent=`${name}${spec.required?' (required)':''}`;
+      const input=document.createElement('input');input.dataset.routineInput=name;
+      input.type=spec.type==='url'?'url':'text';input.maxLength=spec.max_length;input.required=spec.required===true;
+      input.autocomplete='off';input.spellcheck=false;wrapper.append(input);browserRoutineInputs.append(wrapper);
+    }
+    if(browserRoutineSubmit)browserRoutineSubmit.disabled=!browserRoutineInputs.children.length||routine.enabled!==true;
+    if(browserRoutineDisable)browserRoutineDisable.disabled=routine.enabled!==true;
+    if(browserRoutineEnable)browserRoutineEnable.disabled=routine.enabled===true;
+  };
+  const loadBrowserRoutines=async()=>{
+    if(!browserRoutineForm)return;
+    try{
+      const response=await fetch('/api/browser/routines',{cache:'no-store'});
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload||!Array.isArray(payload.routines))throw new Error(payload?.error||'Routine catalogue is unavailable.');
+      enabledBrowserRoutines=payload.routines.filter(item=>item?.accepted===true&&typeof item.routine_id==='string'&&Number.isInteger(item.version)&&typeof item.digest==='string'&&typeof item.title==='string');
+      browserRoutinePicker.replaceChildren();
+      for(const routine of enabledBrowserRoutines){
+        const option=document.createElement('option');option.value=`${routine.routine_id}:${routine.version}`;option.textContent=`${routine.title} · v${routine.version}${routine.enabled?'':' (disabled)'}`;browserRoutinePicker.append(option);
+      }
+      if(!enabledBrowserRoutines.length){
+        const option=document.createElement('option');option.value='';option.textContent='No accepted routines enabled';browserRoutinePicker.append(option);
+        browserRoutineForm.hidden=true;
+        if(browserRoutinesStatus)browserRoutinesStatus.textContent='No pilot-accepted routine versions are configured on this laptop.';
+        return;
+      }
+      browserRoutineForm.hidden=false;
+      if(browserRoutinesStatus)browserRoutinesStatus.textContent='Each routine is limited to its listed inputs, origins, paths, actions, and budget.';
+      renderRoutineInputs();
+    }catch(error){if(browserRoutinesStatus)browserRoutinesStatus.textContent=error.message;}
+  };
+  browserRoutinePicker?.addEventListener('change',renderRoutineInputs);
+  browserRoutineForm?.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const routine=enabledBrowserRoutines.find(item=>`${item.routine_id}:${item.version}`===browserRoutinePicker.value);
+    if(!routine)return;
+    const inputs={};
+    for(const field of browserRoutineInputs.querySelectorAll('[data-routine-input]'))inputs[field.dataset.routineInput]=field.value.trim();
+    if(!browserRoutineForm.reportValidity())return;
+    browserRoutineSubmit.disabled=true;
+    try{
+      const response=await fetch('/api/browser/routine-tasks',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':crypto.randomUUID().replaceAll('-','')},body:JSON.stringify({routine_id:routine.routine_id,version:routine.version,digest:routine.digest,inputs})});
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload||typeof payload.taskId!=='string')throw new Error(payload?.error||'Routine could not be started.');
+      browserRoutineInputs.replaceChildren();
+      if(browserRoutinesStatus)browserRoutinesStatus.textContent=`${routine.title} started. Its inputs stay with this temporary task.`;
+      browserTaskHasProfile=false;setBrowserTask(payload.taskId);
+    }catch(error){if(browserRoutinesStatus)browserRoutinesStatus.textContent=error.message;browserRoutineSubmit.disabled=false;}
+  });
+  browserRoutineDisable?.addEventListener('click',async()=>{
+    const routine=enabledBrowserRoutines.find(item=>`${item.routine_id}:${item.version}`===browserRoutinePicker.value);
+    if(!routine||!window.confirm(`Disable ${routine.title} v${routine.version} and stop its active tasks?`))return;
+    browserRoutineDisable.disabled=true;
+    try{
+      const response=await fetch(`/api/browser/routines/${encodeURIComponent(routine.routine_id)}/${routine.version}/disable`,{method:'POST'});
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload?.disabled)throw new Error(payload?.error||'Routine could not be disabled.');
+      if(browserRoutinesStatus)browserRoutinesStatus.textContent=`${routine.title} disabled; queued and active tasks were stopped.`;
+      await loadBrowserRoutines();
+    }catch(error){if(browserRoutinesStatus)browserRoutinesStatus.textContent=error.message;browserRoutineDisable.disabled=false;}
+  });
+  browserRoutineEnable?.addEventListener('click',async()=>{
+    const routine=enabledBrowserRoutines.find(item=>`${item.routine_id}:${item.version}`===browserRoutinePicker.value);
+    if(!routine||!window.confirm(`Enable the previously accepted ${routine.title} v${routine.version}?`))return;
+    browserRoutineEnable.disabled=true;
+    try{
+      const response=await fetch(`/api/browser/routines/${encodeURIComponent(routine.routine_id)}/${routine.version}/enable`,{method:'POST'});
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload?.enabled)throw new Error(payload?.error||'Routine could not be enabled.');
+      if(browserRoutinesStatus)browserRoutinesStatus.textContent=`${routine.title} v${routine.version} enabled for new local tasks.`;
+      await loadBrowserRoutines();
+    }catch(error){if(browserRoutinesStatus)browserRoutinesStatus.textContent=error.message;browserRoutineEnable.disabled=false;}
+  });
+  loadBrowserRoutines();
+  const refreshBrowserMetrics=async()=>{
+    if(!browserMetricsSummary)return;
+    try{
+      const response=await fetch('/api/browser/metrics?cohort=all',{cache:'no-store'});
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload)throw new Error(payload?.error||'Metrics status is unavailable.');
+      if(browserMetricsEnabled)browserMetricsEnabled.checked=payload.enabled===true;
+      if(browserMetricsExport)browserMetricsExport.disabled=payload.available!==true;
+      if(browserMetricsClear)browserMetricsClear.disabled=payload.available!==true;
+      if(!payload.enabled||!payload.summary){browserMetricsSummary.textContent='Metrics are off. No browser counters are being saved.';return;}
+      const s=payload.summary,a=s.accounting||{};
+      browserMetricsSummary.textContent=`${s.eligible} tasks; ${s.reviewed} owner-reviewed; ${s.worked} marked worked; ${s.corrections} needing correction; ${a.calls||0} provider calls; ${a.unknown_cost_calls||0} calls with unknown estimated cost.`;
+    }catch(error){browserMetricsSummary.textContent=error.message;}
+  };
+  browserMetricsEnabled?.addEventListener('change',async()=>{
+    try{
+      const response=await fetch('/api/browser/metrics/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:browserMetricsEnabled.checked})});
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload)throw new Error(payload?.error||'Metrics setting could not be saved.');
+      browserMetricsEnabled.checked=payload.enabled===true;
+      await refreshBrowserMetrics();
+    }catch(error){browserMetricsEnabled.checked=!browserMetricsEnabled.checked;if(browserMetricsSummary)browserMetricsSummary.textContent=error.message;}
+  });
+  browserMetricsRefresh?.addEventListener('click',refreshBrowserMetrics);
+  browserMetricsExport?.addEventListener('click',async()=>{
+    browserMetricsExport.disabled=true;
+    if(browserMetricsSummary)browserMetricsSummary.textContent='Preparing a bounded metrics export…';
+    try{
+      let cursor=0,total=null;
+      const runs=[];
+      do{
+        const response=await fetch(`/api/browser/metrics/export?cursor=${cursor}`,{cache:'no-store'});
+        const page=await response.json().catch(()=>null);
+        if(!response.ok||!page||page.schema_version!==1||!Array.isArray(page.runs))throw new Error(page?.error||'Metrics export is unavailable.');
+        if(total===null)total=page.total;
+        if(page.cursor!==cursor||page.runs.length>50||runs.length+page.runs.length>10000)throw new Error('Metrics export page is invalid.');
+        runs.push(...page.runs);
+        if(page.next_cursor===null)break;
+        if(!Number.isInteger(page.next_cursor)||page.next_cursor<=cursor)throw new Error('Metrics export cursor did not advance.');
+        cursor=page.next_cursor;
+      }while(true);
+      const blob=new Blob([JSON.stringify({schema_version:1,total,runs},null,2)],{type:'application/json'});
+      const url=URL.createObjectURL(blob);
+      const link=document.createElement('a');link.href=url;link.download='ascend-vision-browser-metrics.json';link.click();
+      setTimeout(()=>URL.revokeObjectURL(url),1000);
+      if(browserMetricsSummary)browserMetricsSummary.textContent=`Exported ${runs.length} bounded run records.`;
+    }catch(error){if(browserMetricsSummary)browserMetricsSummary.textContent=error.message;}
+    finally{await refreshBrowserMetrics();}
+  });
+  browserMetricsClear?.addEventListener('click',async()=>{
+    if(!window.confirm('Clear all saved local browser metrics? This cannot be undone.'))return;
+    try{
+      const response=await fetch('/api/browser/metrics',{method:'DELETE'});
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload)throw new Error(payload?.error||'Metrics could not be cleared.');
+      if(browserMetricsEnabled)browserMetricsEnabled.checked=false;
+      await refreshBrowserMetrics();
+    }catch(error){if(browserMetricsSummary)browserMetricsSummary.textContent=error.message;}
+  });
+  browserTaskFeedback?.addEventListener('click',async event=>{
+    const button=event.target.closest('[data-browser-feedback]');
+    if(!button||!browserTaskId)return;
+    button.disabled=true;
+    try{
+      const response=await fetch(`/api/browser/tasks/${encodeURIComponent(browserTaskId)}/feedback`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({verdict:button.dataset.browserFeedback})});
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload)throw new Error(payload?.error||'Feedback was not saved.');
+      browserTaskFeedback.textContent='Thanks. Your result review was saved.';
+      await refreshBrowserMetrics();
+    }catch(error){if(browserTaskStatus)browserTaskStatus.textContent=error.message;button.disabled=false;}
+  });
+  refreshBrowserMetrics();
+  browserProfilesRefresh?.addEventListener('click',async()=>{
+    try{
+      const response=await fetch('/api/browser/profiles',{cache:'no-store'});
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload||!Array.isArray(payload.profiles))throw new Error(payload?.error||'Saved profiles are unavailable.');
+      browserProfilesList.replaceChildren();
+      for(const profile of payload.profiles){
+        const option=document.createElement('option');option.value=String(profile);option.textContent=String(profile);
+        browserProfilesList.append(option);
+      }
+      if(!payload.profiles.length){const option=document.createElement('option');option.value='';option.textContent='No saved profiles';browserProfilesList.append(option);}
+    }catch(error){if(browserTaskStatus)browserTaskStatus.textContent=error.message;}
+  });
+  browserProfileClear?.addEventListener('click',async()=>{
+    const profile=browserProfilesList?.value;
+    if(!profile||!window.confirm(`Clear saved sign-in “${profile}” from this Windows account?`))return;
+    try{
+      const response=await fetch(`/api/browser/profiles/${encodeURIComponent(profile)}`,{method:'DELETE'});
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload)throw new Error(payload?.error||'Saved profile could not be cleared.');
+      browserProfilesRefresh.click();
+    }catch(error){if(browserTaskStatus)browserTaskStatus.textContent=error.message;}
+  });
+  browserB3Selected?.addEventListener('change',()=>{
+    const enabled=browserB3Selected.checked;
+    browserB3Fields.hidden=!enabled;
+    if(browserB3Origin)browserB3Origin.required=enabled;
+  });
+  browserTaskForm.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const goal=browserTaskGoal.value.trim();
+    if(!goal)return;
+    const submit=browserTaskForm.querySelector('button[type="submit"]');
+    submit.disabled=true;
+    if(browserTaskStatus)browserTaskStatus.textContent='Queueing local browser research…';
+    try{
+      let requestBody={goal};
+      let requestOptions={method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(requestBody)};
+      browserTaskHasProfile=false;
+      if(browserB3Selected?.checked){
+        const originValue=browserB3Origin.value.trim();
+        const parsedOrigin=new URL(originValue);
+        if(!['http:','https:'].includes(parsedOrigin.protocol)||parsedOrigin.pathname!=='/'||parsedOrigin.search||parsedOrigin.hash){
+          throw new Error('Enter an HTTP(S) origin only, such as https://example.com.');
+        }
+        requestBody.scopeMode='selected_origins';
+        requestBody.origin=parsedOrigin.origin;
+        requestBody.profileId=browserB3Profile?.value.trim()||'';
+        browserTaskHasProfile=Boolean(requestBody.profileId);
+        requestBody.capabilities=Array.from(browserTaskForm.querySelectorAll('.browser-b3-capabilities input:checked'),input=>input.value);
+        const selectedFile=browserB3Upload?.files?.[0]||null;
+        const uploadEnabled=requestBody.capabilities.includes('upload');
+        if(uploadEnabled&&!selectedFile)throw new Error('Choose the upload file explicitly before enabling upload.');
+        if(selectedFile&&!uploadEnabled)throw new Error('Enable the upload capability to attach this selected file.');
+        if(selectedFile){
+          const formData=new FormData();
+          formData.append('goal',goal);
+          formData.append('scopeMode','selected_origins');
+          formData.append('origin',requestBody.origin);
+          formData.append('profileId',requestBody.profileId);
+          formData.append('capabilities',JSON.stringify(requestBody.capabilities));
+          formData.append('upload',selectedFile,selectedFile.name);
+          requestOptions={method:'POST',body:formData};
+        }else{
+          requestOptions.body=JSON.stringify(requestBody);
+        }
+      }
+      browserSubmissionId=browserSubmissionId||crypto.randomUUID().replaceAll('-','');
+      requestOptions.headers={...(requestOptions.headers||{}),'Idempotency-Key':browserSubmissionId};
+      const response=await fetch('/api/browser/tasks',requestOptions);
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload)throw new Error((payload&&payload.error)||'Browser task could not be started.');
+      browserSubmissionId=null;browserTaskForm.reset();setBrowserTask(payload.taskId);
+    }catch(error){if(browserTaskStatus)browserTaskStatus.textContent=error.message;}
+    finally{submit.disabled=false;}
+  });
+  browserSaveProfile?.addEventListener('click',async()=>{
+    if(!browserTaskId)return;
+    browserSaveProfile.disabled=true;
+    if(browserTaskStatus)browserTaskStatus.textContent='Saving the dedicated login profile…';
+    try{
+      const response=await fetch(`/api/browser/tasks/${encodeURIComponent(browserTaskId)}/profile/save`,{method:'POST'});
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload)throw new Error((payload&&payload.error)||'Profile save was not accepted.');
+      if(browserTaskStatus)browserTaskStatus.textContent='Saving profile in the browser process…';
+      pollBrowserTask();
+    }catch(error){if(browserTaskStatus)browserTaskStatus.textContent=error.message;}
+    finally{browserSaveProfile.disabled=false;}
+  });
+  browserTaskControls?.addEventListener('click',async event=>{
+    const command=event.target.closest('[data-browser-control]')?.dataset.browserControl;
+    if(!command||!browserTaskId)return;
+    try{
+      const response=await fetch(`/api/browser/tasks/${encodeURIComponent(browserTaskId)}/control`,{
+        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command}),
+      });
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload)throw new Error((payload&&payload.error)||'Browser task control failed.');
+      if(browserTaskStatus)browserTaskStatus.textContent=`Browser task ${payload.state}.`;
+      pollBrowserTask();
+    }catch(error){if(browserTaskStatus)browserTaskStatus.textContent=error.message;}
+  });
+  browserActionReview?.addEventListener('click',async event=>{
+    const decision=event.target.closest('[data-browser-decision]')?.dataset.browserDecision;
+    if(!decision||!browserTaskId)return;
+    const buttons=browserActionReview.querySelectorAll('button');
+    buttons.forEach(button=>{button.disabled=true;});
+    try{
+      const response=await fetch(`/api/browser/tasks/${encodeURIComponent(browserTaskId)}/decision`,{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          actionId:browserActionReview.dataset.actionId,
+          proposalDigest:browserActionReview.dataset.proposalDigest,
+          approved:decision==='approve',
+        }),
+      });
+      const payload=await response.json().catch(()=>null);
+      if(!response.ok||!payload)throw new Error((payload&&payload.error)||'Browser action review failed.');
+      browserActionReview.setAttribute('hidden','');
+      if(browserTaskStatus)browserTaskStatus.textContent=`Browser task ${payload.state}.`;
+      pollBrowserTask();
+    }catch(error){
+      buttons.forEach(button=>{button.disabled=false;});
+      if(browserTaskStatus)browserTaskStatus.textContent=error.message;
+    }
+  });
 }
 
 async function pollChatReplies(){
@@ -441,3 +869,331 @@ if(memoryPanel){
   });
   setInterval(()=>{if(memoryPanel.open)refreshMemory();},5000);
 }
+
+const contextStatus=$('context-status');
+const contextIntentForm=$('context-intent-form');
+const contextIntentChoice=$('context-intent-choice');
+const contextIntentSubmit=$('context-intent-submit');
+const contextClear=$('context-clear');
+const contextPause=$('context-pause');
+const contextIntentUndo=$('context-intent-undo');
+const contextSnooze=$('context-snooze');
+const contextSnoozeClear=$('context-snooze-clear');
+const deskCalibrationStatus=$('desk-calibration-status');
+const deskCalibrationStart=$('desk-calibration-start');
+const deskCalibrationCancel=$('desk-calibration-cancel');
+const contextRows={
+  deskPresence:$('context-presence'),
+  desktopActivity:$('context-activity'),
+  foregroundCategory:$('context-category'),
+  focusSession:$('context-session'),
+  declaredIntent:$('context-intent-value'),
+};
+let latestContext=null, contextPollActive=false;
+const contextLabels={
+  present:'Face detected in calibrated desk area',away:'No face detected in calibrated desk area after absence dwell',unknown:'Unknown',
+  input_active:'Recently active',input_idle:'Input idle',locked:'Desktop locked',unavailable:'Unavailable',
+  development:'Development app',communication:'Communication app',
+  browser_unspecified:'Browser (content unknown)',entertainment:'Entertainment app',other:'Other app',
+  focus:'Focus',break:'Break',research:'Research',meeting:'Meeting',none:'None',
+  webcam:'Webcam face detector',desktop_activity:'Desktop activity',session_manager:'Vision session',
+  user_declaration:'Your correction',
+};
+
+function contextFieldText(field){
+  const value=contextLabels[field.value]||'Unknown';
+  const status=field.freshness==='fresh'?'Current':field.freshness==='stale'?'Stale':field.freshness==='paused'?'Paused':'Sensor unavailable';
+  const source=contextLabels[field.source]||'Source unknown';
+  const observed=field.observed_at?Date.parse(field.observed_at):NaN;
+  const age=Number.isFinite(observed)?` · ${duration((Date.now()-observed)/1000)} ago`:'';
+  return `${value} · ${status} · ${source}${age}`;
+}
+
+async function refreshCompanionDecisions(){
+  const list=$('companion-decisions');
+  if(!list)return;
+  try{
+    const response=await fetch('/api/context/companion-decisions',{cache:'no-store'});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok||!Array.isArray(payload?.decisions))throw new Error('Decision view unavailable.');
+    const rows=payload.decisions.flatMap(entry=>(entry.rules||[]).map(rule=>({entry,rule}))).slice(-20).reverse();
+    list.replaceChildren();
+    if(!rows.length){const item=document.createElement('li');item.textContent='No rule evaluations recorded in this run.';list.append(item);return;}
+    for(const {entry,rule} of rows){
+      const item=document.createElement('li');
+      const age=Number.isInteger(rule.evidence_age_seconds)?` · evidence ${rule.evidence_age_seconds}s old`:'';
+      item.textContent=`${entry.mode} · ${rule.rule_id} · ${rule.trigger} · ${rule.source||'no source'}${age} · ${rule.channel||'no channel'} · ${rule.outcome} (${rule.reason_code})`;
+      list.append(item);
+    }
+  }catch(_error){
+    list.replaceChildren();const item=document.createElement('li');item.textContent='Decision view unavailable.';list.append(item);
+  }
+}
+
+async function refreshContext(){
+  if(!contextStatus||contextPollActive)return;
+  contextPollActive=true;
+  try{
+    const response=await fetch('/api/context',{cache:'no-store'});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok||!payload?.snapshot)throw new Error('Laptop context is unavailable. Start Vision to reconnect.');
+    latestContext=payload.snapshot;
+    for(const [name,node] of Object.entries(contextRows)){
+      if(node)node.textContent=contextFieldText(latestContext.fields[name]||{value:'unknown',freshness:'unavailable'});
+    }
+    const snoozeUntil=latestContext.snooze_until?new Date(latestContext.snooze_until):null;
+    const regionResponse=await fetch('/api/context/desk-region',{cache:'no-store'});
+    const regionPayload=await regionResponse.json().catch(()=>null);
+    if(!regionResponse.ok||!regionPayload?.desk_region)throw new Error('Desk area setup is unavailable.');
+    const deskRegion=regionPayload.desk_region;
+    deskCalibrationStatus.textContent=deskRegion.calibrating
+      ?'Setup is active. In the Vision camera preview, drag a rectangle around the desk.'
+      :deskRegion.calibrated?'Desk area is set. You can set it up again to replace it.'
+      :'Desk area is not set up. Desk presence stays unknown until setup is complete.';
+    deskCalibrationStart.disabled=!deskRegion.available||deskRegion.calibrating||latestContext.paused;
+    deskCalibrationCancel.disabled=!deskRegion.calibrating;
+    $('context-snooze-value').textContent=snoozeUntil&&snoozeUntil>Date.now()
+      ?`Quiet until ${snoozeUntil.toLocaleTimeString()}`:'Not snoozed';
+    contextStatus.textContent=latestContext.paused
+      ?'Companion context is paused. Existing Vision monitoring follows its current controls.'
+      :`Live snapshot ${latestContext.snapshot_id} · updated ${new Date(latestContext.generated_at).toLocaleTimeString()}`;
+    contextPause.textContent=latestContext.paused?'Resume context':'Pause context';
+    await refreshCompanionDecisions();
+    [contextIntentSubmit,contextIntentUndo,contextSnooze,contextSnoozeClear,contextClear,contextPause].forEach(button=>{if(button)button.disabled=false;});
+  }catch(error){
+    contextStatus.textContent=error.message;
+    [contextIntentSubmit,contextIntentUndo,contextSnooze,contextSnoozeClear,contextClear,contextPause].forEach(button=>{if(button)button.disabled=true;});
+    if(deskCalibrationStart)deskCalibrationStart.disabled=true;
+    if(deskCalibrationCancel)deskCalibrationCancel.disabled=true;
+  }finally{
+    contextPollActive=false;
+  }
+}
+
+async function contextCommand(path,body){
+  const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const payload=await response.json().catch(()=>null);
+  if(!response.ok)throw new Error((payload&&payload.error)||'Context update failed.');
+  await refreshContext();
+}
+
+async function setDeskCalibration(enabled){
+  deskCalibrationStart.disabled=true;
+  deskCalibrationCancel.disabled=true;
+  try{
+    const response=await fetch('/api/context/desk-region/calibration',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled}),
+    });
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok)throw new Error(payload?.error||'Desk area setup failed.');
+    deskCalibrationStatus.textContent=enabled
+      ?'Setup started. In the Vision camera preview, drag a rectangle around your desk.'
+      :'Desk area setup cancelled.';
+    await refreshContext();
+  }catch(error){
+    deskCalibrationStatus.textContent=error.message;
+    deskCalibrationStart.disabled=false;
+    deskCalibrationCancel.disabled=false;
+  }
+}
+deskCalibrationStart?.addEventListener('click',()=>setDeskCalibration(true));
+deskCalibrationCancel?.addEventListener('click',()=>setDeskCalibration(false));
+
+contextIntentForm?.addEventListener('submit',async event=>{
+  event.preventDefault();
+  const intent=contextIntentChoice.value;
+  if(!intent)return;
+  const duration_seconds=intent==='break'?900:3600;
+  contextIntentSubmit.disabled=true;
+  try{
+    await contextCommand('/api/context/intent',{intent,duration_seconds});
+    contextStatus.textContent=`${contextLabels[intent]} declared temporarily.`;
+    contextIntentChoice.value='';
+  }catch(error){
+    contextStatus.textContent=error.message;
+  }finally{
+    contextIntentSubmit.disabled=false;
+  }
+});
+contextClear?.addEventListener('click',async()=>{
+  contextClear.disabled=true;
+  try{
+    await contextCommand('/api/context/clear',{});
+    contextStatus.textContent='Current context cleared.';
+  }catch(error){
+    contextStatus.textContent=error.message;
+  }finally{
+    contextClear.disabled=false;
+  }
+});
+contextPause?.addEventListener('click',async()=>{
+  contextPause.disabled=true;
+  try{
+    await contextCommand('/api/context/pause',{paused:!latestContext?.paused});
+    contextStatus.textContent=latestContext?.paused?'Companion context resumed.':'Companion context paused.';
+  }catch(error){
+    contextStatus.textContent=error.message;
+  }finally{
+    contextPause.disabled=false;
+  }
+});
+contextIntentUndo?.addEventListener('click',async()=>{
+  contextIntentUndo.disabled=true;
+  try{
+    await contextCommand('/api/context/intent/clear',{});
+    contextStatus.textContent='Temporary intent removed.';
+  }catch(error){
+    contextStatus.textContent=error.message;
+  }finally{
+    contextIntentUndo.disabled=false;
+  }
+});
+contextSnooze?.addEventListener('click',async()=>{
+  contextSnooze.disabled=true;
+  try{
+    await contextCommand('/api/context/snooze',{duration_seconds:1800});
+    contextStatus.textContent='Vision will stay quiet for 30 minutes.';
+  }catch(error){
+    contextStatus.textContent=error.message;
+  }finally{
+    contextSnooze.disabled=false;
+  }
+});
+contextSnoozeClear?.addEventListener('click',async()=>{
+  contextSnoozeClear.disabled=true;
+  try{
+    await contextCommand('/api/context/snooze/clear',{});
+    contextStatus.textContent='Quiet time cancelled.';
+  }catch(error){
+    contextStatus.textContent=error.message;
+  }finally{
+    contextSnoozeClear.disabled=false;
+  }
+});
+if(contextStatus){
+  refreshContext();
+  setInterval(refreshContext,2000);
+}
+
+const activityStatus=$('activity-status');
+const activityEnabled=$('activity-history-enabled');
+const activityDate=$('activity-date');
+const activityDays=$('activity-days');
+const activityMetrics=[
+  ['focus_session_seconds','Tracked focus-session minutes','focus_coverage_seconds','focus_uncovered_seconds'],
+  ['declared_break_seconds','Declared break minutes','break_coverage_seconds','break_uncovered_seconds'],
+  ['entertainment_category_seconds','Observed entertainment-category minutes','entertainment_coverage_seconds','entertainment_uncovered_seconds'],
+];
+const activityMetricNames=Object.fromEntries(activityMetrics.map(([key,label])=>[key,label]));
+
+function appendActivityText(parent,tag,text,className){
+  const node=document.createElement(tag);
+  node.textContent=text;
+  if(className)node.className=className;
+  parent.append(node);
+  return node;
+}
+
+function renderActivityDays(days){
+  activityDays.replaceChildren();
+  for(const day of days){
+    const card=document.createElement('article');
+    card.className='activity-day';
+    appendActivityText(card,'h3',`${day.date} · ${day.timezone}`);
+    const list=document.createElement('dl');
+    const rows=[['Tracked coverage',day.tracked_seconds],...activityMetrics.map(([metric,label,coverage,uncovered])=>[
+      label,day[metric],`${duration(day[coverage]||0)} covered · ${duration(day[uncovered]||0)} uncovered`
+    ])];
+    for(const row of rows){
+      const [label,value,note]=row;
+      appendActivityText(list,'dt',label);
+      appendActivityText(list,'dd',note===undefined?duration(value||0):`${duration(value||0)} · ${note}`);
+    }
+    card.append(list);
+    if(day.corrections?.length){
+      appendActivityText(card,'p',`${day.corrections.length} user correction${day.corrections.length===1?'':'s'} recorded.`);
+    }
+    const form=document.createElement('form');
+    form.className='activity-correction';
+    form.dataset.date=day.date;
+    appendActivityText(form,'label','Remove minutes from a disputed classification');
+    const select=document.createElement('select');
+    select.setAttribute('aria-label','Metric to correct');
+    for(const [key,label] of activityMetrics){
+      const option=document.createElement('option');
+      option.value=key;
+      option.textContent=label;
+      select.append(option);
+    }
+    form.append(select);
+    const amount=document.createElement('input');
+    amount.type='number'; amount.min='1'; amount.max='1440'; amount.step='1'; amount.value='1';
+    amount.required=true; amount.setAttribute('aria-label','Minutes to remove');
+    form.append(amount);
+    const correct=document.createElement('button');
+    correct.type='submit'; correct.textContent='Record correction';
+    form.append(correct);
+    card.append(form);
+    activityDays.append(card);
+  }
+}
+
+async function refreshActivity(){
+  if(!activityStatus||!activityDate)return;
+  try{
+    const selected=activityDate.value;
+    const response=await fetch(`/api/activity-history?date=${encodeURIComponent(selected)}`,{cache:'no-store'});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok||!payload)throw new Error(payload?.error||'Daily reflection is unavailable.');
+    activityEnabled.checked=payload.enabled===true;
+    renderActivityDays(payload.days||[]);
+    activityStatus.textContent=payload.enabled&&!payload.collection_available
+      ?'Activity-history opt-in is on, but laptop context tracking is disabled. No new summaries can be collected until it is enabled.'
+      :payload.enabled
+      ?(payload.days?.length?`Showing local totals through ${selected}. Data expires after ${payload.retention_days} days.`:'No measured activity is stored for this day yet.')
+      :'Activity history is off. No new daily totals are being saved.';
+  }catch(error){activityStatus.textContent=error.message;}
+}
+
+activityEnabled?.addEventListener('change',async()=>{
+  activityEnabled.disabled=true;
+  try{
+    const response=await fetch('/api/activity-history/settings',{method:'PUT',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({enabled:activityEnabled.checked})});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok)throw new Error(payload?.error||'Activity-history setting could not be changed.');
+    activityStatus.textContent=payload.enabled?'Daily activity totals are enabled on this laptop.':'Daily activity totals are paused; saved days remain until deleted or expired.';
+  }catch(error){activityEnabled.checked=!activityEnabled.checked;activityStatus.textContent=error.message;}
+  finally{activityEnabled.disabled=false;}
+});
+activityDate?.addEventListener('change',refreshActivity);
+$('activity-load')?.addEventListener('click',refreshActivity);
+activityDays?.addEventListener('submit',async event=>{
+  const form=event.target.closest('.activity-correction');
+  if(!form)return;
+  event.preventDefault();
+  const [metric,amount]=form.querySelectorAll('select,input');
+  const button=form.querySelector('button');
+  button.disabled=true;
+  try{
+    const response=await fetch('/api/activity-history/corrections',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({date:form.dataset.date,metric:metric.value,remove_minutes:Number(amount.value)})});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok)throw new Error(payload?.error||'Correction could not be saved.');
+    activityStatus.textContent=`Correction recorded for ${activityMetricNames[payload.correction.metric]||'activity'}.`;
+    await refreshActivity();
+  }catch(error){activityStatus.textContent=error.message;button.disabled=false;}
+});
+$('activity-delete')?.addEventListener('click',async()=>{
+  if(!window.confirm('Delete all saved daily activity totals and corrections? This cannot be undone.'))return;
+  const button=$('activity-delete'); button.disabled=true;
+  try{
+    const response=await fetch('/api/activity-history',{method:'DELETE'});
+    const payload=await response.json().catch(()=>null);
+    if(!response.ok)throw new Error(payload?.error||'Activity history could not be deleted.');
+    activityStatus.textContent='All saved activity totals and corrections were deleted.';
+    await refreshActivity();
+  }catch(error){activityStatus.textContent=error.message;}
+  finally{button.disabled=false;}
+});
+if(activityStatus)refreshActivity();

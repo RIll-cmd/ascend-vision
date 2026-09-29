@@ -3,6 +3,7 @@ from dataclasses import dataclass, field, fields, replace
 import math
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -70,6 +71,50 @@ class RuntimeConfig:
             raise ValueError('runtime.preview must be a YAML boolean')
         number('runtime.stats_interval_seconds', self.stats_interval_seconds, .1)
         number('runtime.target_fps', self.target_fps, .1)
+
+
+@dataclass(frozen=True)
+class CompanionContextConfig:
+    """Local laptop context; disabled until explicitly enabled by the owner."""
+    enabled: bool = False
+    share_with_phone: bool = False
+    proactive_enabled: bool = False
+    shadow_mode_enabled: bool = False
+    mode: str = 'quiet'
+    break_suggestion_enabled: bool = False
+    desk_checkin_enabled: bool = False
+    agent_needs_input_enabled: bool = False
+    break_interval_minutes: int = 50
+    desk_absence_minutes: int = 5
+    desktop_poll_seconds: float = 2.0
+    idle_after_seconds: float = 60.0
+    absence_dwell_seconds: float = 10.0
+    return_dwell_seconds: float = 3.0
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('companion_context.enabled must be a YAML boolean')
+        for name in ('share_with_phone', 'proactive_enabled', 'shadow_mode_enabled',
+                     'break_suggestion_enabled', 'desk_checkin_enabled',
+                     'agent_needs_input_enabled'):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f'companion_context.{name} must be a YAML boolean')
+        if self.proactive_enabled and not self.enabled:
+            raise ValueError('proactive companion requires companion_context.enabled')
+        if self.agent_needs_input_enabled and not (self.proactive_enabled or self.shadow_mode_enabled):
+            raise ValueError('agent needs-input rule requires proactive or shadow mode')
+        if self.shadow_mode_enabled and not self.enabled:
+            raise ValueError('companion shadow mode requires companion_context.enabled')
+        if self.share_with_phone and not self.enabled:
+            raise ValueError('companion_context.share_with_phone requires companion_context.enabled')
+        if self.mode not in ('quiet', 'companion', 'focus_coach'):
+            raise ValueError('companion_context.mode must be quiet, companion, or focus_coach')
+        number('companion_context.break_interval_minutes', self.break_interval_minutes, 10, 180, integer=True)
+        number('companion_context.desk_absence_minutes', self.desk_absence_minutes, 1, 60, integer=True)
+        number('companion_context.desktop_poll_seconds', self.desktop_poll_seconds, .5, 10)
+        number('companion_context.idle_after_seconds', self.idle_after_seconds, 1, 3600)
+        number('companion_context.absence_dwell_seconds', self.absence_dwell_seconds, 1, 60)
+        number('companion_context.return_dwell_seconds', self.return_dwell_seconds, .5, 30)
 
 
 @dataclass(frozen=True)
@@ -373,7 +418,7 @@ class VoiceCommandConfig:
 class LLMConfig:
     groq_model: str = 'llama-3.1-8b-instant'
     cerebras_model: str = 'llama3.1-8b'
-    gemini_model: str = 'gemini-2.5-flash'
+    gemini_model: str = 'gemini-3.6-flash'
     groq_api_key_env: str = 'GROQ_API_KEY'
     cerebras_api_key_env: str = 'CEREBRAS_API_KEY'
     gemini_api_key_env: str = 'GEMINI_API_KEY'
@@ -420,7 +465,7 @@ class AscendConfig:
 
 @dataclass(frozen=True)
 class ScreenAuditConfig:
-    enabled: bool = True
+    enabled: bool = False
     interval_seconds: float = 1800.0
 
     def __post_init__(self):
@@ -430,10 +475,178 @@ class ScreenAuditConfig:
 
 
 @dataclass(frozen=True)
+class PhoneChatConfig:
+    """Opt-in outbound phone worker; credentials and URL are environment-only."""
+    enabled: bool = False
+    voice_upload_enabled: bool = False
+    core_url_env: str = 'ASCEND_PHONE_CORE_URL'
+    worker_token_env: str = 'ASCEND_PHONE_WORKER_TOKEN'
+    owner_id_env: str = 'ASCEND_PHONE_OWNER_ID'
+    poll_interval_seconds: float = 2.0
+    lease_renew_interval_seconds: float = 20.0
+    request_timeout_seconds: float = 15.0
+    shutdown_timeout_seconds: float = 3.0
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('phone_chat.enabled must be a YAML boolean')
+        if type(self.voice_upload_enabled) is not bool:
+            raise ValueError('phone_chat.voice_upload_enabled must be a YAML boolean')
+        if self.voice_upload_enabled and not self.enabled:
+            raise ValueError('phone_chat.voice_upload_enabled requires phone_chat.enabled')
+        for name in ('core_url_env', 'worker_token_env', 'owner_id_env'):
+            if not isinstance(getattr(self, name), str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', getattr(self, name)):
+                raise ValueError(f'phone_chat.{name} must name an environment variable')
+        number('phone_chat.poll_interval_seconds', self.poll_interval_seconds, .1, 60)
+        number('phone_chat.lease_renew_interval_seconds', self.lease_renew_interval_seconds, .1, 45)
+        number('phone_chat.request_timeout_seconds', self.request_timeout_seconds, .1, 120)
+        number('phone_chat.shutdown_timeout_seconds', self.shutdown_timeout_seconds, .1, 30)
+
+
+@dataclass(frozen=True)
+class BrowserAutomationConfig:
+    """Opt-in local browser research with conservative task limits."""
+    enabled: bool = False
+    b3_enabled: bool = False
+    remote_enabled: bool = False
+    remote_writes_enabled: bool = False
+    remote_scopes: tuple[dict, ...] = ()
+    provider: str = 'gemini'
+    scope_mode: str = 'public_research'
+    profile_mode: str = 'ephemeral'
+    max_decisions: int = 20
+    max_actions: int = 30
+    max_pages: int = 3
+    max_queued_tasks: int = 4
+    task_timeout_seconds: int = 180
+    metrics_enabled: bool = False
+    metrics_retention_days: int = 30
+    metrics_max_runs: int = 10_000
+    pilot_enabled: bool = False
+    pilot_price_table_path: str | None = None
+    pilot_token_bound_reviewed: bool = False
+    pilot_b2_live_accepted: bool = False
+    pilot_voice_completion_confirmed: bool = False
+    pilot_daily_budget_usd_micros: int = 1_000_000
+    pilot_total_budget_usd_micros: int = 5_000_000
+    enabled_routines: tuple[dict, ...] = ()
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('browser_automation.enabled must be a YAML boolean')
+        if type(self.b3_enabled) is not bool:
+            raise ValueError('browser_automation.b3_enabled must be a YAML boolean')
+        if type(self.remote_enabled) is not bool or type(self.remote_writes_enabled) is not bool:
+            raise ValueError('browser_automation remote settings must be YAML booleans')
+        if type(self.metrics_enabled) is not bool:
+            raise ValueError('browser_automation.metrics_enabled must be a YAML boolean')
+        if type(self.pilot_enabled) is not bool:
+            raise ValueError('browser_automation.pilot_enabled must be a YAML boolean')
+        if type(self.pilot_token_bound_reviewed) is not bool:
+            raise ValueError('browser_automation.pilot_token_bound_reviewed must be a YAML boolean')
+        if type(self.pilot_b2_live_accepted) is not bool or type(self.pilot_voice_completion_confirmed) is not bool:
+            raise ValueError('browser_automation pilot acceptance settings must be YAML booleans')
+        if self.b3_enabled and not self.enabled:
+            raise ValueError('browser_automation.b3_enabled requires browser automation to be enabled')
+        if self.remote_enabled and not self.enabled:
+            raise ValueError('browser_automation.remote_enabled requires browser automation to be enabled')
+        if self.remote_writes_enabled and not (self.remote_enabled and self.b3_enabled):
+            raise ValueError('browser_automation.remote_writes_enabled requires remote_enabled and b3_enabled')
+        if self.provider not in {'gemini', 'cerebras', 'groq'}:
+            raise ValueError('browser_automation.provider must be gemini, cerebras or groq')
+        if self.scope_mode != 'public_research':
+            raise ValueError('browser_automation.scope_mode must be public_research in this release')
+        if self.profile_mode != 'ephemeral':
+            raise ValueError('browser_automation.profile_mode must be ephemeral in this release')
+        if not isinstance(self.remote_scopes, (tuple, list)) or len(self.remote_scopes) > 10:
+            raise ValueError('browser_automation.remote_scopes must contain at most 10 scope objects')
+        scope_ids = set()
+        normalized_scopes = []
+        for scope in self.remote_scopes:
+            if not isinstance(scope, dict) or scope.keys() - {'scope_id', 'origin', 'actions', 'profile_id', 'version'}:
+                raise ValueError('browser_automation.remote_scopes contains an invalid scope object')
+            scope_id, origin, actions = scope.get('scope_id'), scope.get('origin'), scope.get('actions')
+            version, profile_id = scope.get('version', 1), scope.get('profile_id')
+            if not isinstance(scope_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', scope_id):
+                raise ValueError('browser_automation remote scope_id is invalid')
+            if scope_id in scope_ids:
+                raise ValueError('browser_automation remote scope_id values must be unique')
+            scope_ids.add(scope_id)
+            if not isinstance(origin, str):
+                raise ValueError('browser_automation remote scope origin is invalid')
+            parsed_origin = urlsplit(origin)
+            try:
+                port = parsed_origin.port
+            except ValueError as exc:
+                raise ValueError('browser_automation remote scope origin is invalid') from exc
+            if (parsed_origin.scheme not in {'https', 'http'} or not parsed_origin.hostname
+                    or parsed_origin.username or parsed_origin.password
+                    or parsed_origin.path not in {'', '/'} or parsed_origin.query or parsed_origin.fragment
+                    or (port is not None and port != (443 if parsed_origin.scheme == 'https' else 80))
+                    or (parsed_origin.scheme != 'https' and parsed_origin.hostname not in {'localhost', '127.0.0.1', '::1'})):
+                raise ValueError('browser_automation remote scopes must use public HTTPS origins')
+            if (not isinstance(actions, (list, tuple)) or len(actions) > 5
+                    or any(item not in {'fill', 'select', 'click'} for item in actions)
+                    or len(set(actions)) != len(actions)):
+                raise ValueError('browser_automation remote scope actions are invalid')
+            if type(version) is not int or version < 1:
+                raise ValueError('browser_automation remote scope version must be positive')
+            if profile_id is not None and (not isinstance(profile_id, str)
+                                           or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', profile_id)):
+                raise ValueError('browser_automation remote scope profile_id is invalid')
+            normalized_scopes.append({
+                'scope_id': scope_id,
+                'origin': f'{parsed_origin.scheme.lower()}://{parsed_origin.hostname.rstrip(".").lower()}',
+                'actions': tuple(actions), 'profile_id': profile_id, 'version': version,
+            })
+        if normalized_scopes and not self.remote_writes_enabled:
+            raise ValueError('browser_automation.remote_scopes require remote_writes_enabled')
+        object.__setattr__(self, 'remote_scopes', tuple(normalized_scopes))
+        for name, maximum in (
+            ('max_decisions', 20), ('max_actions', 30), ('max_pages', 3),
+            ('max_queued_tasks', 4), ('task_timeout_seconds', 180),
+        ):
+            number(f'browser_automation.{name}', getattr(self, name), 1, maximum, integer=True)
+        number('browser_automation.metrics_retention_days', self.metrics_retention_days, 1, 30, integer=True)
+        number('browser_automation.metrics_max_runs', self.metrics_max_runs, 1, 10_000, integer=True)
+        if self.pilot_price_table_path is not None and (
+                not isinstance(self.pilot_price_table_path, str) or not self.pilot_price_table_path.strip()
+                or len(self.pilot_price_table_path) > 300):
+            raise ValueError('browser_automation.pilot_price_table_path is invalid')
+        number('browser_automation.pilot_daily_budget_usd_micros', self.pilot_daily_budget_usd_micros,
+               1, 1_000_000, integer=True)
+        number('browser_automation.pilot_total_budget_usd_micros', self.pilot_total_budget_usd_micros,
+               1, 5_000_000, integer=True)
+        if self.pilot_enabled and not (self.enabled and self.metrics_enabled and self.pilot_price_table_path
+                                       and self.pilot_token_bound_reviewed and self.pilot_b2_live_accepted
+                                       and self.pilot_voice_completion_confirmed):
+            raise ValueError('browser_automation.pilot_enabled requires browser and metrics enabled, B2 live and voice acceptance, a reviewed price table, and an accepted conservative token bound')
+        if not isinstance(self.enabled_routines, (tuple, list)) or len(self.enabled_routines) > 20:
+            raise ValueError('browser_automation.enabled_routines must contain at most 20 exact routine references')
+        routine_refs = []
+        for item in self.enabled_routines:
+            if (not isinstance(item, dict) or item.keys() != {'routine_id', 'version', 'digest'}
+                    or not isinstance(item['routine_id'], str)
+                    or not re.fullmatch(r'[a-z][a-z0-9_]{0,47}', item['routine_id'])
+                    or type(item['version']) is not int or item['version'] < 1
+                    or not isinstance(item['digest'], str)
+                    or not re.fullmatch(r'[0-9a-f]{64}', item['digest'])):
+                raise ValueError('browser_automation.enabled_routines contains an invalid exact reference')
+            key = (item['routine_id'], item['version'])
+            if any((prior['routine_id'], prior['version']) == key for prior in routine_refs):
+                raise ValueError('browser_automation.enabled_routines contains a duplicate version')
+            routine_refs.append(dict(item))
+        if routine_refs and not self.enabled:
+            raise ValueError('browser_automation.enabled_routines requires browser automation to be enabled')
+        object.__setattr__(self, 'enabled_routines', tuple(routine_refs))
+
+
+@dataclass(frozen=True)
 class Config:
     camera: CameraConfig = field(default_factory=CameraConfig)
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    companion_context: CompanionContextConfig = field(default_factory=CompanionContextConfig)
     hold: HoldConfig = field(default_factory=HoldConfig)
     hands: HandConfig = field(default_factory=HandConfig)
     face: FaceConfig = field(default_factory=FaceConfig)
@@ -448,6 +661,8 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     ascend: AscendConfig = field(default_factory=AscendConfig)
     screen_audit: ScreenAuditConfig = field(default_factory=ScreenAuditConfig)
+    phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
+    browser_automation: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
 
 
 def load_config(path: Path) -> Config:
@@ -461,13 +676,15 @@ def load_config(path: Path) -> Config:
     if not isinstance(data, dict):
         raise ValueError('config must contain a YAML mapping')
     sections = {'camera': CameraConfig, 'detector': DetectorConfig,
-                'runtime': RuntimeConfig, 'hold': HoldConfig, 'hands': HandConfig,
+                'runtime': RuntimeConfig, 'companion_context': CompanionContextConfig,
+                'hold': HoldConfig, 'hands': HandConfig,
                 'face': FaceConfig, 'drowsiness': DrowsinessConfig, 'yawn': YawnConfig,
                 'posture': PostureConfig,
                 'storage': StorageConfig, 'sessions': SessionConfig, 'feedback': FeedbackConfig,
                 'dashboard': DashboardConfig, 'voice_commands': VoiceCommandConfig,
                 'llm': LLMConfig, 'ascend': AscendConfig,
-                'screen_audit': ScreenAuditConfig}
+                 'screen_audit': ScreenAuditConfig, 'phone_chat': PhoneChatConfig,
+                 'browser_automation': BrowserAutomationConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')
     values = {}
