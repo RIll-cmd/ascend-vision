@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from datetime import datetime, timezone
 import logging
 import time
+import uuid
 from typing import Any, Callable, Optional
 
 LOG = logging.getLogger(__name__)
@@ -19,33 +21,21 @@ class SensoryTriggerType(str, Enum):
 @dataclass(frozen=True)
 class BadHabitConfig:
     warning_text: str
-    habit_name: str
-    penalty_stat: str = "HP"
-    penalty_amount: int = 10
-    category: str = "DISCIPLINE"
+    behavior: str
 
 
 TRIGGER_CONFIGS: dict[SensoryTriggerType, BadHabitConfig] = {
     SensoryTriggerType.PHONE: BadHabitConfig(
         warning_text="Warning: Phone distraction detected. Focus on the task.",
-        habit_name="Doomscrolling",
-        penalty_stat="HP",
-        penalty_amount=10,
-        category="DISCIPLINE",
+        behavior="PHONE_USE",
     ),
     SensoryTriggerType.SLOUCH: BadHabitConfig(
         warning_text="Warning: Slouching detected. Please correct your posture.",
-        habit_name="Bad Posture",
-        penalty_stat="HP",
-        penalty_amount=10,
-        category="HEALTH",
+        behavior="SLOUCHING",
     ),
     SensoryTriggerType.FATIGUE: BadHabitConfig(
-        warning_text="Warning: Fatigue detected. Take a breather or stay alert.",
-        habit_name="Staying Up Late",
-        penalty_stat="HP",
-        penalty_amount=10,
-        category="HEALTH",
+        warning_text="Warning: Drowsiness detected. Please get some sleep.",
+        behavior="DROWSINESS",
     ),
 }
 
@@ -54,7 +44,7 @@ class WarningFirstStateMachine:
     """Implements a two-strike Warning-First State Machine for computer vision detectors:
 
     - Offense 1: Issue localized warning chime/voice alert and start 5-minute timer.
-    - Offense 2 (Within 5 minutes): Call Core composite bad habit recorder and speak canonical narration.
+    - Offense 2 (Within 5 minutes): Record a direct discipline penalty in Core.
     """
 
     REPEAT_WINDOW_SECONDS = 300.0  # 5 minutes
@@ -113,6 +103,8 @@ class WarningFirstStateMachine:
 
         self._last_trigger_times[trigger] = current_time
         last_warning = self._warning_times[trigger]
+        observed_at = datetime.now(timezone.utc)
+        event_id = str(uuid.uuid4())
 
         # Case 1: Offense 1 (First Warning, or previous warning expired past 5 minutes)
         if last_warning is None or (current_time - last_warning) > self.repeat_window_seconds:
@@ -121,9 +113,13 @@ class WarningFirstStateMachine:
             speak_announcement = getattr(self.feedback_service, "speak_announcement", None)
             if speak_announcement is not None:
                 speak_announcement(cfg.warning_text)
+            self._dispatch_event(cfg, "WARNING", event_id, observed_at, cfg.warning_text)
             return {
                 "offense": 1,
                 "trigger": trigger.value,
+                "behavior": cfg.behavior,
+                "stage": "WARNING",
+                "event_id": event_id,
                 "warning": cfg.warning_text,
                 "timestamp": current_time,
             }
@@ -131,58 +127,46 @@ class WarningFirstStateMachine:
         # Case 2: Offense 2 (Repeat Offense within 5 minutes)
         time_since_warning = current_time - last_warning
         LOG.info(
-            "OFFENSE 2: Trigger %s repeated within %.1fs (window=%.1fs) -> penalizing bad habit '%s'",
+            "OFFENSE 2: Trigger %s repeated within %.1fs (window=%.1fs) -> direct penalty",
             trigger.value,
             time_since_warning,
             self.repeat_window_seconds,
-            cfg.habit_name,
         )
         # Reset warning state so the next detection after cooldown starts a fresh cycle
         self._warning_times[trigger] = None
 
-        self._dispatch_bad_habit_offense(cfg)
+        self._dispatch_event(cfg, "PENALTY", event_id, observed_at, cfg.warning_text)
 
         return {
             "offense": 2,
             "trigger": trigger.value,
-            "habit_name": cfg.habit_name,
-            "penalty_stat": cfg.penalty_stat,
-            "penalty_amount": cfg.penalty_amount,
-            "category": cfg.category,
+            "behavior": cfg.behavior,
+            "stage": "PENALTY",
+            "event_id": event_id,
             "time_since_warning": time_since_warning,
             "timestamp": current_time,
         }
 
-    def _dispatch_bad_habit_offense(self, cfg: BadHabitConfig) -> None:
-        """Schedule record_bad_habit_offense on the async runner or loop."""
+    def _dispatch_event(self, cfg: BadHabitConfig, stage: str, event_id: str, observed_at: datetime, reason: str) -> None:
+        """Send a warning or penalty event without creating a habit."""
         speak_announcement = getattr(self.feedback_service, "speak_announcement", None)
         if self.core_client is None:
-            LOG.warning("Ascend Core client is not configured; cannot record bad habit offense.")
-            if speak_announcement is not None:
-                speak_announcement(
-                    f"Repeat offense detected: {cfg.habit_name}. Maintain discipline."
-                )
+            LOG.warning("Ascend Core client is not configured; cannot record discipline event.")
             return
 
         async def _record_and_speak():
             try:
-                result = await self.core_client.record_bad_habit_offense(
-                    name=cfg.habit_name,
-                    penalty_stat=cfg.penalty_stat,
-                    penalty_amount=cfg.penalty_amount,
-                    category=cfg.category,
+                result = await self.core_client.record_discipline_event(
+                    event_id=event_id, behavior=cfg.behavior, stage=stage,
+                    reason=reason, observed_at=observed_at,
                 )
-                canonical_narration = result.get("canonicalNarration")
+                canonical_narration = result.get("canonicalNarration") if stage == "PENALTY" else None
                 if canonical_narration and speak_announcement is not None:
                     LOG.info("Offense recorded. Speaking canonical narration: %s", canonical_narration)
                     speak_announcement(canonical_narration)
                 return result
             except Exception as exc:
-                LOG.error("Failed to record bad habit offense in Core: %s", exc)
-                if speak_announcement is not None:
-                    speak_announcement(
-                        f"Protocol breached for {cfg.habit_name}. Maintain vigilance."
-                    )
+                LOG.error("Failed to record discipline event in Core: %s", exc)
                 return None
 
         if self.async_runner is not None:

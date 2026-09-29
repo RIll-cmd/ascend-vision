@@ -694,13 +694,6 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         active_rec = manager._active_by_type.get(alert.event_type)
                         if active_rec is not None:
                             saved_id = active_rec[1]
-                            if warning_state_machine is not None:
-                                sm_type = (
-                                    SensoryTriggerType.SLOUCH
-                                    if alert.event_type in ('slouch', 'poor_posture')
-                                    else SensoryTriggerType.FATIGUE
-                                )
-                                warning_state_machine.handle_trigger(sm_type)
                             if feedback.enabled and manager.mode == 'focus':
                                 session_id, event_mode, metadata = database.feedback_context(saved_id)
                                 if event_mode == 'focus':
