@@ -235,6 +235,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             if base_url:
                 ascend_client = AscendClient(base_url, os.getenv(config.ascend.api_token_env),
                                               timeout_seconds=config.ascend.timeout_seconds,
+                                              status_credential=os.getenv("ASCEND_STATUS_CREDENTIAL"),
                                               health_path=config.ascend.health_path,
                                               command_path=config.ascend.command_path,
                                               event_path=config.ascend.event_path,
@@ -253,12 +254,14 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         core_bearer_token = (os.getenv("ASCEND_VISION_TOKEN") or os.getenv("ASCEND_API_TOKEN", "")).strip().strip('"')
         core_character_id = (os.getenv("ASCEND_CHARACTER_ID") or ascend_character_id or "").strip()
         core_device_id = (os.getenv("ASCEND_DEVICE_ID", "ascend-vision-desktop")).strip() or "ascend-vision-desktop"
+        core_status_credential = (os.getenv("ASCEND_STATUS_CREDENTIAL") or "").strip()
 
         core_client = AscendCoreVisionClient(
             base_url=core_base_url,
             bearer_token=core_bearer_token,
             character_id=core_character_id,
             device_id=core_device_id,
+            status_credential=core_status_credential,
         )
 
         warning_state_machine = WarningFirstStateMachine(
@@ -274,7 +277,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         )
 
         # Start Presence Heartbeat (every 25-30s)
-        if core_client is not None and core_character_id:
+        if core_client is not None and core_character_id and core_status_credential:
             def on_core_heartbeat(result):
                 state = result.get('status') if isinstance(result, dict) else None
                 with core_connection_lock:

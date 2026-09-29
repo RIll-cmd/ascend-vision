@@ -29,6 +29,7 @@ class AscendCoreVisionClient:
         character_id: str,
         device_id: str = "ascend-vision-client",
         timeout: float = 10.0,
+        status_credential: str | None = None,
     ):
         """
         Initialize the Ascend Core Client.
@@ -44,6 +45,7 @@ class AscendCoreVisionClient:
         self.character_id = character_id
         self.device_id = device_id
         self.timeout = timeout
+        self.status_credential = status_credential
         self.headers = {
             "Authorization": f"Bearer {bearer_token}",
             "Content-Type": "application/json",
@@ -62,9 +64,12 @@ class AscendCoreVisionClient:
             "deviceId": self.device_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "version": "1.0.0",
+            "state": "idle",
+            "stateSince": datetime.now(timezone.utc).isoformat(),
         }
+        headers = {**self.headers, "X-Status-Credential": self.status_credential or ""}
         async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout) as client:
-            res = await client.post("/api/integration/vision/heartbeat", headers=self.headers, json=payload)
+            res = await client.post("/api/integration/vision/heartbeat", headers=headers, json=payload)
             res.raise_for_status()
             return res.json()
 
@@ -283,4 +288,3 @@ class AscendCoreVisionClient:
                 f"Warning protocol breached: Negative habit '{name}' registered. Maintain vigilance."
             )
         return create_res
-

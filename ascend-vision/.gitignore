@@ -46,4 +46,25 @@ desktop.ini
 !.vscode/extensions.json
 .superpowers/
 **/.superpowers/
+.worktrees/
+**/.worktrees/
+
+# Local agent/IDE state (personal plugins and editor metadata)
+.agents/
+**/.agents/
+.codex/
+**/.codex/
+.cursor/
+**/.cursor/
+
+# Local credentials and one-off test/scratch directories
+**/.staging_worker_token
+.pytest-tmp-*/
+**/.pytest-tmp-*/
+codex-temp/
+**/codex-temp/
+.playwright-cli/
+**/.playwright-cli/
+test-results/
+playwright-report/
 

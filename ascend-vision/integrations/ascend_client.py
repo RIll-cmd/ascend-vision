@@ -53,7 +53,8 @@ class AscendClient:
                  automation_capabilities_path: str = "/api/automations/capabilities",
                  eligible_habits_path: str = "/api/automations/eligible-habits",
                   automation_validation_path: str = "/api/automations/proposals/validate",
-                  automations_path: str = "/api/automations",
+                 automations_path: str = "/api/automations",
+                 status_credential: str | None = None,
                   token_store: VisionTokenStore | None = None,
                   context_store: VisionContextStore | None = None,
                   opener: Callable = urlopen):
@@ -63,6 +64,7 @@ class AscendClient:
             raise ValueError("Ascend timeout must be positive")
         self.base_url = base_url.rstrip("/")
         self.api_token = api_token.strip() if api_token else None
+        self.status_credential = status_credential.strip() if status_credential else None
         self.timeout_seconds = timeout_seconds
         self.health_path = self._path(health_path)
         self.command_path = self._path(command_path)
@@ -130,8 +132,10 @@ class AscendClient:
             "deviceId": device_id.strip(),
             "timestamp": sent_at.isoformat(),
             "version": version.strip(),
+            "state": "idle",
+            "stateSince": sent_at.isoformat(),
         }
-        return self._vision_request("POST", "/api/integration/vision/heartbeat", payload)
+        return self._status_request("POST", "/api/integration/vision/heartbeat", payload)
 
     def send_event(self, event_type: str, payload: dict[str, Any], *, source: str,
                    timestamp: datetime | None = None, device_id: str | None = None,
@@ -255,12 +259,17 @@ class AscendClient:
                                 error="Vision authentication is required.")
         return result
 
+    def _status_request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> AscendResult:
+        if not self.status_credential:
+            return AscendResult(AscendConnectionState.CONFIG_ERROR, error="ASCEND_STATUS_CREDENTIAL is not configured")
+        return self._http_request(method, path, payload, status_credential=self.status_credential)
+
     def _user_request(self, method: str, path: str, payload: dict[str, Any] | None = None,
                       *, bearer_token: str) -> AscendResult:
         return self._http_request(method, path, payload, bearer_token=bearer_token)
 
     def _http_request(self, method: str, path: str, payload: dict[str, Any] | None = None, *,
-                      integration_key: str | None = None, bearer_token: str | None = None) -> AscendResult:
+                      integration_key: str | None = None, bearer_token: str | None = None, status_credential: str | None = None) -> AscendResult:
         body = json.dumps(payload, allow_nan=False).encode("utf-8") if payload is not None else None
         headers = {"Accept": "application/json"}
         if body is not None:
@@ -269,6 +278,8 @@ class AscendClient:
             headers["X-Integration-Key"] = integration_key
         if bearer_token:
             headers["Authorization"] = f"Bearer {bearer_token}"
+        if status_credential:
+            headers["X-Status-Credential"] = status_credential
         request = Request(f"{self.base_url}{path}", data=body, headers=headers, method=method)
         try:
             with self._opener(request, timeout=self.timeout_seconds) as response:

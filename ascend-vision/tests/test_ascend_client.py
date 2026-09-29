@@ -34,14 +34,14 @@ class VisionTokenStore:
         self.token = None
 
 
-def test_vision_heartbeat_uses_the_core_contract_and_stored_vision_token():
+def test_vision_heartbeat_uses_the_core_contract_and_bound_status_credential():
     requests = []
 
     def opener(request, timeout):
         requests.append((request, timeout))
         return FakeResponse(200, {'status': 'CONNECTED', 'source': 'ascend_vision'})
 
-    client = AscendClient('http://ascend.local:8000', 'integration-secret', opener=opener,
+    client = AscendClient('http://ascend.local:8000', 'integration-secret', status_credential='vision-1.secret', opener=opener,
                           token_store=VisionTokenStore())
     result = client.send_vision_heartbeat(
         character_id='character-1', device_id='ascend-vision', version='1.0.0',
@@ -52,11 +52,13 @@ def test_vision_heartbeat_uses_the_core_contract_and_stored_vision_token():
     payload = json.loads(request.data)
     assert result.state is AscendConnectionState.CONNECTED
     assert request.full_url == 'http://ascend.local:8000/api/integration/vision/heartbeat'
-    assert request.get_header('Authorization') == 'Bearer vision-jwt-secret'
+    assert request.get_header('Authorization') is None
+    assert request.get_header('X-status-credential') == 'vision-1.secret'
     assert request.get_header('X-integration-key') is None
     assert payload == {
         'source': 'ascend_vision', 'characterId': 'character-1', 'deviceId': 'ascend-vision',
         'timestamp': '2026-09-08T09:00:00+00:00', 'version': '1.0.0',
+        'state': 'idle', 'stateSince': '2026-09-08T09:00:00+00:00',
     }
     assert 'vision-jwt-secret' not in json.dumps(payload)
 
