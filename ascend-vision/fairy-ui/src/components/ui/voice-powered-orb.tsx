@@ -1,7 +1,8 @@
 "use client";
 
 import React, { FC } from "react";
-import { FairyEye, type FairyEyeProps, type EyeExpression } from "@/components/ui/fairy-eye";
+import { FairyEye, type EyeExpression } from "@/components/ui/fairy-eye";
+import type { EyeMode } from "@/lib/eye-animation";
 export type { EyeExpression };
 
 export interface VoicePoweredOrbProps {
@@ -9,7 +10,6 @@ export interface VoicePoweredOrbProps {
   hue?: number;
   enableVoiceControl?: boolean;
   voiceSensitivity?: number;
-  maxRotationSpeed?: number;
   maxHoverIntensity?: number;
   onVoiceDetected?: (detected: boolean) => void;
   // Extended Fairy features
@@ -25,25 +25,17 @@ export interface VoicePoweredOrbProps {
   expression?: EyeExpression;
   audioReactive?: boolean;
   speaking?: boolean;
+  motionMode?: EyeMode;
 }
 
 /**
- * VoicePoweredOrb upgraded with the canonical Fairy AI idle loop and speech amplification.
- * Features:
- * - Idle harmonic pendulum sway on the satellite dot
- * - 3-5% smooth concentric ring breathing (3-4s cycle)
- * - 4-corner aperture notch continuous micro-spin and organic wave displacement
- * - Real-time speech dilation boost (up to 25% aperture expansion)
- * - High-frequency acoustic waveform ripple across ring perimeters
- * - Satellite flare, bloom, and orbital acceleration during vocal spikes
- * - Asymmetric attack/decay audio smoothing and face tracking preservation
+ * Compatibility wrapper for the Fairy Eye's bounded gaze, blink, and speech motion.
  */
 export const VoicePoweredOrb: FC<VoicePoweredOrbProps> = ({
   className,
   hue = 0,
   enableVoiceControl = true,
   voiceSensitivity = 1.5,
-  maxRotationSpeed = 1.2,
   maxHoverIntensity = 0.8,
   onVoiceDetected,
   ...props
@@ -54,7 +46,6 @@ export const VoicePoweredOrb: FC<VoicePoweredOrbProps> = ({
       hue={hue}
       enableVoiceControl={enableVoiceControl}
       voiceSensitivity={voiceSensitivity}
-      maxRotationSpeed={maxRotationSpeed}
       maxHoverIntensity={maxHoverIntensity}
       onVoiceDetected={onVoiceDetected}
       {...props}
