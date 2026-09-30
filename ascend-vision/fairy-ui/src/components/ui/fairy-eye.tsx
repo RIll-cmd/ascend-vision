@@ -197,13 +197,26 @@ export function FairyEye({
     let observer: ResizeObserver | undefined;
     let frame = 0;
     const motionQuery = matchMedia('(prefers-reduced-motion: reduce)');
-    const lost = (event: Event) => { event.preventDefault(); mesh = undefined; setWebgl(false); };
-    const release = () => {
-      cancelAnimationFrame(frame); observer?.disconnect();
-      renderer?.gl.canvas.removeEventListener('webglcontextlost', lost);
-      geometry?.remove(); program?.remove();
-      renderer?.gl.getExtension('WEBGL_lose_context')?.loseContext();
-      renderer?.gl.canvas.remove();
+    const lost = (event: Event) => {
+      event.preventDefault();
+      releaseGL(true);
+      setWebgl(false);
+    };
+    const releaseGL = (contextLost: boolean) => {
+      const gl = renderer?.gl;
+      observer?.disconnect();
+      observer = undefined;
+      gl?.canvas.removeEventListener('webglcontextlost', lost);
+      if (gl && !contextLost && !gl.isContextLost()) {
+        geometry?.remove();
+        program?.remove();
+        gl.getExtension('WEBGL_lose_context')?.loseContext();
+      }
+      gl?.canvas.remove();
+      mesh = undefined;
+      geometry = undefined;
+      program = undefined;
+      renderer = undefined;
     };
 
     try {
@@ -229,7 +242,7 @@ export function FairyEye({
       observer = new ResizeObserver(resize); observer.observe(container); resize();
       gl.canvas.addEventListener('webglcontextlost', lost);
       setWebgl(true);
-    } catch { release(); mesh = undefined; setWebgl(false); }
+    } catch { releaseGL(false); setWebgl(false); }
 
     let previous = performance.now(), detected = false;
     let eyeMotion: EyeAnimationState | null = null;
@@ -338,7 +351,7 @@ export function FairyEye({
     };
 
     frame = requestAnimationFrame(render);
-    return () => { release(); latest.current.onVoiceDetected?.(false); };
+    return () => { cancelAnimationFrame(frame); releaseGL(false); latest.current.onVoiceDetected?.(false); };
   }, [mic.level]);
 
   const activePal = (expression ? EXPRESSIONS[expression]?.palette : undefined);

@@ -2,6 +2,102 @@ import { expect, test } from '@playwright/test';
 
 test.use({ video: 'on' });
 
+test('WebGL context loss releases the canvas and resize observer while SVG continues', async ({ page }) => {
+  await page.addInitScript(() => {
+    const OriginalObserver = window.ResizeObserver;
+    (window as any).eyeResizeDisconnected = false;
+    window.ResizeObserver = class extends OriginalObserver {
+      private eyeRenderer = false;
+      observe(target: Element, options?: ResizeObserverOptions) {
+        if (target.matches('[data-testid="fairy-renderer"]')) this.eyeRenderer = true;
+        return super.observe(target, options);
+      }
+      disconnect() {
+        if (this.eyeRenderer) (window as any).eyeResizeDisconnected = true;
+        return super.disconnect();
+      }
+    };
+  });
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto('/');
+  const canvas = page.getByTestId('fairy-renderer').locator('canvas');
+  await expect(canvas).toBeVisible();
+  await canvas.dispatchEvent('webglcontextlost', { bubbles: true, cancelable: true });
+  await expect(page.locator('.eye-fallback')).toBeVisible();
+  await expect(canvas).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).eyeResizeDisconnected)).toBe(true);
+  await expect.poll(() => page.locator('.eye-fallback > g').getAttribute('transform')).not.toBeNull();
+  expect(errors).toEqual([]);
+});
+
+test('thirty simulated seconds of speaking keep gaze and orientation fixed', async ({ page }) => {
+  await page.addInitScript(() => {
+    const callbacks = new Map<number, FrameRequestCallback>();
+    let frameId = 0;
+    let now = performance.now();
+    window.requestAnimationFrame = callback => {
+      const id = ++frameId;
+      callbacks.set(id, callback);
+      return id;
+    };
+    window.cancelAnimationFrame = id => { callbacks.delete(id); };
+    (window as any).advanceEyeFrames = (count: number) => {
+      const observations: { pupil: string | null; assembly: string }[] = [];
+      for (let frame = 0; frame < count; frame += 1) {
+        now += 1000 / 60;
+        const ready = [...callbacks.values()];
+        callbacks.clear();
+        ready.forEach(callback => callback(now));
+        const pupil = document.querySelector('.eye-fallback > g')?.getAttribute('transform') ?? null;
+        const assembly = (document.querySelector('.eye-visual') as HTMLElement | null)?.style.transform ?? '';
+        observations.push({ pupil, assembly });
+      }
+      return observations;
+    };
+    const original = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type: string, ...args: any[]) {
+      if (type.includes('webgl')) return null;
+      return (original as any).call(this, type, ...args);
+    } as any;
+  });
+  let speaking = false;
+  await page.route('**/api/fairy/state', route => route.fulfill({ json: {
+    mode: 'focus', cameraReady: true, audioLevel: speaking ? 0.95 : 0,
+    voiceEnabled: true, muted: false, speaking, elapsedSeconds: 3,
+    coreConnection: { configured: true, state: 'connected', lastCheckedAt: '2026-09-30T00:00:00Z' },
+  } }));
+  await page.route('**/api/fairy/chat/events**', route => route.fulfill({ json: { events: [], cursor: 0, sessionId: 'motion-gate' } }));
+  await page.goto('/?runtime=1');
+  await expect(page.locator('.eye-fallback')).toBeVisible();
+  await page.locator('.eye-stage').hover({ position: { x: 100, y: 200 } });
+  await page.evaluate(() => (window as any).advanceEyeFrames(120));
+  speaking = true;
+  await expect(page.getByRole('heading', { name: 'Fairy is speaking.' })).toBeVisible();
+  const observations = await page.evaluate(() => (window as any).advanceEyeFrames(30 * 60)) as {
+    pupil: string | null; assembly: string;
+  }[];
+  const values = observations.map(({ pupil }) => {
+    const match = pupil?.match(/^translate\(([-\d.e]+) ([-\d.e]+)\) translate\(200 200\) scale\(([-\d.e]+)\)/);
+    return match?.slice(1).map(Number);
+  });
+  expect(observations).toHaveLength(1800);
+  expect(values.every(value => value?.length === 3 && value.every(Number.isFinite))).toBe(true);
+  expect(Math.abs(values[0]![0])).toBeGreaterThan(1);
+  expect(values.every(value => Math.abs(value![0] - values[0]![0]) < 0.001 && Math.abs(value![1] - values[0]![1]) < 0.001)).toBe(true);
+  expect(values.every(value => value![2] >= 0.94 && value![2] <= 1.06)).toBe(true);
+  const peakFrames: number[] = [];
+  for (let frame = 2; frame < values.length; frame += 1) {
+    if (values[frame - 1]![2] > values[frame - 2]![2] && values[frame - 1]![2] >= values[frame]![2]) {
+      peakFrames.push(frame - 1);
+    }
+  }
+  expect(peakFrames.length).toBeGreaterThanOrEqual(20);
+  expect(peakFrames.length).toBeLessThanOrEqual(66);
+  expect(peakFrames.every((peak, index) => index === 0 || peak - peakFrames[index - 1] >= 60 / 2.2)).toBe(true);
+  expect(observations.every(({ assembly }) => assembly === observations[0].assembly)).toBe(true);
+});
+
 test('SVG fallback settles to a still eye when motion is reduced', async ({ page }) => {
   await page.addInitScript(() => {
     const original = HTMLCanvasElement.prototype.getContext;
