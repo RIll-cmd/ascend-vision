@@ -5,6 +5,73 @@ import { resolve } from 'node:path';
 test.use({ video: 'on' });
 const captureDir = resolve(process.cwd(), 'artifacts/fairy-eye-review');
 
+for (const renderer of ['webgl', 'fallback'] as const) {
+  test(`${renderer} catchlight stays fixed while the iris follows gaze`, async ({ page }) => {
+    if (renderer === 'fallback') {
+      await page.addInitScript(() => {
+        const original = HTMLCanvasElement.prototype.getContext;
+        HTMLCanvasElement.prototype.getContext = function (type: string, ...args: any[]) {
+          if (type.includes('webgl')) return null;
+          return (original as any).call(this, type, ...args);
+        } as any;
+      });
+    }
+    await page.goto('/');
+    const stage = page.locator('.eye-stage');
+    const box = await stage.boundingBox();
+    expect(box).not.toBeNull();
+    const readWebgl = async () => {
+      const shot = await page.locator('.eye-visual canvas').screenshot();
+      return page.evaluate(async src => {
+        const image = new Image();
+        image.src = src;
+        await image.decode();
+        const copy = document.createElement('canvas');
+        copy.width = image.width;
+        copy.height = image.height;
+        const context = copy.getContext('2d')!;
+        context.drawImage(image, 0, 0);
+        const { data, width, height } = context.getImageData(0, 0, copy.width, copy.height);
+        let lightX = 0, lightCount = 0, pupilX = 0, pupilCount = 0;
+        for (let y = Math.floor(height * .38); y < height * .62; y += 1) {
+          for (let x = Math.floor(width * .38); x < width * .62; x += 1) {
+            const index = (y * width + x) * 4;
+            const [r, g, b] = [data[index], data[index + 1], data[index + 2]];
+            if (r > 248 && g > 248 && b > 248) { lightX += x; lightCount += 1; }
+            if (r < 20 && g < 45 && b < 65) { pupilX += x; pupilCount += 1; }
+          }
+        }
+        return { lightX: lightX / lightCount, lightCount, pupilX: pupilX / pupilCount, pupilCount };
+      }, `data:image/png;base64,${shot.toString('base64')}`);
+    };
+    await page.waitForTimeout(500);
+    const before = renderer === 'webgl' ? await readWebgl() : {
+      lightBox: await page.locator('.eye-catchlight').boundingBox(),
+      pupilBox: await page.locator('.eye-pupil').boundingBox(),
+    };
+    await stage.hover({ position: { x: box!.width * .72, y: box!.height * .5 } });
+    await page.waitForTimeout(500);
+    const after = renderer === 'webgl' ? await readWebgl() : {
+      lightBox: await page.locator('.eye-catchlight').boundingBox(),
+      pupilBox: await page.locator('.eye-pupil').boundingBox(),
+    };
+    if (renderer === 'webgl') {
+      const first = before as Awaited<ReturnType<typeof readWebgl>>;
+      const second = after as typeof first;
+      expect(first.lightCount).toBeGreaterThan(10);
+      expect(second.lightCount).toBeGreaterThan(10);
+      expect(second.pupilX - first.pupilX).toBeGreaterThan(3);
+      expect(Math.abs(second.lightX - first.lightX)).toBeLessThan(2);
+    } else {
+      const first = before as { lightBox: { x: number } | null; pupilBox: { x: number } | null };
+      const second = after as typeof first;
+      expect(first.lightBox && second.lightBox && first.pupilBox && second.pupilBox).toBeTruthy();
+      expect(second.pupilBox!.x - first.pupilBox!.x).toBeGreaterThan(3);
+      expect(Math.abs(second.lightBox!.x - first.lightBox!.x)).toBeLessThan(1);
+    }
+  });
+}
+
 test('SVG eye exposes clipped sclera, iris, pupil, catchlight and both lids', async ({ page }) => {
   await page.addInitScript(() => {
     const original = HTMLCanvasElement.prototype.getContext;

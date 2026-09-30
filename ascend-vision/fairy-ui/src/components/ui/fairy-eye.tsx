@@ -106,9 +106,9 @@ void main() {
 
   float pupilRadius = clamp(0.16 + dilation * 0.018 - focused * 0.016, 0.11, 0.20);
   col = mix(col, vec3(0.016, 0.036, 0.055), disk(irisRadius, pupilRadius, 0.006));
-  vec2 reflection = irisPoint - vec2(-0.095, 0.115);
+  vec2 reflection = p - vec2(-0.095, 0.115);
   float catchlight = disk(length(reflection), 0.036, 0.008);
-  col = mix(col, mix(vec3(1.0), cCol, 0.12), catchlight);
+  col = mix(col, mix(vec3(1.0), cCol, 0.12), catchlight * irisMask);
 
   float closure = clamp((0.65 - lid) * 0.8 + blink * 0.9, 0.0, 1.0);
   float upperEdge = height - closure * 0.55 + p.x * lidSlant * 0.12;
@@ -342,8 +342,8 @@ export function FairyEye({
       <g ref={fallbackPupil} className="eye-iris-group" clipPath={`url(#${clipId})`}>
         <circle className="eye-iris" cx="200" cy="200" r="73" fill={`url(#${irisGradientId})`} stroke={activeBase} strokeWidth="2"/>
         <circle className="eye-pupil" cx="200" cy="200" r={32 + dilation * 4} fill="#07131f"/>
-        <ellipse className="eye-catchlight" cx="181" cy="177" rx="7" ry="9" fill="#f8fdff"/>
       </g>
+      <ellipse className="eye-catchlight" cx="181" cy="177" rx="7" ry="9" fill="#f8fdff" clipPath={`url(#${clipId})`}/>
       <g clipPath={`url(#${clipId})`}>
         <path ref={fallbackUpperLid} className="eye-upper-lid" fill="#07131f" stroke={activeGlow} strokeWidth="1"/>
         <path ref={fallbackLowerLid} className="eye-lower-lid" fill="#07131f" stroke={activeGlow} strokeWidth="1"/>
