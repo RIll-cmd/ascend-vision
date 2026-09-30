@@ -1,6 +1,93 @@
 import { expect, test } from '@playwright/test';
+import { mkdir } from 'node:fs/promises';
+import { resolve } from 'node:path';
 
 test.use({ video: 'on' });
+const captureDir = resolve(process.cwd(), 'artifacts/fairy-eye-review');
+
+test('SVG eye exposes clipped sclera, iris, pupil, catchlight and both lids', async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type: string, ...args: any[]) {
+      if (type.includes('webgl')) return null;
+      return (original as any).call(this, type, ...args);
+    } as any;
+  });
+  await page.goto('/');
+  const eye = page.locator('.eye-fallback');
+  await expect(eye.locator('.eye-sclera')).toBeVisible();
+  await expect(eye.locator('.eye-iris')).toBeVisible();
+  await expect(eye.locator('.eye-pupil')).toBeVisible();
+  await expect(eye.locator('.eye-catchlight')).toBeVisible();
+  await expect(eye.locator('.eye-upper-lid')).toBeVisible();
+  await expect(eye.locator('.eye-lower-lid')).toBeVisible();
+  await expect(eye.locator('.eye-iris-group')).toHaveAttribute('clip-path', /^url\(#.+\)$/);
+  await page.waitForTimeout(350);
+  await mkdir(captureDir, { recursive: true });
+  await page.screenshot({ path: resolve(captureDir, 'task3-fallback-desktop.png') });
+  const scleraFill = await eye.locator('.eye-sclera').getAttribute('fill');
+  await page.getByRole('button', { name: 'Eye appearance', exact: true }).click();
+  await page.getByRole('button', { name: 'Aurora theme' }).click();
+  expect(await eye.locator('.eye-sclera').getAttribute('fill')).toBe(scleraFill);
+});
+
+for (const renderer of ['webgl', 'fallback'] as const) {
+  test(`${renderer} anatomy captures neutral, listening, speaking and sleepy at desktop and 390px`, async ({ page }) => {
+    if (renderer === 'fallback') {
+      await page.addInitScript(() => {
+        const original = HTMLCanvasElement.prototype.getContext;
+        HTMLCanvasElement.prototype.getContext = function (type: string, ...args: any[]) {
+          if (type.includes('webgl')) return null;
+          return (original as any).call(this, type, ...args);
+        } as any;
+      });
+    }
+    let speaking = false;
+    let audioLevel = 0;
+    const errors: string[] = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.route('**/api/fairy/state', route => route.fulfill({ json: {
+      mode: 'focus', cameraReady: true, audioLevel,
+      voiceEnabled: true, muted: false, speaking, elapsedSeconds: 3,
+      coreConnection: { configured: true, state: 'connected', lastCheckedAt: '2026-09-30T00:00:00Z' },
+    } }));
+    await page.route('**/api/fairy/chat/events**', route => route.fulfill({ json: { events: [], cursor: 0, sessionId: 'anatomy-capture' } }));
+    await page.goto('/?runtime=1');
+    await page.getByRole('button', { name: 'Close chat panel' }).click();
+    await expect(page.locator(renderer === 'webgl' ? '.eye-visual canvas' : '.eye-fallback')).toBeVisible();
+    await mkdir(captureDir, { recursive: true });
+    const capture = async (state: string, size: string) => {
+      await page.waitForTimeout(350);
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({ path: resolve(captureDir, `task3-${renderer}-${state}-${size}.png`), fullPage: true });
+    };
+    for (const [size, width, height] of [['desktop', 1440, 1000], ['390', 390, 844]] as const) {
+      await page.setViewportSize({ width, height });
+      speaking = false;
+      audioLevel = 0;
+      await page.getByRole('button', { name: 'open expression', exact: true }).click();
+      await expect(page.getByRole('heading', { name: 'Here, with you.' })).toBeVisible();
+      await capture('neutral', size);
+
+      audioLevel = 0.8;
+      await page.locator('.eye-stage').hover({ position: { x: 100, y: 100 } });
+      await expect(page.getByRole('heading', { name: 'I’m listening.' })).toBeVisible();
+      await capture('listening', size);
+
+      speaking = true;
+      await expect(page.getByRole('heading', { name: 'Fairy is speaking.' })).toBeVisible();
+      await capture('speaking', size);
+
+      speaking = false;
+      audioLevel = 0;
+      await page.getByRole('button', { name: 'sleepy expression', exact: true }).click();
+      await expect(page.getByRole('img', { name: 'Fairy eye, an audio-reactive celestial iris' })).toHaveAttribute('data-expression', 'sleepy');
+      await capture('sleepy', size);
+      if (width === 390) expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    }
+    expect(errors).toEqual([]);
+  });
+}
 
 test('WebGL context loss releases the canvas and resize observer while SVG continues', async ({ page }) => {
   await page.addInitScript(() => {
@@ -27,7 +114,7 @@ test('WebGL context loss releases the canvas and resize observer while SVG conti
   await expect(page.locator('.eye-fallback')).toBeVisible();
   await expect(canvas).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).eyeResizeDisconnected)).toBe(true);
-  await expect.poll(() => page.locator('.eye-fallback > g').getAttribute('transform')).not.toBeNull();
+  await expect.poll(() => page.locator('.eye-iris-group').getAttribute('transform')).not.toBeNull();
   expect(errors).toEqual([]);
 });
 
@@ -49,7 +136,7 @@ test('thirty simulated seconds of speaking keep gaze and orientation fixed', asy
         const ready = [...callbacks.values()];
         callbacks.clear();
         ready.forEach(callback => callback(now));
-        const pupil = document.querySelector('.eye-fallback > g')?.getAttribute('transform') ?? null;
+        const pupil = document.querySelector('.eye-iris-group')?.getAttribute('transform') ?? null;
         const assembly = (document.querySelector('.eye-visual') as HTMLElement | null)?.style.transform ?? '';
         observations.push({ pupil, assembly });
       }
@@ -111,7 +198,7 @@ test('SVG fallback settles to a still eye when motion is reduced', async ({ page
   await page.locator('.eye-stage').hover({ position: { x: 30, y: 30 } });
   await page.getByRole('button', { name: 'Eye appearance', exact: true }).click();
   await page.getByLabel('Reduce eye motion').check();
-  await expect.poll(() => page.locator('.eye-fallback > g').getAttribute('transform'))
+  await expect.poll(() => page.locator('.eye-iris-group').getAttribute('transform'))
     .toMatch(/^translate\(0 0\) translate\(200 200\) scale\(1\)/);
 });
 
