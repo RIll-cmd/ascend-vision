@@ -73,6 +73,10 @@ class HandTracker:
             categories[0].category_name if categories else None
             for categories in getattr(result, 'handedness', ())
         )
+        self.last_confidences = tuple(
+            float(categories[0].score) if categories else None
+            for categories in getattr(result, 'handedness', ())
+        )
         height, width = frame.shape[:2]
         # z uses MediaPipe's width-relative scale; geometry intentionally uses x/y only.
         return [[(lm.x * width, lm.y * height, lm.z * width) for lm in hand]

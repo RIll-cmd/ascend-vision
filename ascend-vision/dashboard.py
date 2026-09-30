@@ -8,7 +8,6 @@ from pathlib import Path
 from urllib.parse import urlsplit
 import webbrowser
 
-from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, render_template, request
 
 from config import load_config
@@ -374,10 +373,19 @@ def create_app(config, chat_queue=None, memory_store=None, context_client=None,
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict) or set(payload) != {'text'}:
             return jsonify(error='A message is required.'), 400
+        text = payload['text']
+        if (not isinstance(text, str) or not text.strip()
+                or len(text.strip()) > queue.max_text_length):
+            return jsonify(error=f'Enter a message between 1 and {queue.max_text_length} characters.'), 400
+        session_id = queue.active_session_id()
+        if session_id is None:
+            return jsonify(error='Vision is not running; start Vision before sending a chat message.'), 503
         try:
-            message_id = queue.enqueue(payload['text'], source='dashboard')
+            message_id = queue.enqueue(text, source='dashboard', session_id=session_id)
         except ValueError:
             return jsonify(error='Enter a message between 1 and 4000 characters.'), 400
+        except RuntimeError:
+            return jsonify(error='Vision is restarting; please send your message again.'), 503
         except Exception as exc:
             LOG.warning('Dashboard chat enqueue failed (%s)', type(exc).__name__)
             return jsonify(error='Vision chat is temporarily unavailable.'), 503
@@ -409,6 +417,28 @@ def create_app(config, chat_queue=None, memory_store=None, context_client=None,
         } for row in replies]
         safe_cursor = replies[-1]['cursor'] if replies else cursor
         return jsonify(messages=messages, cursor=safe_cursor)
+
+    @app.get('/api/chat/events')
+    def poll_chat_events():
+        try:
+            if request.args.keys() - {'after'} or any(len(values) != 1 for _, values in request.args.lists()):
+                raise ValueError('Invalid cursor')
+            raw_cursor = request.args.get('after', '0')
+            if not raw_cursor.isascii() or not raw_cursor.isdecimal():
+                raise ValueError('Invalid cursor')
+            cursor = int(raw_cursor)
+            if cursor > 9_223_372_036_854_775_807:
+                raise ValueError('Invalid cursor')
+            session_id = queue.active_session_id()
+            events = queue.events_after(session_id, cursor) if session_id else []
+        except ValueError:
+            return jsonify(error='Cursor must be a non-negative integer.'), 400
+        except Exception as exc:
+            LOG.warning('Dashboard chat event poll failed (%s)', type(exc).__name__)
+            return jsonify(error='Vision chat is temporarily unavailable.'), 503
+        return jsonify(events=events,
+                       cursor=events[-1]['cursor'] if events else cursor,
+                       sessionId=session_id, aiStatus=queue.ai_status())
 
     @app.post('/api/chat/ack')
     def acknowledge_chat_replies():
@@ -677,13 +707,16 @@ def _clear_handoff_stores(token_store: VisionTokenStore, context_store: VisionCo
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Phone Watch habit dashboard (Phase 5)')
     parser.add_argument('--config', type=Path, default=Path(__file__).with_name('config.yaml'))
+    parser.add_argument('--env-file', type=Path,
+                        help='load provider credentials from this owner-managed env file')
     parser.add_argument('--port', type=int, help='override loopback HTTP port')
     parser.add_argument('--open-browser', action=argparse.BooleanOptionalAction, default=None)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     server = None
     try:
-        load_dotenv(args.config.parent / '.env', override=False)
+        from assistant.runtime_environment import load_runtime_environment
+        load_runtime_environment(args.config, args.env_file)
         config = load_config(args.config)
         options = config.dashboard
         if args.port is not None:

@@ -27,9 +27,16 @@ class FocusUI:
                        'elapsedSeconds': 0, 'faceTarget': None, 'phoneBox': None,
                        'hands': [], 'eyePoints': [], 'lipPoints': [],
                        'posture': None, 'fatigue': None, 'gesture': None,
-                       'emotion': 'neutral', 'lastHeard': ''}
+                       'emotion': 'neutral', 'lastHeard': '',
+                       'activePanel': None, 'activePanelSequence': 0, 'speakReplies': False,
+                       'coreConnection': {'configured': False, 'state': 'unconfigured',
+                                          'lastCheckedAt': None},
+                       'aiStatus': {'configured': False, 'state': 'unknown', 'provider': None,
+                                    'model': None, 'lastSuccessAt': None, 'lastFailure': None}}
         self._preview_until = 0.0
         self.commands: queue.Queue[str] = queue.Queue(maxsize=16)
+        self._chat_queue = None
+        self._runtime_session_id = None
         self._server = None
         self._thread = None
         self.app = self._create_app()
@@ -40,6 +47,7 @@ class FocusUI:
 
         @app.before_request
         def local_only():
+            request.max_content_length = 20_000 if request.path == '/api/fairy/chat' else 1_024
             origin = request.headers.get('Origin')
             if request.headers.get('Sec-Fetch-Site') == 'cross-site' or (origin and origin != request.host_url.rstrip('/')):
                 abort(403)
@@ -91,7 +99,8 @@ class FocusUI:
             if not isinstance(payload, dict) or set(payload) != {'command'}:
                 return jsonify(error='A command is required.'), 400
             value = payload['command']
-            if value not in ('toggle-focus', 'toggle-voice'):
+            if value not in ('toggle-focus', 'toggle-voice', 'toggle-speech',
+                             'toggle-chat-speech', 'stop-cancel'):
                 return jsonify(error='Unknown command.'), 400
             try:
                 self.commands.put_nowait(value)
@@ -99,7 +108,94 @@ class FocusUI:
                 return jsonify(error='Please wait for the previous command.'), 429
             return jsonify(queued=True), 202
 
+        @app.post('/api/fairy/chat')
+        def submit_chat():
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict) or set(payload) != {'text'}:
+                return jsonify(error='A message is required.'), 400
+            if self._chat_queue is None or self._runtime_session_id is None:
+                return jsonify(error='Vision chat is not ready.'), 503
+            try:
+                if self._chat_queue.active_session_id() != self._runtime_session_id:
+                    return jsonify(error='Vision is restarting; please send your message again.'), 503
+                message_id = self._chat_queue.enqueue(
+                    payload['text'], source='fairy', session_id=self._runtime_session_id,
+                )
+            except ValueError:
+                return jsonify(error='Enter a message between 1 and 4000 characters.'), 400
+            except RuntimeError:
+                return jsonify(error='Vision is restarting; please send your message again.'), 503
+            except Exception:
+                LOG.exception('Fairy chat enqueue failed')
+                return jsonify(error='Vision chat is temporarily unavailable.'), 503
+            return jsonify(messageId=message_id), 202
+
+        @app.get('/api/fairy/chat/events')
+        def chat_events():
+            if request.args.keys() - {'after'} or any(
+                    len(values) != 1 for _, values in request.args.lists()):
+                return jsonify(error='Invalid chat event cursor.'), 400
+            raw_cursor = request.args.get('after', '0')
+            if not raw_cursor.isascii() or not raw_cursor.isdecimal():
+                return jsonify(error='Cursor must be a non-negative integer.'), 400
+            cursor = int(raw_cursor)
+            if cursor > 9_223_372_036_854_775_807:
+                return jsonify(error='Cursor must be a non-negative integer.'), 400
+            if self._chat_queue is None or self._runtime_session_id is None:
+                return jsonify(events=[], cursor=cursor, sessionId=None)
+            try:
+                events = self._chat_queue.events_after(self._runtime_session_id, cursor)
+            except Exception:
+                LOG.exception('Fairy chat event poll failed')
+                return jsonify(error='Vision chat is temporarily unavailable.'), 503
+            return jsonify(events=events,
+                           cursor=events[-1]['cursor'] if events else cursor,
+                           sessionId=self._runtime_session_id)
+
         return app
+
+    def bind_chat(self, chat_queue, runtime_session_id: str):
+        """Connect the UI bridge to the active runtime-owned local conversation."""
+        self._chat_queue = chat_queue
+        self._runtime_session_id = runtime_session_id
+
+    def publish_core_connection(self, *, configured: bool, state: str,
+                                 last_checked_at: str | None = None):
+        if type(configured) is not bool or state not in {
+                'unconfigured', 'connecting', 'connected', 'reauth-required',
+                'offline', 'stale'}:
+            raise ValueError('invalid Core connection state')
+        with self._lock:
+            self._state['coreConnection'] = {
+                'configured': configured,
+                'state': state,
+                'lastCheckedAt': last_checked_at,
+            }
+
+    def publish_ai_status(self, status: dict):
+        if not isinstance(status, dict):
+            raise ValueError('AI status must be a mapping')
+        allowed_states = {'unknown', 'not-configured', 'configured-untested', 'requesting', 'available', 'request-failed'}
+        if status.get('state') not in allowed_states or type(status.get('configured')) is not bool:
+            raise ValueError('invalid AI status')
+        safe = {key: status.get(key) for key in (
+            'configured', 'state', 'provider', 'model', 'lastSuccessAt', 'lastFailure',
+        )}
+        for key in ('provider', 'model', 'lastFailure', 'lastSuccessAt'):
+            value = safe[key]
+            if value is not None and (not isinstance(value, str) or len(value) > 80):
+                raise ValueError('invalid AI status field')
+        with self._lock:
+            self._state['aiStatus'] = safe
+
+    def toggle_speak_replies(self) -> bool:
+        with self._lock:
+            self._state['speakReplies'] = not self._state['speakReplies']
+            return self._state['speakReplies']
+
+    def should_speak_replies(self) -> bool:
+        with self._lock:
+            return bool(self._state['speakReplies'])
 
     def publish(self, image, **state):
         """Called from the vision loop. No encoding/network I/O on that thread."""
@@ -123,7 +219,9 @@ class FocusUI:
             self._state['faceTarget'] = target
 
     def publish_telemetry(self, *, phone_box=None, hands=None, face_landmarks=None,
-                          posture=None, fatigue=None, gesture=None, emotion=None,
+                          posture=None, fatigue=None, gesture=None, active_panel=None,
+                          active_panel_sequence=None,
+                          emotion=None,
                           last_heard=None, width=640, height=480):
         """Serialize lightweight normalized detection telemetry for client-side HUD."""
         with self._lock:
@@ -172,6 +270,10 @@ class FocusUI:
                 self._state['fatigue'] = fatigue
             if gesture is not None:
                 self._state['gesture'] = gesture
+            if active_panel is not None:
+                self._state['activePanel'] = active_panel
+            if type(active_panel_sequence) is int and active_panel_sequence >= 0:
+                self._state['activePanelSequence'] = active_panel_sequence
             if emotion is not None:
                 self._state['emotion'] = emotion
             if last_heard is not None:

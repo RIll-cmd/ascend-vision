@@ -64,6 +64,9 @@ def _is_local_session(session_key: SessionKey | None) -> bool:
 class AssistantReply:
     text: str
     source: Literal["model", "offline", "tool"]
+    provider: str | None = None
+    model: str | None = None
+    failure_reason: str | None = None
 
 
 class AssistantService:
@@ -95,6 +98,10 @@ class AssistantService:
         self._turns: deque[tuple[str, str]] = deque(maxlen=12)
         self._suppress_session = False
         self._lock = threading.RLock()
+        self._ai_status_lock = threading.Lock()
+        self._ai_status = {"state": "unknown", "provider": None, "model": None,
+                           "lastSuccessAt": None, "lastFailure": None}
+        self._ai_status_publisher = None
 
     def respond(self, user_text, context=None, *, max_words=25,
                 session_key: SessionKey | None = None,
@@ -205,9 +212,20 @@ class AssistantService:
                 prompt_context = replace(prompt_context, laptop_context=None)
             try:
                 generator = self._get_generator()
-                answer = generator.generate_chat(text, prompt_context, max_words=max_words)
+                self._mark_ai_request_started()
+                typed_generate = getattr(generator, "generate_chat_result", None)
+                result = typed_generate(text, prompt_context, max_words=max_words) if callable(typed_generate) else None
+                answer = result.text if result is not None else generator.generate_chat(text, prompt_context, max_words=max_words)
                 if isinstance(answer, str) and answer.strip():
-                    reply = AssistantReply(answer.strip(), self._generator_source)
+                    source = result.source if result is not None else self._generator_source
+                    reply = AssistantReply(
+                        answer.strip(), source,
+                        provider=result.provider if result is not None else None,
+                        model=result.model if result is not None else None,
+                        failure_reason=(result.failure_reason if result is not None else
+                                        "not_configured" if source == "offline" else None),
+                    )
+                    self._record_ai_result(reply)
                     self._record_turn(
                         text, reply.text, memory_enabled and memory_ready, session_key=session_key,
                     )
@@ -219,10 +237,58 @@ class AssistantService:
             if not isinstance(fallback, str) or not fallback.strip():
                 raise RuntimeError("Assistant could not produce a reply")
             reply = AssistantReply(fallback.strip(), "offline")
+            self._record_ai_result(reply)
             self._record_turn(
                 text, reply.text, memory_enabled and memory_ready, session_key=session_key,
             )
             return reply
+
+    def ai_status(self) -> dict:
+        """Return safe operational evidence; key presence is not provider health."""
+        configured = False
+        if self._llm_config is not None:
+            configured = any(os.environ.get(name, "").strip() for name in (
+                self._llm_config.groq_api_key_env,
+                self._llm_config.cerebras_api_key_env,
+                self._llm_config.gemini_api_key_env,
+            ))
+        with self._ai_status_lock:
+            result = dict(self._ai_status)
+        if result["state"] == "unknown":
+            result["state"] = "configured-untested" if configured else "not-configured"
+        result["configured"] = configured
+        return result
+
+    def set_ai_status_publisher(self, publisher) -> None:
+        if publisher is not None and not callable(publisher):
+            raise TypeError("AI status publisher must be callable")
+        self._ai_status_publisher = publisher
+        self._emit_ai_status()
+
+    def _emit_ai_status(self) -> None:
+        if self._ai_status_publisher is None:
+            return
+        try:
+            self._ai_status_publisher(self.ai_status())
+        except Exception as exc:
+            LOG.debug("AI status publication failed (%s)", type(exc).__name__)
+
+    def _record_ai_result(self, reply: AssistantReply) -> None:
+        from datetime import datetime, timezone
+        with self._ai_status_lock:
+            if reply.source == "model":
+                self._ai_status = {
+                    "state": "available", "provider": reply.provider, "model": reply.model,
+                    "lastSuccessAt": datetime.now(timezone.utc).isoformat(), "lastFailure": None,
+                }
+            elif reply.source == "offline":
+                self._ai_status.update(state="request-failed", lastFailure=reply.failure_reason or "provider_error")
+        self._emit_ai_status()
+
+    def _mark_ai_request_started(self) -> None:
+        with self._ai_status_lock:
+            self._ai_status.update(state="requesting", lastFailure=None)
+        self._emit_ai_status()
 
     def _submit_browser_task(self, goal: str, session_key: SessionKey | None,
                              local_session: bool) -> AssistantReply:

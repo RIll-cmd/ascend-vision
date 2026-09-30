@@ -16,13 +16,18 @@ ERROR_REPLY = "Vision could not process that message right now."
 class ChatRuntimeBridge:
     """Dispatches each queued dashboard message through Vision's text handler."""
 
-    def __init__(self, queue: ChatIpcQueue, handler: Callable[[str], str | None], *, poll_seconds: float = 0.25):
+    def __init__(self, queue: ChatIpcQueue, handler: Callable[[str], str | None], *,
+                 poll_seconds: float = 0.25,
+                 message_handler: Callable[[dict], str | None] | None = None,
+                 on_reply: Callable[[dict, str], None] | None = None):
         if not callable(handler):
             raise TypeError("handler must be callable")
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
         self._queue = queue
         self._handler = handler
+        self._message_handler = message_handler
+        self._on_reply = on_reply
         self._poll_seconds = poll_seconds
         self._stop = threading.Event()
         self._lifecycle_lock = threading.Lock()
@@ -57,17 +62,23 @@ class ChatRuntimeBridge:
                 self._stop.wait(self._poll_seconds)
                 continue
             try:
-                result = self._handler(message["text"])
+                result = (self._message_handler(message) if self._message_handler is not None
+                          else self._handler(message["text"]))
                 if self._stop.is_set():
                     break
                 if not isinstance(result, str) or not result.strip():
                     raise ValueError("Chat handler returned no answer")
                 text = result.strip()
                 self._publish(message["message_id"], text, "reply")
-            except Exception:
+                if self._on_reply is not None:
+                    try:
+                        self._on_reply(message, text)
+                    except Exception:
+                        LOG.exception("Chat reply observer failed")
+            except Exception as exc:
                 if self._stop.is_set():
                     break
-                LOG.exception("Dashboard chat message handler failed")
+                LOG.warning("Local chat handler failed (%s)", type(exc).__name__)
                 try:
                     self._publish(message["message_id"], ERROR_REPLY, "error")
                 except Exception:

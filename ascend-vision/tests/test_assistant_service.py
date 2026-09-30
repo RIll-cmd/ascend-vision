@@ -33,6 +33,114 @@ def test_assistant_returns_the_provider_answer():
     assert generator.calls == [("Status?", None, 18)]
 
 
+def test_assistant_preserves_typed_model_provenance():
+    from llm_router import ChatGenerationResult
+
+    class TypedGenerator:
+        def generate_chat_result(self, *_args, **_kwargs):
+            return ChatGenerationResult(
+                text="I am Vision.", source="model", provider="gemini", model="gemini-test",
+            )
+
+    reply = AssistantService(FeedbackConfig(), LLMConfig(), generator=TypedGenerator()).respond("who are you")
+
+    assert reply.text == "I am Vision."
+    assert (reply.source, reply.provider, reply.model, reply.failure_reason) == (
+        "model", "gemini", "gemini-test", None,
+    )
+    assert AssistantService(FeedbackConfig(), LLMConfig(), generator=TypedGenerator()).ai_status()["state"] == "not-configured"
+
+
+def test_ai_status_tracks_failure_after_success_and_recovers_on_real_response():
+    from llm_router import ChatGenerationResult
+
+    class SequencedGenerator:
+        results = iter((
+            ChatGenerationResult("First answer", "model", "gemini", "gemini-test"),
+            ChatGenerationResult("AI is unavailable", "offline", failure_reason="timeout"),
+            ChatGenerationResult("Recovered answer", "model", "gemini", "gemini-test"),
+        ))
+
+        def generate_chat_result(self, *_args, **_kwargs):
+            return next(self.results)
+
+    service = AssistantService(FeedbackConfig(), LLMConfig(), generator=SequencedGenerator())
+    assert service.respond("first").source == "model"
+    first_success = service.ai_status()["lastSuccessAt"]
+    assert service.ai_status()["state"] == "available"
+    failed = service.respond("second")
+    assert failed.source == "offline"
+    assert failed.failure_reason == "timeout"
+    assert service.ai_status()["state"] == "request-failed"
+    assert service.ai_status()["lastSuccessAt"] == first_success
+    assert service.respond("third").source == "model"
+    assert service.ai_status()["state"] == "available"
+
+
+def test_ai_status_publisher_emits_requesting_and_result_states(monkeypatch):
+    from llm_router import ChatGenerationResult
+    for name in ("GEMINI_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+    class TypedGenerator:
+        def generate_chat_result(self, *_args, **_kwargs):
+            return ChatGenerationResult("Answer", "model", "gemini", "gemini-test")
+
+    updates = []
+    service = AssistantService(FeedbackConfig(), LLMConfig(), generator=TypedGenerator())
+    service.set_ai_status_publisher(updates.append)
+    service.respond("question")
+
+    assert [item["state"] for item in updates] == ["not-configured", "requesting", "available"]
+
+
+def test_unconfigured_identity_reply_is_honest_and_not_a_focus_roast(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+    reply = AssistantService(FeedbackConfig(), LLMConfig()).respond("who are u")
+
+    assert reply.source == "offline"
+    assert reply.failure_reason == "not_configured"
+    assert "Ascend Vision" in reply.text
+    assert "unavailable" in reply.text.lower()
+    assert "eyes back on the prize" not in reply.text.lower()
+
+
+def test_configured_key_is_reported_as_untested_until_a_real_response(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fixture-not-a-real-key")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+    service = AssistantService(FeedbackConfig(), LLMConfig())
+
+    status = service.ai_status()
+
+    assert status["state"] == "configured-untested"
+    assert status["configured"] is True
+    assert "fixture" not in str(status)
+
+
+def test_all_provider_failures_keep_offline_provenance_at_assistant_boundary(monkeypatch):
+    from llm_router import LLMRouter
+
+    for name in ("GEMINI_API_KEY", "CEREBRAS_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "fixture-not-a-real-key")
+    router = LLMRouter(LLMConfig())
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("fixture provider failure")
+    for method in ("_call_groq", "_call_cerebras", "_call_gemini"):
+        monkeypatch.setattr(router, method, fail)
+    monkeypatch.setattr("assistant.service.get_router", lambda *_args: router)
+
+    reply = AssistantService(FeedbackConfig(), LLMConfig()).respond("who are you")
+
+    assert reply.source == "offline"
+    assert reply.failure_reason == "provider_error"
+    assert "fixture provider failure" not in reply.text
+    assert "eyes back on the prize" not in reply.text.lower()
+
+
 def test_daily_review_uses_deterministic_local_summary_instead_of_llm():
     generator = Generator("the model must not calculate totals")
     service = AssistantService(

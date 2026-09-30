@@ -42,6 +42,37 @@ def test_controls_are_queued_for_main_thread_and_cross_origin_is_blocked():
     assert client.get('/api/fairy/state', headers={'Host': 'attacker.example'}).status_code == 400
 
 
+def test_fairy_chat_uses_runtime_queue_and_reads_session_events(tmp_path):
+    from integrations.chat_ipc import ChatIpcQueue
+
+    queue = ChatIpcQueue(tmp_path / 'chat.db')
+    queue.begin_session('vision-run')
+    ui = FocusUI()
+    ui.bind_chat(queue, 'vision-run')
+    client = ui.app.test_client()
+
+    response = client.post('/api/fairy/chat', json={'text': 'typed without a mic'})
+    assert response.status_code == 202
+    inbound = queue.receive_inbound()
+    assert inbound['source'] == 'fairy'
+    queue.publish_event('vision-run', turn_id=inbound['message_id'], source='fairy',
+                        kind='user', text=inbound['text'], status='received')
+    events = client.get('/api/fairy/chat/events?after=0').json
+    assert events['sessionId'] == 'vision-run'
+    assert events['events'][0]['text'] == 'typed without a mic'
+
+    queue.stop_accepting_session('vision-run')
+    late = client.post('/api/fairy/chat', json={'text': 'too late'})
+    assert late.status_code == 503
+    assert queue.receive_inbound() is None
+
+    ui.publish_core_connection(configured=True, state='offline',
+                               last_checked_at='2026-09-30T00:00:00+00:00')
+    state = client.get('/api/fairy/state').json
+    assert state['coreConnection']['state'] == 'offline'
+    queue.end_session('vision-run')
+
+
 def test_server_lifecycle_and_static_assets(tmp_path):
     (tmp_path / 'index.html').write_text('<title>Fairy test</title>')
     ui = FocusUI(build_dir=tmp_path)

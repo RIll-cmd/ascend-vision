@@ -194,3 +194,83 @@ def test_older_than_one_day_chat_rows_expire_but_fresh_pending_survives(tmp_path
     assert inbound["message_id"] == fresh_id
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT count(*) FROM chat_inbox WHERE message_id=?", (old_id,)).fetchone()[0] == 0
+
+
+def test_session_events_are_independent_reads_and_clear_when_session_ends(tmp_path):
+    queue = ChatIpcQueue(tmp_path / "chat.db")
+    queue.begin_session("runtime-one")
+
+    turn_id = queue.enqueue("hello from Fairy", source="fairy")
+    inbound = queue.receive_inbound()
+    assert inbound["session_id"] == "runtime-one"
+    queue.publish_event("runtime-one", turn_id=turn_id, source="fairy",
+                        kind="user", text="hello from Fairy", status="received")
+    queue.publish_event("runtime-one", turn_id=turn_id, source="fairy",
+                        kind="assistant", text="Hello back.", status="reply")
+
+    first_reader = queue.events_after("runtime-one", 0)
+    second_reader = queue.events_after("runtime-one", 0)
+    assert [event["text"] for event in first_reader] == ["hello from Fairy", "Hello back."]
+    assert second_reader == first_reader
+
+    queue.end_session("runtime-one")
+    assert queue.active_session_id() is None
+    assert queue.events_after("runtime-one", 0) == []
+    assert queue.receive_inbound() is None
+
+
+def test_chat_events_keep_reply_provenance_separate_from_input_channel(tmp_path):
+    queue = ChatIpcQueue(tmp_path / "chat.db")
+    queue.begin_session("runtime-one")
+    queue.publish_event("runtime-one", turn_id="turn-1", source="fairy", kind="assistant",
+                        text="A real reply", status="reply", reply_source="model",
+                        provider="gemini", model="gemini-test")
+
+    event = queue.events_after("runtime-one")[0]
+    assert event["source"] == "fairy"
+    assert event["reply_source"] == "model"
+    assert event["provider"] == "gemini"
+    assert event["model"] == "gemini-test"
+
+    with pytest.raises(ValueError, match="provenance"):
+        queue.publish_event("runtime-one", turn_id="turn-2", source="fairy", kind="user",
+                            text="secret", reply_source="model")
+
+
+def test_legacy_chat_event_table_is_migrated_additively(tmp_path):
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE chat_events (sequence INTEGER PRIMARY KEY, session_id TEXT NOT NULL, turn_id TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL)")
+        db.execute("INSERT INTO chat_events VALUES (1,'runtime-old','turn-old','voice','assistant','old','reply','2026-01-01T00:00:00Z')")
+
+    queue = ChatIpcQueue(path)
+
+    with sqlite3.connect(path) as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(chat_events)")}
+    assert {"reply_source", "provider", "model", "failure_reason"} <= columns
+    assert queue.events_after("runtime-old")[0]["reply_source"] is None
+
+
+def test_ai_status_starts_unknown_and_session_restart_clears_stale_success(tmp_path):
+    queue = ChatIpcQueue(tmp_path / "chat.db")
+    assert queue.ai_status()["state"] == "unknown"
+    queue.begin_session("runtime-one")
+    queue.publish_ai_status({"configured": True, "state": "available", "provider": "gemini",
+                             "model": "gemini-test", "lastSuccessAt": "2026-09-30T00:00:00Z"})
+    assert queue.ai_status()["state"] == "available"
+    queue.end_session("runtime-one")
+    assert queue.ai_status()["state"] == "unknown"
+
+
+def test_session_scoped_enqueue_rejects_restart_and_draining_races(tmp_path):
+    queue = ChatIpcQueue(tmp_path / "chat.db")
+    queue.begin_session("runtime-one")
+
+    with pytest.raises(RuntimeError, match="not accepting"):
+        queue.enqueue("stale session", source="fairy", session_id="runtime-old")
+
+    queue.stop_accepting_session("runtime-one")
+    with pytest.raises(RuntimeError, match="not accepting"):
+        queue.enqueue("late dashboard message", source="dashboard", session_id="runtime-one")
+    assert queue.receive_inbound() is None
+    queue.end_session("runtime-one")

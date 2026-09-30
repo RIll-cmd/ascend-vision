@@ -64,11 +64,13 @@ class PhoneDetector:
             raise ValueError('Model does not contain the COCO cell phone class')
 
     def detect(self, frame: np.ndarray) -> PhoneBox | None:
-        results = self.model.predict(source=frame, conf=self.config.confidence,
-                                     classes=[self.phone_class], imgsz=self.config.image_size,
-                                     device=self.config.device, verbose=False,
-                                     save=False, save_txt=False, save_crop=False,
-                                     show=False, stream=False)
+        import torch
+        with torch.inference_mode():
+            results = self.model.predict(source=frame, conf=self.config.confidence,
+                                         classes=[self.phone_class], imgsz=self.config.image_size,
+                                         device=self.config.device, verbose=False,
+                                         save=False, save_txt=False, save_crop=False,
+                                         show=False, stream=False)
         if not results or results[0].boxes is None:
             return None
         boxes = results[0].boxes

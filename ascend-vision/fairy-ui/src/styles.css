@@ -78,6 +78,36 @@ input[type=range] { width: 100%; margin: 14px 0; accent-color: #acd8ff; }
 .viewfinder-corner { position: absolute; width: 13px; height: 13px; pointer-events: none; border-color: #b0dfff88; }
 .viewfinder-corner.tl { left: 9px; top: 9px; border-left: 1px solid; border-top: 1px solid; }
 .viewfinder-corner.br { right: 9px; bottom: 9px; border-right: 1px solid; border-bottom: 1px solid; }
+.fairy-chat-panel { position: fixed; z-index: 8; top: 96px; right: 22px; bottom: 82px; width: min(390px, calc(100vw - 36px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid #80b9df35; border-radius: 20px; color: #dce8f3; background: linear-gradient(155deg, #102238f5, #07111ff5 72%); box-shadow: 0 24px 90px #0009, inset 0 1px #ffffff0b; backdrop-filter: blur(24px); animation: reveal .2s ease-out; }
+.fairy-chat-heading { display: flex; justify-content: space-between; align-items: center; padding: 18px 18px 13px; border-bottom: 1px solid #9ac8ed14; }
+.fairy-chat-heading h2 { margin: 5px 0 0; font: 300 22px 'Segoe UI Light', 'Segoe UI', sans-serif; letter-spacing: -.025em; }
+.chat-kicker { color: #82a4c2; font: 8px 'Consolas', monospace; letter-spacing: .16em; }
+.fairy-panel-nav { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; padding: 10px 12px; border-bottom: 1px solid #9ac8ed12; }
+.fairy-panel-nav button { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; border: 1px solid transparent; border-radius: 9px; color: #8ea5bc; background: #ffffff04; font: 9px 'Consolas', monospace; text-transform: capitalize; }
+.fairy-panel-nav button span { color: #a3d4f6; }
+.fairy-panel-nav button[aria-pressed=true] { color: #dcefff; border-color: #73b7e540; background: #61a8d815; }
+.fairy-panel-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; border-bottom: 1px solid #9ac8ed12; }
+.fairy-panel-note p { margin: 0; color: #91a6bb; font-size: 10px; line-height: 1.55; }
+.fairy-panel-note button { min-height: 32px; height: 32px; flex: 0 0 auto; font-size: 10px; }
+.fairy-chat-events { flex: 1; min-height: 80px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 15px 14px; scrollbar-color: #42617e55 transparent; }
+.fairy-chat-message { max-width: 92%; padding: 9px 11px; border: 1px solid #92b9d31c; border-radius: 13px 13px 13px 4px; background: #ffffff05; }
+.fairy-chat-message.user { align-self: flex-end; border-color: #84c5ed30; border-radius: 13px 13px 4px 13px; background: #4d94c11a; }
+.fairy-chat-message > span { color: #80a8c8; font: 8px 'Consolas', monospace; letter-spacing: .13em; }
+.fairy-chat-message p { margin: 5px 0 0; color: #d7e3ee; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.fairy-chat-empty, .fairy-chat-status { align-self: center; margin: auto 0; color: #8197ad; font-size: 11px; text-align: center; }
+.fairy-chat-status { margin: 0; color: #8bcaff; }
+.fairy-chat-compose { display: grid; gap: 8px; padding: 12px; border-top: 1px solid #9ac8ed18; background: #06101be0; }
+.fairy-chat-compose textarea { width: 100%; resize: vertical; min-height: 58px; max-height: 130px; padding: 10px 11px; border: 1px solid #8eb5d12b; border-radius: 11px; outline: none; color: #e2edf6; background: #07111d; font: 12px 'Segoe UI', sans-serif; }
+.fairy-chat-compose textarea:focus { border-color: #83caff88; box-shadow: 0 0 0 2px #72bce51c; }
+.fairy-chat-compose textarea::placeholder { color: #71869c; }
+.speak-replies-toggle { display: flex; align-items: center; gap: 7px; color: #93a8bd; font-size: 10px; }
+.speak-replies-toggle input { accent-color: #9bd5fb; }
+.fairy-chat-compose-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.fairy-chat-compose-footer span { color: #8197ad; font-size: 9px; line-height: 1.4; }
+.fairy-chat-compose-footer button { height: 34px; min-height: 34px; padding: 0 16px; font-size: 10px; }
+.fairy-chat-core-time { margin: 0; padding: 0 14px 9px; color: #8095aa; font: 8px 'Consolas', monospace; letter-spacing: .05em; }
+/* Keep the optional preview independently interactive beside the always-open chat. */
+.fairy-chat-panel ~ .camera-card { right: 430px; z-index: 9; }
 @keyframes reveal { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
 @media (min-height: 880px) { .presence { padding-top: 40px; } .bottom-area { padding-bottom: 40px; } }
 @media (max-width: 700px) {
@@ -89,5 +119,103 @@ input[type=range] { width: 100%; margin: 14px 0; accent-color: #acd8ff; }
   .footer { margin: 0 24px; gap: 12px; flex-wrap: wrap; font-size: 7px; } .footer .camera-status { font-size: 9px; }
   .camera-card { width: 235px; right: 20px; bottom: 155px; } .session-readout { gap: 9px; font-size: 7px; }
   .settings-panel { right: -8px; width: 278px; }
+  .fairy-chat-panel { top: 78px; right: 8px; bottom: 72px; width: calc(100vw - 16px); max-height: calc(100svh - 150px); border-radius: 17px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *:before, *:after { animation: none !important; transition: none !important; } }
+
+/* A stable reading desk: presence and conversation have separate surfaces. */
+.fairy-app.has-chat {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  column-gap: clamp(20px, 3vw, 48px);
+  min-height: 100svh;
+  height: auto;
+  padding-inline: clamp(20px, 3vw, 48px);
+  overflow: visible;
+}
+.has-chat .topbar { grid-column: 1 / -1; grid-row: 1; padding: 22px 0 14px; }
+.has-chat .presence { grid-column: 1; grid-row: 2; min-width: 0; padding: 12px 0; }
+.has-chat .eye-stage { width: min(400px, 37vw, 46svh); flex: none; }
+.has-chat .bottom-area { grid-column: 1; grid-row: 3; min-width: 0; padding: 6px 0 16px; }
+.has-chat .fairy-chat-panel {
+  position: relative;
+  grid-column: 2;
+  grid-row: 2 / span 2;
+  align-self: stretch;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  width: 100%;
+  height: min(650px, calc(100svh - 150px));
+  min-height: 420px;
+  max-height: none;
+  min-width: 0;
+  margin: 0 0 14px;
+}
+.has-chat .fairy-chat-events { min-height: 0; }
+.has-chat .footer { grid-column: 1 / -1; grid-row: 5; margin: 0; }
+.camera-card, .has-chat .fairy-chat-panel ~ .camera-card {
+  position: relative;
+  grid-column: 1;
+  grid-row: 4;
+  justify-self: center;
+  right: auto;
+  bottom: auto;
+  width: min(320px, 100%);
+  margin: 0 0 16px;
+}
+.top-status { flex-wrap: wrap; justify-content: flex-end; font: 12px 'Segoe UI', sans-serif; letter-spacing: 0; color: #c7d9e9; }
+.top-status > div { font: 12px 'Segoe UI', sans-serif; letter-spacing: 0; padding: 6px 10px; }
+.session-label, .listening-label, .session-readout { font-family: 'Segoe UI', sans-serif; font-size: 12px; letter-spacing: 0; color: #b8cce0; }
+.session-readout { margin-top: 18px; }
+.session-readout time { font: 600 13px 'Segoe UI', sans-serif; color: #e1edf7; font-variant-numeric: tabular-nums; }
+.control-hint { font-size: 12px; color: #b2c6d9; }
+.controls { flex-wrap: wrap; justify-content: center; max-width: 100%; }
+.controls > button, .controls .settings-anchor > button { min-width: 44px; min-height: 44px; height: 44px; }
+.controls > button { font-size: 13px; color: #d9e8f5; }
+.controls > button:first-child[aria-pressed=true] { color: #09213a; }
+.fairy-panel-nav button, .fairy-chat-compose-footer button, .fairy-chat-heading button { min-height: 44px; }
+.fairy-chat-compose-footer button { font-size: 13px; }
+.fairy-chat-compose textarea { font-size: 14px; }
+.fairy-chat-compose-footer span, .speak-replies-toggle { font-size: 12px; color: #a9bdd0; }
+.fairy-chat-message > span { font: 11px 'Segoe UI', sans-serif; letter-spacing: 0; color: #a9c9e2; }
+.fairy-chat-message p { font-size: 14px; }
+.fairy-chat-empty, .fairy-chat-status { font-size: 13px; }
+.fairy-app :is(button, a, textarea, input):focus-visible { outline: 2px solid #a6dcff; outline-offset: 3px; }
+
+@media (max-width: 900px) {
+  .fairy-app.has-chat { display: flex; flex-direction: column; min-height: 100svh; padding-inline: 16px; }
+  .has-chat .topbar { padding: 18px 0 8px; gap: 12px; flex-wrap: wrap; }
+  .has-chat .presence { flex: none; padding: 6px 0 0; }
+  .has-chat .eye-stage { width: min(250px, 66vw, 36svh); margin: 2px 0; }
+  .has-chat .presence-copy { margin-top: 0; }
+  .has-chat .presence-copy p { max-width: 34ch; }
+  .has-chat .session-readout { margin-top: 12px; }
+  .has-chat .bottom-area { padding: 8px 0 18px; width: 100%; }
+  .has-chat .controls { width: 100%; }
+  .has-chat .fairy-chat-panel {
+    flex: none;
+    align-self: stretch;
+    width: 100%;
+    height: min(520px, max(380px, 60svh));
+    min-height: 380px;
+    margin: 0 0 16px;
+  }
+  .has-chat .footer { margin: 0; padding: 16px 0 20px; }
+  .has-chat .camera-card { align-self: center; }
+}
+@media (max-width: 500px) {
+  .top-status { justify-content: flex-start; font-size: 12px; }
+  .top-status > div { font-size: 11px; }
+  .has-chat .eye-stage { width: min(230px, 62vw, 30svh); }
+  .has-chat .controls > button { padding-inline: 9px; }
+  .settings-panel { width: min(300px, calc(100vw - 32px)); }
+}
+
+/* Keep navigation and context labels readable; reserve tiny monospace for diagnostics. */
+.chat-kicker { color: #a9c9e2; font: 11px 'Segoe UI', sans-serif; letter-spacing: .04em; }
+.fairy-panel-nav button { min-height: 44px; font: 12px 'Segoe UI', sans-serif; }
+.fairy-panel-nav button span { color: #b9dff8; font: 600 11px 'Segoe UI', sans-serif; }
+.footer { color: #b1c6d9; font: 11px 'Segoe UI', sans-serif; letter-spacing: 0; }
+.footer .camera-status { color: #b1c6d9; font: 11px 'Segoe UI', sans-serif; }

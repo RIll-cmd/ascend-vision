@@ -47,6 +47,21 @@ def test_dashboard_starts_without_database_and_serves_only_local_assets(client):
     assert client.post('/api/stats').status_code == 405
 
 
+def test_dashboard_chat_events_include_current_ai_status_without_provider_secrets(tmp_path):
+    queue = ChatIpcQueue(tmp_path/'chat_ipc.db')
+    queue.begin_session('runtime-test')
+    queue.publish_ai_status({'configured': True, 'state': 'configured-untested'})
+    config = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    app = create_app(config, chat_queue=queue)
+    app.config['TESTING'] = True
+
+    payload = app.test_client().get('/api/chat/events?after=0').json
+
+    assert payload['aiStatus']['state'] == 'configured-untested'
+    assert payload['aiStatus']['configured'] is True
+    assert 'key' not in str(payload).lower()
+
+
 def test_local_status_response_never_contains_token(monkeypatch, client):
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
     monkeypatch.setenv('ASCEND_BASE_URL', 'http://localhost:8000')
@@ -371,6 +386,7 @@ def test_rebinding_and_cross_site_reads_rejected(client):
 
 def test_chat_message_is_enqueued_and_returns_only_its_safe_id(tmp_path):
     queue = ChatIpcQueue(tmp_path/'chat.db')
+    queue.begin_session('dashboard-test')
     cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
     chat_client = create_app(cfg, chat_queue=queue).test_client()
 
@@ -382,6 +398,18 @@ def test_chat_message_is_enqueued_and_returns_only_its_safe_id(tmp_path):
     assert inbound['message_id'] == response.json['messageId']
     assert inbound['source'] == 'dashboard'
     assert inbound['text'] == 'Help me focus'
+
+
+def test_chat_message_is_rejected_when_vision_is_not_running(tmp_path):
+    queue = ChatIpcQueue(tmp_path/'chat.db')
+    cfg = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
+    client = create_app(cfg, chat_queue=queue).test_client()
+
+    response = client.post('/api/chat/messages', json={'text': 'hello'})
+
+    assert response.status_code == 503
+    assert response.json == {'error': 'Vision is not running; start Vision before sending a chat message.'}
+    assert queue.receive_inbound() is None
 
 
 @pytest.mark.parametrize('payload', [
@@ -644,7 +672,11 @@ def test_cli_loads_dotenv_beside_selected_config_before_starting_server(monkeypa
         return Server()
 
     config = Config(storage=StorageConfig(database=tmp_path/'watch.db'))
-    monkeypatch.setattr('dashboard.load_dotenv', fake_load_dotenv)
+    def fake_load_environment(selected_config, env_file=None):
+        loaded_dotenv.append((selected_config.parent/'.env', False))
+        startup_order.append('dotenv')
+
+    monkeypatch.setattr('assistant.runtime_environment.load_runtime_environment', fake_load_environment)
     monkeypatch.setattr('dashboard.load_config', lambda path: config)
     monkeypatch.setattr('waitress.create_server', fake_create_server)
 

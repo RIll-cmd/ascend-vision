@@ -25,41 +25,31 @@ test('spring stays bounded and returns to rest after border pressure', () => {
 
 test('eye motion remains finite and bounded through thirty seconds of activity', () => {
   let previous: EyeAnimationState | null = null;
-  const speechPeaks: number[] = [];
-  let lastScale = 1;
-  let rising = false;
 
   for (let frame = 0; frame < 30 * 60; frame += 1) {
     const mode: EyeMode = frame < 600 ? 'idle' : frame < 1200 ? 'speaking' : 'listening';
     const state = stepEyeAnimation(previous, {
       mode, audioLevel: frame % 2, gaze: { x: 1, y: -1 }, reducedMotion: false,
     }, 1000 / 60);
-    for (const value of [state.irisScale, state.glow, state.blink, state.gaze.x, state.gaze.y]) {
+    for (const value of [state.irisScale, state.glow, state.blink, state.gaze.x, state.gaze.y, state.ringRotation]) {
       expect(Number.isFinite(value)).toBe(true);
     }
+    expect(state.ringRotation).toBeGreaterThanOrEqual(0);
+    expect(state.ringRotation).toBeLessThan(2 * Math.PI);
     expect(state.irisScale).toBeGreaterThanOrEqual(0.94);
     expect(state.irisScale).toBeLessThanOrEqual(1.06);
     expect(state.glow).toBeGreaterThanOrEqual(0);
     expect(state.glow).toBeLessThanOrEqual(1);
     expect(state.blink).toBeGreaterThanOrEqual(0);
     expect(state.blink).toBeLessThanOrEqual(1);
-    if (mode === 'speaking') {
-      const nowRising = state.irisScale > lastScale;
-      if (rising && !nowRising) speechPeaks.push(frame / 60);
-      rising = nowRising;
-    }
-    lastScale = state.irisScale;
     previous = state;
   }
-
-  expect(speechPeaks.length).toBeGreaterThanOrEqual(10);
-  expect(speechPeaks.length).toBeLessThanOrEqual(22);
-  expect(speechPeaks.every((peak, index) => index === 0 || peak - speechPeaks[index - 1] >= 1 / 2.2)).toBe(true);
 });
 
-test('speech ends smoothly and microphone input cannot drive speech motion', () => {
+test('speaking keeps the eye still and microphone input cannot drive it', () => {
   let quiet: EyeAnimationState | null = null;
   let loud: EyeAnimationState | null = null;
+  let speakingReference: EyeAnimationState | null = null;
   for (let frame = 0; frame < 30 * 60; frame += 1) {
     const mode: EyeMode = frame < 900 ? 'speaking' : 'idle';
     const nextQuiet = stepEyeAnimation(quiet, {
@@ -69,9 +59,16 @@ test('speech ends smoothly and microphone input cannot drive speech motion', () 
       mode, audioLevel: frame % 2 ? 99 : -99,
       gaze: { x: 0.8, y: -0.6 }, reducedMotion: false,
     }, 1000 / 60);
-    expect(Math.abs(nextQuiet.irisScale - (quiet?.irisScale ?? 1))).toBeLessThanOrEqual(0.01);
     expect(nextQuiet.irisScale).toBe(nextLoud.irisScale);
     expect(nextQuiet.glow).toBe(nextLoud.glow);
+    if (mode === 'speaking') {
+      if (speakingReference === null) speakingReference = nextQuiet;
+      else expect([nextQuiet.irisScale, nextQuiet.glow, nextQuiet.blink, nextQuiet.gaze]).toEqual([
+        speakingReference.irisScale, speakingReference.glow, speakingReference.blink, speakingReference.gaze,
+      ]);
+    } else {
+      expect(Math.abs(nextQuiet.irisScale - quiet!.irisScale)).toBeLessThanOrEqual(0.01);
+    }
     quiet = nextQuiet;
     loud = nextLoud;
   }
@@ -128,4 +125,63 @@ test('listening input levels and gaze stay bounded when telemetry is invalid', (
   expect(Number.isFinite(high.gaze.x)).toBe(true);
   expect(Number.isFinite(high.gaze.y)).toBe(true);
   expect(Math.abs(high.gaze.x)).toBeLessThanOrEqual(1);
+});
+
+test('idle eye attention stays inside two percent and listening gaze is bounded at common frame rates', () => {
+  for (const fps of [30, 60, 120]) {
+    let state: EyeAnimationState | null = null;
+    const step = 1000 / fps;
+    for (let frame = 0; frame < 9 * fps; frame += 1) {
+      state = stepEyeAnimation(state, {
+        mode: 'idle', audioLevel: 0, gaze: { x: 1, y: -1 }, reducedMotion: false,
+      }, step);
+      expect(Math.hypot(state.gaze.x, state.gaze.y)).toBeLessThanOrEqual(.18);
+    }
+    state = stepEyeAnimation(state, {
+      mode: 'listening', audioLevel: 0, gaze: { x: 1, y: -1 }, reducedMotion: false,
+    }, step);
+    expect(Math.hypot(state.gaze.x, state.gaze.y)).toBeLessThanOrEqual(.2 * Math.SQRT2);
+  }
+});
+
+test('idle gaze uses deterministic timing and returns to center between glances', () => {
+  const run = () => {
+    let state: EyeAnimationState | null = null;
+    const snapshots: { x: number; y: number }[] = [];
+    for (let frame = 0; frame < 15 * 60; frame += 1) {
+      state = stepEyeAnimation(state, {
+        mode: 'idle', audioLevel: 0, gaze: { x: 0, y: 0 }, reducedMotion: false,
+      }, 1000 / 60);
+      if (frame % 60 === 0) snapshots.push(state.gaze);
+    }
+    return snapshots;
+  };
+  expect(run()).toEqual(run());
+  expect(run().some(gaze => Math.hypot(gaze.x, gaze.y) > .01)).toBe(true);
+});
+
+test('face tracking visibly moves the inner eye while staying inside its socket', () => {
+  const face = stepEyeAnimation(null, {
+    mode: 'idle', audioLevel: 0, gaze: { x: 0.8, y: -0.4 }, faceTracking: true, reducedMotion: false,
+  }, 50);
+  const pointer = stepEyeAnimation(null, {
+    mode: 'idle', audioLevel: 0, gaze: { x: 0.8, y: -0.4 }, reducedMotion: false,
+  }, 50);
+
+  expect(face.gaze.x).toBeGreaterThan(pointer.gaze.x * 2);
+  expect(face.gaze.y).toBeLessThan(pointer.gaze.y * 2);
+  expect(Math.hypot(face.gaze.x, face.gaze.y)).toBeLessThanOrEqual(0.42);
+});
+
+test('spiked ring turns slowly during activity and holds its angle while speaking or reduced', () => {
+  const input = { mode: 'idle' as const, audioLevel: 0, gaze: { x: 0, y: 0 }, reducedMotion: false };
+  const initial = stepEyeAnimation(null, input, 50);
+  const moving = stepEyeAnimation(initial, input, 50);
+  const speaking = stepEyeAnimation(moving, { ...input, mode: 'speaking' }, 50);
+  const reduced = stepEyeAnimation(moving, { ...input, reducedMotion: true }, 50);
+
+  expect(moving.ringRotation).toBeGreaterThan(initial.ringRotation);
+  expect(moving.ringRotation - initial.ringRotation).toBeCloseTo(50 * 2 * Math.PI / 12_000, 8);
+  expect(speaking.ringRotation).toBe(moving.ringRotation);
+  expect(reduced.ringRotation).toBe(moving.ringRotation);
 });

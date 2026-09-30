@@ -46,7 +46,7 @@ test('AI HUD overlays targeting reticle and responds to posture & phone telemetr
   await page.goto('/?runtime=1');
 
   // Verify topbar gesture status badge
-  await expect(page.locator('.topbar')).toContainText('5 FINGERS');
+  await expect(page.locator('.topbar')).toContainText('5 fingers');
 
   // Verify Dynamic Island subtitle toast
   await expect(page.getByTestId('dynamic-island')).toBeVisible();
@@ -87,6 +87,7 @@ test('all 10 expanded expressions are selectable and render on the eye without e
   });
 
   await page.goto('/');
+  await page.getByRole('button', { name: 'Eye appearance', exact: true }).click();
   const eye = page.getByRole('img', { name: 'Fairy eye, an audio-reactive celestial iris' });
 
   const expressions = ['open', 'happy', 'sleepy', 'sad', 'focus', 'stern', 'curious', 'surprised', 'half', 'squint'];
@@ -102,6 +103,7 @@ test('all 10 expanded expressions are selectable and render on the eye without e
 
 test('mood colors dynamically update according to mood specifications', async ({ page }) => {
   await page.goto('/');
+  await page.getByRole('button', { name: 'Eye appearance', exact: true }).click();
   const eye = page.getByRole('img', { name: 'Fairy eye, an audio-reactive celestial iris' });
 
   // 1. angry = red
@@ -136,10 +138,10 @@ test('mood colors dynamically update according to mood specifications', async ({
   await expect(eye).toHaveAttribute('data-expression', 'disappointed');
   await expect(page.locator('main.fairy-app')).toHaveCSS('--fairy-glow', '#8f9baa');
 
-  // 6. normal = original color (celestial theme glow #58bcff)
+  // 6. normal = ZZZ-inspired Celestial theme glow #2937d7
   const normalBtn = page.getByRole('button', { name: 'open expression', exact: true });
   await normalBtn.click();
   await expect(eye).toHaveAttribute('data-expression', 'open');
-  await expect(page.locator('main.fairy-app')).toHaveCSS('--fairy-glow', '#58bcff');
+  await expect(page.locator('main.fairy-app')).toHaveCSS('--fairy-glow', '#2937d7');
 });
 

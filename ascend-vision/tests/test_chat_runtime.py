@@ -125,3 +125,115 @@ def test_runtime_recovers_from_transient_queue_read_error(tmp_path, monkeypatch)
         assert queue.replies_after()[0]["text"] == "Recovered"
     finally:
         bridge.stop()
+
+
+def test_local_conversation_uses_one_laptop_session_and_publishes_both_turns(tmp_path):
+    from types import SimpleNamespace
+
+    from assistant.local_conversation import LocalConversation
+
+    class Assistant:
+        def __init__(self):
+            self.calls = []
+
+        def respond(self, text, context, *, max_words, session_key):
+            self.calls.append((text, context, max_words, session_key))
+            return SimpleNamespace(text=f"reply to {text}", source="model", provider="gemini", model="gemini-test")
+
+    queue = ChatIpcQueue(tmp_path / "chat.db")
+    assistant = Assistant()
+    conversation = LocalConversation(
+        queue, assistant, lambda text: {"query": text},
+        session_key=("local", "voice", "focus-1"), max_words=30,
+    )
+    conversation.start()
+    try:
+        for source, text in (("voice", "first"), ("fairy", "second")):
+            message_id = conversation.enqueue(text, source=source)
+            message = queue.receive_inbound()
+            assert message["message_id"] == message_id
+            assert conversation.handle_message(message) == f"reply to {text}"
+
+        assert [call[3] for call in assistant.calls] == [
+            ("local", "voice", "focus-1"), ("local", "voice", "focus-1")]
+        events = conversation.events_after()
+        assert [event["kind"] for event in events] == [
+            "user", "status", "assistant", "user", "status", "assistant"]
+        assert events[2]["reply_source"] == "model"
+        assert events[2]["provider"] == "gemini"
+    finally:
+        conversation.close()
+    assert conversation.events_after() == []
+
+
+def test_local_conversation_accepts_real_groq_model_id_when_publishing_reply(tmp_path):
+    from types import SimpleNamespace
+
+    from assistant.local_conversation import LocalConversation
+
+    class Assistant:
+        def respond(self, text, _context, *, max_words, session_key):
+            return SimpleNamespace(
+                text="I’m Ascend Vision.", source="model", provider="groq",
+                model="qwen/qwen3.8-27b",
+            )
+
+    queue = ChatIpcQueue(tmp_path / "chat.db")
+    conversation = LocalConversation(
+        queue, Assistant(), lambda _text: None,
+        session_key=("local", "voice", "focus-1"),
+    )
+    conversation.start()
+    try:
+        message_id = conversation.enqueue("Who are you?", source="dashboard")
+        message = queue.receive_inbound()
+
+        assert message["message_id"] == message_id
+        assert conversation.handle_message(message) == "I’m Ascend Vision."
+        reply = conversation.events_after()[-1]
+        assert (reply["kind"], reply["status"], reply["provider"], reply["model"]) == (
+            "assistant", "reply", "groq", "qwen/qwen3.8-27b",
+        )
+    finally:
+        conversation.close()
+
+
+def test_shutdown_closes_http_admission_while_assistant_turn_is_still_running(tmp_path):
+    from types import SimpleNamespace
+
+    from focus_ui import FocusUI
+    from assistant.local_conversation import LocalConversation
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowAssistant:
+        def respond(self, text, _context, *, max_words, session_key):
+            entered.set()
+            assert release.wait(2.0)
+            return SimpleNamespace(text="Finished")
+
+    queue = ChatIpcQueue(tmp_path / "chat.db")
+    conversation = LocalConversation(
+        queue, SlowAssistant(), lambda text: {"query": text},
+        session_key=("local", "voice", "focus-1"),
+    )
+    conversation.start()
+    ui = FocusUI()
+    ui.bind_chat(queue, conversation.runtime_session_id)
+    client = ui.app.test_client()
+    queue.enqueue("slow turn", source="voice", session_id=conversation.runtime_session_id)
+    message = queue.receive_inbound()
+    worker = threading.Thread(target=conversation.handle_message, args=(message,))
+    worker.start()
+    try:
+        assert entered.wait(1.0)
+        conversation.stop_accepting()
+        response = client.post('/api/fairy/chat', json={'text': 'arrived during shutdown'})
+        assert response.status_code == 503
+        assert queue.receive_inbound() is None
+    finally:
+        release.set()
+        worker.join(timeout=2.0)
+        conversation.close()
+    assert not worker.is_alive()

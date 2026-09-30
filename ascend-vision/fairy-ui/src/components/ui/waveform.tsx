@@ -54,8 +54,19 @@ export const Waveform = React.forwardRef<HTMLDivElement, WaveformProps>(
 
     React.useEffect(() => {
       let rafId: number;
+      const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+      const staticHeights = () => {
+        const effectiveLevel = active ? Math.max(0.04, level) : 0.04;
+        const height = variant === 'muted' ? 2 : Math.max(2, Math.round(2 + (maxHeight - 2) * effectiveLevel * 0.55));
+        setHeights(Array.from({ length: bars }, () => height));
+      };
 
       const animate = () => {
+        if (motionQuery.matches) {
+          staticHeights();
+          return;
+        }
         frameRef.current++;
         const f = frameRef.current;
 
@@ -100,8 +111,17 @@ export const Waveform = React.forwardRef<HTMLDivElement, WaveformProps>(
         rafId = requestAnimationFrame(animate);
       };
 
+      const onMotionChange = () => {
+        cancelAnimationFrame(rafId);
+        if (motionQuery.matches) staticHeights();
+        else rafId = requestAnimationFrame(animate);
+      };
+      motionQuery.addEventListener('change', onMotionChange);
       rafId = requestAnimationFrame(animate);
-      return () => cancelAnimationFrame(rafId);
+      return () => {
+        cancelAnimationFrame(rafId);
+        motionQuery.removeEventListener('change', onMotionChange);
+      };
     }, [bars, level, waveform, active, variant, maxHeight]);
 
     const style = variantStyles[variant] || variantStyles.default;

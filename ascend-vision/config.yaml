@@ -12,8 +12,8 @@ detector:
   confidence: 0.5
   image_size: 640
   device: cpu
-  every_n_frames: 1
-  cpu_threads: 4
+  every_n_frames: 2
+  cpu_threads: 2
 runtime:
   preview: true
   stats_interval_seconds: 5.0
@@ -131,7 +131,7 @@ voice_commands:
   max_reply_words: 25
   chat_cooldown_seconds: 5.0
 llm:
-  groq_model: "groq/compound-mini"
+  groq_model: "qwen/qwen3.8-27b"
   cerebras_model: "llama3.1-8b"
   gemini_model: "gemini-3.6-flash"
   groq_api_key_env: "GROQ_API_KEY"

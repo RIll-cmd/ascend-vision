@@ -147,7 +147,7 @@ def test_gemini_exhausted_fails_over_to_cerebras_and_groq(mock_groq, mock_cerebr
     with caplog.at_level(logging.WARNING):
         res = router.generate_response(prompt="Summarize posture", system_prompt="You are Gura", task="reasoning")
 
-    assert "[ROUTER] Gemini quota exhausted. Falling back to Groq..." in caplog.text
+    assert "[ROUTER] Gemini quota exhausted. Falling back to Cerebras..." in caplog.text
     assert "Cerebras says" in res
     assert mock_gemini.models.generate_content.call_count >= 1
     assert mock_cerebras.chat.completions.create.call_count == 1
@@ -417,3 +417,63 @@ def test_key_pool_parses_comma_and_newline_separated_keys(monkeypatch):
     monkeypatch.setenv("TEST_KEY_ENV", "key_a, key_b; key_c\nkey_d")
     keys = LLMRouter._parse_keys("TEST_KEY_ENV")
     assert keys == ["key_a", "key_b", "key_c", "key_d"]
+
+
+def test_typed_chat_result_reports_actual_successful_fallback_provider():
+    groq = Mock()
+    groq.chat.completions.create.side_effect = RuntimeError("provider unavailable")
+    cerebras = Mock()
+    cerebras.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Cerebras answer"))]
+    )
+    router = LLMRouter(LLMConfig(), groq_client=groq, cerebras_client=cerebras)
+
+    result = router.generate_response_result("Who are you?")
+
+    assert result.text == "Cerebras answer"
+    assert (result.source, result.provider, result.model) == (
+        "model", "cerebras", router.config.cerebras_model,
+    )
+
+
+def test_typed_chat_result_reports_offline_failure_without_provider_payload():
+    groq = Mock()
+    groq.chat.completions.create.side_effect = RuntimeError("secret-key=fixture-provider-payload")
+    router = LLMRouter(LLMConfig(), groq_client=groq)
+
+    result = router.generate_response_result("Who are you?")
+
+    assert result.source == "offline"
+    assert result.failure_reason == "provider_error"
+    assert "fixture-provider-payload" not in result.text
+
+
+def test_typed_chat_result_reports_not_configured_without_roast():
+    router = LLMRouter(LLMConfig())
+    router._groq_pool.keys = []
+    router._cerebras_pool.keys = []
+    router._gemini_pool.keys = []
+
+    result = router.generate_response_result("Who are you?")
+
+    assert result.source == "offline"
+    assert result.failure_reason == "not_configured"
+    assert "unavailable" in result.text.lower()
+
+
+@pytest.mark.parametrize(("message", "expected"), [
+    ("401 unauthorized", "authentication"),
+    ("429 rate limit exceeded", "rate_limited"),
+    ("request timed out", "timeout"),
+    ("model_not_found", "model_unavailable"),
+    ("empty provider response", "empty_response"),
+])
+def test_typed_chat_failure_reasons_are_safe_categories(message, expected):
+    router = LLMRouter(LLMConfig(), groq_client=Mock())
+    router._groq_client.chat.completions.create.side_effect = RuntimeError(f"{message}: secret fixture detail")
+
+    result = router.generate_response_result("Who are you?")
+
+    assert result.source == "offline"
+    assert result.failure_reason == expected
+    assert "secret fixture detail" not in result.text

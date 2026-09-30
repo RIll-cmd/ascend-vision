@@ -2,13 +2,8 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Callable, Sequence
-
-
-class GestureAction(str, Enum):
-    MUTE = "mute"
-    UNMUTE = "unmute"
-    STOP_CANCEL = "stop_cancel"
+import math
+from typing import Sequence
 
 
 class GestureMode(str, Enum):
@@ -19,16 +14,22 @@ class GestureMode(str, Enum):
     HABITS = "habits"
 
 
-def count_fingers(landmarks: Sequence[Sequence[float]], *, handedness: str | None = None) -> int:
+def count_fingers(landmarks: Sequence[Sequence[float]], *, handedness: str | None = None) -> int | None:
     """Return the count of extended fingers from one upright MediaPipe hand."""
-    if len(landmarks) != 21:
-        return 0
+    try:
+        if len(landmarks) != 21:
+            return None
+        points = [(float(point[0]), float(point[1])) for point in landmarks]
+    except (TypeError, ValueError, IndexError, KeyError, OverflowError):
+        return None
+    if not all(math.isfinite(value) for point in points for value in point):
+        return None
 
     def x(index: int) -> float:
-        return float(landmarks[index][0])
+        return points[index][0]
 
     def y(index: int) -> float:
-        return float(landmarks[index][1])
+        return points[index][1]
 
     normalized_hand = (handedness or "Right").strip().lower()
     thumb_extended = x(4) < x(3) if normalized_hand == "right" else x(4) > x(3)
@@ -36,6 +37,30 @@ def count_fingers(landmarks: Sequence[Sequence[float]], *, handedness: str | Non
     for tip, pip in ((8, 6), (12, 10), (16, 14), (20, 18)):
         extended += int(y(tip) < y(pip))
     return extended
+
+
+def hand_overlaps_phone(landmarks: Sequence[Sequence[float]], phone_box,
+                        *, threshold: float = 0.2) -> bool:
+    """Suppress gestures when the tracked hand substantially overlaps the phone."""
+    if phone_box is None:
+        return False
+    try:
+        if len(landmarks) != 21:
+            return True
+        xs = [float(point[0]) for point in landmarks]
+        ys = [float(point[1]) for point in landmarks]
+        x1, y1, x2, y2 = (float(value) for value in phone_box.xyxy)
+    except (AttributeError, TypeError, ValueError, IndexError):
+        return True
+    if not all(math.isfinite(value) for value in (*xs, *ys, x1, y1, x2, y2)):
+        return True
+    hand_x1, hand_x2 = min(xs), max(xs)
+    hand_y1, hand_y2 = min(ys), max(ys)
+    intersection = max(0.0, min(hand_x2, x2) - max(hand_x1, x1)) * max(
+        0.0, min(hand_y2, y2) - max(hand_y1, y1))
+    hand_area = max(1e-9, (hand_x2 - hand_x1) * (hand_y2 - hand_y1))
+    phone_area = max(1e-9, (x2 - x1) * (y2 - y1))
+    return intersection / min(hand_area, phone_area) >= threshold
 
 
 class GestureRecognizer:
@@ -74,54 +99,20 @@ class GestureRecognizer:
 
 
 class GestureController:
-    """Owns mute and one-shot mode selection; it never accesses Core directly."""
+    """Owns one-shot UI panel selection; explicit controls own mute and cancel."""
     _MODES = {1: GestureMode.CHAT, 2: GestureMode.AUTOMATION,
               3: GestureMode.MISSIONS, 4: GestureMode.HABITS}
 
     def __init__(self):
-        self.muted = False
         self.mode = GestureMode.IDLE
 
-    def handle(self, finger_count: int, *, externally_muted: bool = False) -> GestureAction | None:
-        if self.muted or externally_muted:
-            if finger_count == 5:
-                self.muted = False
-                return GestureAction.UNMUTE
+    def handle(self, finger_count: int) -> None:
+        # Hand poses navigate panels only. Explicit controls own mute and cancel.
+        if finger_count in (0, 5) or finger_count not in range(1, 5):
             return None
-        if finger_count == 0:
-            self.muted = True
-            self.mode = GestureMode.IDLE
-            return GestureAction.MUTE
-        if finger_count == 5:
-            self.mode = GestureMode.IDLE
-            return GestureAction.STOP_CANCEL
         mode = self._MODES.get(finger_count)
         if mode is not None:
             self.mode = mode
-        return None
-
-    def consume_mode(self) -> str | None:
-        if self.mode is GestureMode.IDLE:
-            return None
-        mode = self.mode.value
-        self.mode = GestureMode.IDLE
-        return mode
-
-
-class GestureModeRouter:
-    """Routes an explicitly selected one-shot mode without intent classification."""
-    def __init__(self, *, chat: Callable[[str], None], automation: Callable[[str], None],
-                 missions: Callable[[str], None], habits: Callable[[str], None]):
-        self._routes = {"chat": chat, "automation": automation,
-                        "missions": missions, "habits": habits}
-
-    def route(self, mode: str | None, text: str) -> bool:
-        handler = self._routes.get(mode)
-        if handler is None:
-            return False
-        handler(text)
-        return True
-
 
 def core_status_indicator(*, configured: bool, state: str | None) -> tuple[str, str]:
     """Translate existing Ascend health states into a compact camera badge."""
@@ -163,7 +154,7 @@ def gesture_overlay_lines(*, finger_count: int | None, handedness: str | None,
     active_for = 0.0
     if recognizer._candidate_started_at is not None:
         active_for = min(recognizer.stable_seconds, max(0.0, now - recognizer._candidate_started_at))
-    voice = 'MUTED' if controller.muted or feedback_muted else 'ACTIVE'
+    voice = 'MUTED' if feedback_muted else 'ACTIVE'
     fingers = '--' if finger_count is None else str(finger_count)
     side = handedness or 'Unknown'
     filled = round(10 * active_for / recognizer.stable_seconds) if recognizer.stable_seconds else 0

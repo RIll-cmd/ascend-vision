@@ -50,6 +50,21 @@ def test_deterministic_finger_counts(fingers, expected):
     assert count_fingers(_hand(*fingers), handedness="Right") == expected
 
 
+def test_invalid_landmarks_are_unknown_and_phone_overlap_suppresses_gestures():
+    from types import SimpleNamespace
+
+    from gesture_controls import count_fingers, hand_overlaps_phone
+
+    assert count_fingers([(0, 0, 0)] * 20) is None
+    assert count_fingers([None] * 21) is None
+    assert count_fingers([(float('nan'), 0, 0)] * 21) is None
+    hand = _hand("index")
+    phone = SimpleNamespace(xyxy=(0.35, 0.3, 0.68, 0.72))
+    assert hand_overlaps_phone(hand, phone) is True
+    assert hand_overlaps_phone([None] * 21, phone) is True
+    assert hand_overlaps_phone(hand, None) is False
+
+
 def test_thumb_count_is_correct_for_left_hand_orientation():
     from gesture_controls import count_fingers
 
@@ -76,68 +91,26 @@ def test_stable_gesture_triggers_once_and_a_held_hand_does_not_repeat():
     assert recognizer.update(3, 3.6) == 3
 
 
-def test_fist_mutes_and_only_open_palm_unmutes_while_muted():
-    from gesture_controls import GestureAction, GestureController
+def test_fist_and_open_palm_do_not_change_mute_state():
+    from gesture_controls import GestureController
 
     controller = GestureController()
-    assert controller.handle(0) is GestureAction.MUTE
-    assert controller.muted is True
+    assert controller.handle(0) is None
+    assert controller.mode.value == 'idle'
     assert controller.handle(1) is None
     assert controller.handle(4) is None
-    assert controller.handle(5) is GestureAction.UNMUTE
-    assert controller.muted is False
+    assert controller.handle(5) is None
+    assert controller.mode.value == 'habits'
 
 
-def test_open_palm_unmutes_an_existing_feedback_mute_state():
-    from gesture_controls import GestureAction, GestureController
-
-    controller = GestureController()
-    assert controller.handle(2, externally_muted=True) is None
-    assert controller.handle(5, externally_muted=True) is GestureAction.UNMUTE
-
-
-def test_open_palm_stops_and_cancels_when_not_muted():
-    from gesture_controls import GestureAction, GestureController, GestureMode
+def test_open_palm_does_not_cancel_selected_panel():
+    from gesture_controls import GestureController, GestureMode
 
     controller = GestureController()
     controller.handle(2)
     assert controller.mode is GestureMode.AUTOMATION
-    assert controller.handle(5) is GestureAction.STOP_CANCEL
-    assert controller.mode is GestureMode.IDLE
-
-
-@pytest.mark.parametrize(
-    ("count", "mode"),
-    [(1, "chat"), (2, "automation"), (3, "missions"), (4, "habits")],
-)
-def test_gesture_mode_routes_exactly_one_following_utterance(count, mode):
-    from gesture_controls import GestureController
-
-    controller = GestureController()
-    controller.handle(count)
-    assert controller.consume_mode() == mode
-    assert controller.consume_mode() is None
-
-
-def test_explicit_gesture_modes_route_to_only_the_selected_flow():
-    from gesture_controls import GestureModeRouter
-
-    calls = []
-    router = GestureModeRouter(
-        chat=lambda text: calls.append(("chat", text)),
-        automation=lambda text: calls.append(("automation", text)),
-        missions=lambda text: calls.append(("missions", text)),
-        habits=lambda text: calls.append(("habits", text)),
-    )
-
-    for mode in ("chat", "automation", "missions", "habits"):
-        assert router.route(mode, "next request") is True
-    assert calls == [
-        ("chat", "next request"),
-        ("automation", "next request"),
-        ("missions", "next request"),
-        ("habits", "next request"),
-    ]
+    assert controller.handle(5) is None
+    assert controller.mode is GestureMode.AUTOMATION
 
 
 def test_camera_overlay_labels_live_gesture_state():

@@ -9,11 +9,41 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from config import LLMConfig
 
 LOG = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ChatGenerationResult:
+    text: str
+    source: Literal["model", "offline"]
+    provider: str | None = None
+    model: str | None = None
+    failure_reason: Literal[
+        "not_configured", "authentication", "rate_limited", "timeout",
+        "model_unavailable", "provider_error", "empty_response",
+    ] | None = None
+
+
+def _failure_reason(error: Exception) -> str:
+    status = getattr(error, "status_code", None) or getattr(
+        getattr(error, "response", None), "status_code", None
+    )
+    message = str(error).lower()
+    if "empty" in message:
+        return "empty_response"
+    if status in (401, 403) or "unauthorized" in message or "authentication" in message:
+        return "authentication"
+    if status == 429 or "rate limit" in message or "quota" in message:
+        return "rate_limited"
+    if "timeout" in message or "timed out" in message or status == 504:
+        return "timeout"
+    if "model_not_found" in message or "not_found" in message or "model unavailable" in message:
+        return "model_unavailable"
+    return "provider_error"
 
 OFFLINE_ROASTS = [
     "Put the phone down and get back to work.",
@@ -326,7 +356,7 @@ class LLMRouter:
             raise ValueError(f"Environment variable {self.config.gemini_api_key_env} is not set")
         return client
 
-    def _call_groq(self, prompt: str, system_prompt: str, max_tokens: int) -> str:
+    def _call_groq(self, prompt: str, system_prompt: str, max_tokens: int, *, return_model: bool = False):
         effective_sys = _build_effective_system_prompt(system_prompt)
         messages = []
         if effective_sys:
@@ -334,8 +364,10 @@ class LLMRouter:
         messages.append({'role': 'user', 'content': prompt})
 
         model = self.config.groq_model
+        actual_model = [model]
 
         def _do_call(client):
+            actual_model[0] = model
             try:
                 res = client.chat.completions.create(
                     model=model,
@@ -349,6 +381,7 @@ class LLMRouter:
                 # If model name not found (e.g. llama-3.1-8b-instant replaced), try compound-mini
                 if 'model_not_found' in str(exc) or '404' in str(exc):
                     try:
+                        actual_model[0] = 'groq/compound-mini'
                         res = client.chat.completions.create(
                             model='groq/compound-mini',
                             messages=messages,
@@ -361,9 +394,10 @@ class LLMRouter:
                         pass
                 raise
 
-        return self._groq_pool.execute_with_failover(_do_call)
+        text = self._groq_pool.execute_with_failover(_do_call)
+        return (text, actual_model[0]) if return_model else text
 
-    def _call_cerebras(self, prompt: str, system_prompt: str, max_tokens: int) -> str:
+    def _call_cerebras(self, prompt: str, system_prompt: str, max_tokens: int, *, return_model: bool = False):
         effective_sys = _build_effective_system_prompt(system_prompt)
         messages = []
         if effective_sys:
@@ -371,8 +405,10 @@ class LLMRouter:
         messages.append({'role': 'user', 'content': prompt})
 
         model = self.config.cerebras_model
+        actual_model = [model]
 
         def _do_call(client):
+            actual_model[0] = model
             try:
                 res = client.chat.completions.create(
                     model=model,
@@ -385,6 +421,7 @@ class LLMRouter:
             except Exception as exc:
                 if 'model_not_found' in str(exc) or '404' in str(exc):
                     try:
+                        actual_model[0] = 'qwen-3.8-27b'
                         res = client.chat.completions.create(
                             model='qwen-3.8-27b',
                             messages=messages,
@@ -397,7 +434,8 @@ class LLMRouter:
                         pass
                 raise
 
-        return self._cerebras_pool.execute_with_failover(_do_call)
+        text = self._cerebras_pool.execute_with_failover(_do_call)
+        return (text, actual_model[0]) if return_model else text
 
     def _build_gemini_options(self, model: str, system_prompt: str, max_tokens: int):
         from google.genai import types
@@ -410,11 +448,13 @@ class LLMRouter:
             thinking_config=_build_gemini_thinking_config(model),
         )
 
-    def _call_gemini(self, prompt: str, system_prompt: str, max_tokens: int) -> str:
+    def _call_gemini(self, prompt: str, system_prompt: str, max_tokens: int, *, return_model: bool = False):
         model = self.config.gemini_model
+        actual_model = [model]
         options = self._build_gemini_options(model, system_prompt, max_tokens)
 
         def _do_call(client):
+            actual_model[0] = model
             try:
                 response = client.models.generate_content(
                     model=model,
@@ -430,6 +470,7 @@ class LLMRouter:
                         if fallback_model == model:
                             continue
                         try:
+                            actual_model[0] = fallback_model
                             fallback_options = self._build_gemini_options(fallback_model, system_prompt, max_tokens)
                             response = client.models.generate_content(
                                 model=fallback_model,
@@ -442,7 +483,8 @@ class LLMRouter:
                             pass
                 raise
 
-        return self._gemini_pool.execute_with_failover(_do_call)
+        text = self._gemini_pool.execute_with_failover(_do_call)
+        return (text, actual_model[0]) if return_model else text
 
     def _call_gemini_structured(self, prompt: str, system_prompt: str, max_tokens: int) -> dict:
         """Use the provider's JSON response mode; no conversational fallback is valid here."""
@@ -727,48 +769,53 @@ class LLMRouter:
         max_tokens: int = 60
     ) -> str:
         """Routes prompt with multi-provider failover (Groq -> Cerebras -> Gemini -> Offline)."""
-        if not prompt or not prompt.strip():
+        result = self.generate_response_result(prompt, system_prompt, task, max_tokens)
+        if result.source == "offline":
             return OFFLINE_ROASTS[0]
+        return result.text
+
+    def generate_response_result(
+        self, prompt: str, system_prompt: str = "", task: str = "fast", max_tokens: int = 60,
+    ) -> ChatGenerationResult:
+        """Return a chat answer with the provider actually selected or a safe failure code."""
+        if not prompt or not prompt.strip():
+            return ChatGenerationResult("AI responses are unavailable right now.", "offline", failure_reason="empty_response")
 
         max_tokens = max_tokens or self.config.default_max_tokens
-
-        if task == "reasoning":
-            # Primary: Gemini -> Failover: Cerebras -> Failover: Groq -> Fallback: Offline
+        order = (("gemini", self._call_gemini, self.config.gemini_model),
+                 ("cerebras", self._call_cerebras, self.config.cerebras_model),
+                 ("groq", self._call_groq, self.config.groq_model)) if task == "reasoning" else (
+                 ("groq", self._call_groq, self.config.groq_model),
+                 ("cerebras", self._call_cerebras, self.config.cerebras_model),
+                 ("gemini", self._call_gemini, self.config.gemini_model))
+        pools = {"groq": self._groq_pool, "cerebras": self._cerebras_pool, "gemini": self._gemini_pool}
+        errors = []
+        for index, (provider, call, model) in enumerate(order):
+            pool = pools[provider]
+            if not pool.has_keys:
+                continue
             try:
-                return self._call_gemini(prompt, system_prompt, max_tokens)
-            except Exception as gemini_err:
-                LOG.warning("[ROUTER] Gemini quota exhausted. Falling back to Groq...")
-                LOG.debug("[ROUTER] Gemini failure detail: %s", gemini_err)
-                try:
-                    return self._call_cerebras(prompt, system_prompt, max_tokens)
-                except Exception as cerebras_err:
-                    LOG.debug("[ROUTER] Cerebras reasoning failure: %s", cerebras_err)
-                    try:
-                        return self._call_groq(prompt, system_prompt, max_tokens)
-                    except Exception as groq_err:
-                        LOG.error("[ROUTER] All providers failed: %s | %s | %s. Using offline fallback.",
-                                  gemini_err, cerebras_err, groq_err)
-                        idx = abs(hash(prompt)) % len(OFFLINE_ROASTS)
-                        return OFFLINE_ROASTS[idx]
-        else:
-            # Primary: Groq -> Failover: Cerebras -> Failover: Gemini -> Fallback: Offline
-            try:
-                return self._call_groq(prompt, system_prompt, max_tokens)
-            except Exception as groq_err:
-                LOG.warning("[ROUTER] Groq unavailable. Failing over to Cerebras...")
-                LOG.debug("[ROUTER] Groq failure detail: %s", groq_err)
-                try:
-                    return self._call_cerebras(prompt, system_prompt, max_tokens)
-                except Exception as cerebras_err:
-                    LOG.warning("[ROUTER] Cerebras unavailable. Failing over to Gemini...")
-                    LOG.debug("[ROUTER] Cerebras failure detail: %s", cerebras_err)
-                    try:
-                        return self._call_gemini(prompt, system_prompt, max_tokens)
-                    except Exception as gemini_err:
-                        LOG.error("[ROUTER] All providers failed: %s | %s | %s. Using offline fallback.",
-                                  groq_err, cerebras_err, gemini_err)
-                        idx = abs(hash(prompt)) % len(OFFLINE_ROASTS)
-                        return OFFLINE_ROASTS[idx]
+                text, actual_model = call(prompt, system_prompt, max_tokens, return_model=True)
+                if not isinstance(text, str) or not text.strip():
+                    errors.append(ValueError("empty provider response"))
+                    continue
+                return ChatGenerationResult(text.strip(), "model", provider, actual_model)
+            except Exception as exc:
+                errors.append(exc)
+                next_provider = order[index + 1][0] if index + 1 < len(order) else None
+                if task == "reasoning" and provider == "gemini" and next_provider:
+                    LOG.warning("[ROUTER] Gemini quota exhausted. Falling back to %s...", next_provider.title())
+                elif provider == "groq" and next_provider:
+                    LOG.warning("[ROUTER] Groq unavailable. Failing over to %s...", next_provider.title())
+                elif provider == "cerebras" and next_provider:
+                    LOG.warning("[ROUTER] Cerebras unavailable. Failing over to %s...", next_provider.title())
+                else:
+                    LOG.warning("[ROUTER] %s chat request failed (%s)", provider, type(exc).__name__)
+        if errors:
+            LOG.error("[ROUTER] All configured providers failed; using offline fallback.")
+        reason = _failure_reason(errors[-1]) if errors else "not_configured"
+        text = "AI responses are unavailable right now. Check the selected provider setup, then restart Vision."
+        return ChatGenerationResult(text, "offline", failure_reason=reason)
 
 
 # Shared default router instance

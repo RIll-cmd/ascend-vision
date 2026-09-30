@@ -31,6 +31,22 @@ export interface VisionState {
   gesture?: string | null;
   emotion?: 'neutral' | 'smiling' | 'fatigue' | 'stressed' | string;
   lastHeard?: string;
+  activePanel?: 'chat' | 'automation' | 'missions' | 'habits' | null;
+  activePanelSequence?: number;
+  speakReplies?: boolean;
+  aiStatus?: {
+    configured: boolean;
+    state: 'unknown' | 'not-configured' | 'configured-untested' | 'requesting' | 'available' | 'request-failed';
+    provider?: string | null;
+    model?: string | null;
+    lastSuccessAt?: string | null;
+    lastFailure?: string | null;
+  };
+  coreConnection?: {
+    configured: boolean;
+    state: 'unconfigured' | 'connecting' | 'connected' | 'reauth-required' | 'offline' | 'stale';
+    lastCheckedAt?: string | null;
+  };
 }
 export function useVisionRuntime(enabled: boolean) {
   const [state, setState] = useState<VisionState | null>(null);

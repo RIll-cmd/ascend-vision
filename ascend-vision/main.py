@@ -36,13 +36,27 @@ from session_manager import SessionManager
 from controls import DesktopControls
 from feedback import FeedbackService, RoastContext, ConversationContext
 from integrations.status_shelf import ShelfSnapshot, StatusShelfReader
-from gesture_controls import (GestureAction, GestureController, GestureModeRouter,
-                              GestureRecognizer, core_status_indicator, count_fingers,
+from gesture_controls import (GestureController, GestureRecognizer,
+                              core_status_indicator, count_fingers, hand_overlaps_phone,
                               effective_core_connection_state, gesture_overlay_lines,
                               vision_presence_indicator)
 from voice_listener import VoiceCommandListener, VoiceCommand
 
 LOG = logging.getLogger('phone_watch')
+
+
+def stop_local_browser_tasks(browser_task_client, task_ids, session_key) -> int:
+    """Request owner-session-scoped cancellation for every tracked local task."""
+    if browser_task_client is None:
+        return 0
+    stopped = 0
+    for task_id in task_ids:
+        try:
+            browser_task_client.control(task_id, 'stop', session_key)
+            stopped += 1
+        except Exception as exc:
+            LOG.info('Browser task stop request failed (%s)', type(exc).__name__)
+    return stopped
 
 WINDOW = 'Phone Watch - Space: focus toggle | Q / Esc: quit'
 VISION_VERSION = '1.0.0'
@@ -81,9 +95,14 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
     activity_history_store = None
     activity_summary_provider = None
     browser_voice_notifier = None
+    browser_task_client = None
+    browser_task_lock = threading.Lock()
+    active_local_browser_tasks: dict[tuple[str, str, str], list[str]] = {}
     mission_reader = None
     activity_summary_recorder = None
     last_activity_sample = None
+    chat_queue = None
+    local_conversation = None
     face_tracker_available = face_tracker is not None
     resources = ExitStack()
     focus_ui_bridge = None
@@ -333,7 +352,6 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     screen_auditor.start()
             except Exception as exc:
                 LOG.warning('Screen inspection unavailable (%s)', type(exc).__name__)
-            browser_task_client = None
             if config.browser_automation.enabled:
                 try:
                     from browser.main import start_browser_broker
@@ -369,6 +387,15 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     )
                 except Exception as exc:
                     LOG.warning('Browser voice result delivery unavailable (%s)', type(exc).__name__)
+
+            def watch_local_browser_task(task_id, session_key):
+                with browser_task_lock:
+                    tasks = active_local_browser_tasks.setdefault(session_key, [])
+                    tasks.append(task_id)
+                    del tasks[:-8]
+                if browser_voice_notifier is not None:
+                    browser_voice_notifier.watch(task_id, session_key)
+
             assistant_service = AssistantService(
                 config.feedback, config.llm, memory_store=memory_store,
                 tool_runtime=status_runtime,
@@ -378,7 +405,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 daily_summary_provider=activity_summary_provider,
                 browser_task_client=browser_task_client,
                 browser_automation_config=config.browser_automation,
-                browser_task_submitted=(browser_voice_notifier.watch if browser_voice_notifier else None),
+                browser_task_submitted=watch_local_browser_task,
             )
         bind_assistant = getattr(feedback, 'bind_assistant', None)
         if callable(bind_assistant):
@@ -418,7 +445,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         ascend_character_id = None
         ascend_observations = None
         automation_proposals = None
-        core_connection_state = {'health': None, 'vision': None}
+        core_connection_state = {'health': None, 'vision': None, 'checked_at': None}
         vision_presence_state = {'value': None}
         core_connection_lock = threading.Lock()
         gesture_recognizer = GestureRecognizer()
@@ -427,6 +454,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         gesture_handedness = None
         gesture_last_action = None
         gesture_last_action_at = float('-inf')
+        active_panel = None
+        active_panel_sequence = 0
 
         # Core integration initialization
         from vision_client.ascend_core_client import AscendCoreVisionClient
@@ -508,6 +537,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 with core_connection_lock:
                     vision_presence_state['value'] = state or 'CONNECTED'
                     core_connection_state['vision'] = 'ASCEND_CONNECTED' if state != 'OFFLINE' else 'ASCEND_OFFLINE'
+                    core_connection_state['checked_at'] = datetime.now(timezone.utc)
 
             core_heartbeat = CoreHeartbeatWorker(
                 core_client,
@@ -527,6 +557,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 with core_connection_lock:
                     vision_presence_state['value'] = state or result.state.value
                     core_connection_state['vision'] = result.state.value
+                    core_connection_state['checked_at'] = datetime.now(timezone.utc)
 
             vision_heartbeat = VisionHeartbeatWorker(
                 ascend_client,
@@ -551,6 +582,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         state = 'ASCEND_OFFLINE'
                     with core_connection_lock:
                         core_connection_state['health'] = state
+                        core_connection_state['checked_at'] = datetime.now(timezone.utc)
                     core_monitor_stop.wait(5.0)
 
             core_monitor = threading.Thread(target=monitor_core_connection,
@@ -572,6 +604,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             result = ascend_client.send_command(text, source='ascend_vision', character_id=ascend_character_id)
             with core_connection_lock:
                 core_connection_state['health'] = result.state.value
+                core_connection_state['checked_at'] = datetime.now(timezone.utc)
             LOG.info('Ascend command state: %s', result.state.value)
             if result.state is AscendConnectionState.CONNECTED:
                 feedback.speak_announcement(result.message or 'Ascend completed your request.')
@@ -587,40 +620,60 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 started_at=chat_session_started_at,
             )
 
+        from integrations.chat_ipc import ChatIpcQueue
+        from assistant.local_conversation import LocalConversation
+
+        try:
+            chat_queue = ChatIpcQueue(Path(config.storage.database).parent / 'chat_ipc.db')
+            set_ai_status_publisher = getattr(assistant_service, 'set_ai_status_publisher', None)
+            if callable(set_ai_status_publisher):
+                set_ai_status_publisher(chat_queue.publish_ai_status)
+            local_conversation = LocalConversation(
+                chat_queue, assistant_service, chat_context,
+                session_key=lambda: (
+                    "local", "voice", str(getattr(manager, "session_id", "default")),
+                ),
+                max_words=config.voice_commands.max_reply_words,
+            )
+            local_conversation.start()
+            resources.callback(local_conversation.close)
+            if focus_ui_bridge is not None:
+                focus_ui_bridge.bind_chat(chat_queue, local_conversation.runtime_session_id)
+        except (OSError, sqlite3.Error, RuntimeError, TypeError, ValueError) as exc:
+            LOG.warning('Shared local chat unavailable (%s); voice fallback remains enabled',
+                        type(exc).__name__)
+            chat_queue = None
+            local_conversation = None
+
+        last_voice_chat = [None, float('-inf')]
+        voice_chat_lock = threading.Lock()
         def route_chat(text: str):
-            ctx = chat_context(text)
-            submit_chat = getattr(feedback, 'submit_chat', None)
-            if submit_chat is not None:
-                submit_chat(text, ctx, max_words=config.voice_commands.max_reply_words,
-                             cooldown=config.voice_commands.chat_cooldown_seconds,
-                             session_key=("local", "voice", str(getattr(manager, "session_id", "default"))))
-
-        def route_automation(text: str):
-            if automation_proposals is None:
-                feedback.speak_announcement('Automation proposals are unavailable right now.')
+            if local_conversation is None:
+                submit_chat = getattr(feedback, 'submit_chat', None)
+                if submit_chat is not None:
+                    submit_chat(
+                        text, chat_context(text),
+                        max_words=config.voice_commands.max_reply_words,
+                        cooldown=config.voice_commands.chat_cooldown_seconds,
+                        session_key=("local", "voice", str(getattr(manager, "session_id", "default"))),
+                    )
                 return
-            result = automation_proposals.propose(text)
-            feedback.speak_announcement(result.message)
-
-        def handle_habit_command(text: str):
-            if habit_voice_handler is not None and habit_voice_handler.handle_voice_utterance(text):
-                return
-            send_ascend_command(text)
-
-        gesture_router = GestureModeRouter(
-            chat=route_chat, automation=route_automation,
-            missions=send_ascend_command, habits=handle_habit_command,
-        )
+            now = time.monotonic()
+            normalized = text.strip()
+            with voice_chat_lock:
+                if (normalized.casefold() == last_voice_chat[0]
+                        and now - last_voice_chat[1] < config.voice_commands.chat_cooldown_seconds):
+                    LOG.debug('Duplicate local voice chat ignored during cooldown')
+                    return
+                try:
+                    local_conversation.enqueue(normalized, source='voice')
+                    last_voice_chat[:] = [normalized.casefold(), now]
+                except (ValueError, RuntimeError, sqlite3.Error):
+                    LOG.exception('Could not queue local voice chat')
 
         def on_voice_command(cmd: VoiceCommand):
-            if gesture_controller.muted or feedback.is_muted():
-                LOG.debug("Ignoring voice command while gesture-muted: %s", cmd.action)
-                return
-            selected_mode = gesture_controller.consume_mode()
             if parse_status_intent(cmd.raw_text) is not None:
                 route_chat(cmd.raw_text)
-                return
-            if gesture_router.route(selected_mode, cmd.raw_text):
                 return
             LOG.info("Executing voice command action: %s", cmd.action)
             if cmd.action == 'focus':
@@ -657,14 +710,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 feedback.speak_announcement("Voice alerts unmuted.")
 
         def on_unmatched_speech(text: str):
-            if gesture_controller.muted or feedback.is_muted():
-                LOG.debug('Ignoring unmatched speech while gesture-muted')
-                return
-            selected_mode = gesture_controller.consume_mode()
             if parse_status_intent(text) is not None:
                 route_chat(text)
-                return
-            if gesture_router.route(selected_mode, text):
                 return
             if habit_voice_handler is not None and habit_voice_handler.handle_voice_utterance(text):
                 return
@@ -759,22 +806,33 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             LOG.info('Local companion rules running in %s mode (shadow=%s).',
                      config.companion_context.mode, shadow_mode)
 
-        from integrations.chat_ipc import ChatIpcQueue
         from integrations.chat_runtime import ChatRuntimeBridge
 
-        def handle_dashboard_chat(text: str) -> str:
-            return assistant_service.respond(
-                text, chat_context(text), max_words=config.voice_commands.max_reply_words,
-                session_key=("local", "dashboard", "local-dashboard"),
-            ).text
-
         try:
-            chat_queue = ChatIpcQueue(Path(config.storage.database).parent / 'chat_ipc.db')
-            chat_bridge = ChatRuntimeBridge(chat_queue, handle_dashboard_chat)
+            if chat_queue is None or local_conversation is None:
+                raise RuntimeError('Shared local chat is not initialized')
+            def on_local_chat_reply(message, text):
+                source = message.get('source')
+                if (source == 'voice'
+                        or (focus_ui_bridge is not None
+                            and focus_ui_bridge.should_speak_replies())):
+                    feedback.speak_announcement(text)
+
+            chat_bridge = ChatRuntimeBridge(
+                chat_queue, lambda _text: None,
+                message_handler=local_conversation.handle_message,
+                on_reply=on_local_chat_reply,
+            )
             resources.callback(chat_bridge.stop)
             chat_bridge.start()
+            resources.callback(local_conversation.stop_accepting)
         except (OSError, sqlite3.Error, RuntimeError) as exc:
             LOG.warning('Dashboard chat unavailable (%s); monitoring continues', type(exc).__name__)
+            if local_conversation is not None:
+                try:
+                    local_conversation.close()
+                except (OSError, sqlite3.Error, RuntimeError):
+                    LOG.warning('Could not close unavailable local chat runtime cleanly')
 
         # Both model initializations are excluded from throughput and duration.
         start = time.perf_counter()
@@ -847,6 +905,25 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     elif cmd == 'toggle-voice':
                         if voice_listener is not None and hasattr(voice_listener, 'enabled'):
                             voice_listener.enabled = not voice_listener.enabled
+                    elif cmd == 'toggle-speech':
+                        if feedback.is_muted():
+                            feedback.unmute()
+                        else:
+                            feedback.mute(315_360_000.0)
+                    elif cmd == 'toggle-chat-speech':
+                        focus_ui_bridge.toggle_speak_replies()
+                    elif cmd == 'stop-cancel':
+                        feedback.cancel_speech()
+                        if automation_proposals is not None and automation_proposals.pending is not None:
+                            automation_proposals.cancel()
+                        if browser_task_client is not None:
+                            session_key = (
+                                'local', 'voice',
+                                str(getattr(manager, 'session_id', 'default')),
+                            )
+                            with browser_task_lock:
+                                task_ids = tuple(active_local_browser_tasks.pop(session_key, ()))
+                            stop_local_browser_tasks(browser_task_client, task_ids, session_key)
             manager.process_commands()
             if context_collector is not None:
                 context_now = time.monotonic()
@@ -897,31 +974,30 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 gesture_handedness = None
                 if hand_landmarks:
                     handedness = getattr(hand_tracker, 'last_handedness', ())
-                    gesture_handedness = handedness[0] if handedness else None
-                    gesture_count = count_fingers(
-                        hand_landmarks[0],
-                        handedness=gesture_handedness,
-                    )
+                    hand_confidences = getattr(hand_tracker, 'last_confidences', ())
+                    for hand_index, landmarks in enumerate(hand_landmarks):
+                        if hand_overlaps_phone(landmarks, box):
+                            continue
+                        confidence = (hand_confidences[hand_index]
+                                      if hand_index < len(hand_confidences) else None)
+                        if (not isinstance(confidence, (int, float))
+                                or not math.isfinite(confidence) or confidence < .5):
+                            continue
+                        side = handedness[hand_index] if hand_index < len(handedness) else None
+                        count = count_fingers(landmarks, handedness=side)
+                        if count is None:
+                            continue
+                        gesture_handedness = side
+                        gesture_count = count
+                        break
                 triggered_gesture = gesture_recognizer.update(gesture_count, packet.monotonic_time)
                 if triggered_gesture is not None:
-                    action = gesture_controller.handle(
+                    gesture_controller.handle(
                         triggered_gesture,
-                        externally_muted=feedback.is_muted(),
                     )
-                    if action is GestureAction.MUTE:
-                        # Gesture mute persists until the contextual open-palm unmute.
-                        feedback.mute(315_360_000.0)
-                        gesture_last_action = 'Muted — show 5 fingers to unmute'
-                    elif action is GestureAction.UNMUTE:
-                        feedback.unmute()
-                        feedback.speak_announcement('Voice active.')
-                        gesture_last_action = 'Voice active'
-                    elif action is GestureAction.STOP_CANCEL:
-                        feedback.cancel_speech()
-                        if automation_proposals is not None and automation_proposals.pending is not None:
-                            automation_proposals.cancel()
-                        gesture_last_action = 'Stop / cancel'
-                    elif gesture_controller.mode.value != 'idle':
+                    if gesture_controller.mode.value != 'idle':
+                        active_panel = gesture_controller.mode.value
+                        active_panel_sequence += 1
                         gesture_last_action = f'{gesture_controller.mode.value.title()} mode selected'
                     if gesture_last_action is not None:
                         gesture_last_action_at = packet.monotonic_time
@@ -984,7 +1060,30 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         voiceEnabled=voice_enabled,
                         muted=feedback.is_muted(),
                         speaking=is_speaking,
+                        aiStatus=assistant_service.ai_status(),
                         elapsedSeconds=int(time.perf_counter() - start)
+                    )
+                    with core_connection_lock:
+                        checked_at = core_connection_state['checked_at']
+                        raw_core_state = effective_core_connection_state(
+                            core_connection_state['health'], core_connection_state['vision'])
+                    configured = ascend_client is not None and bool(ascend_character_id)
+                    if not configured:
+                        fairy_core_state = 'unconfigured'
+                    elif checked_at is None:
+                        fairy_core_state = 'connecting'
+                    elif (datetime.now(timezone.utc) - checked_at).total_seconds() > 45:
+                        fairy_core_state = 'stale'
+                    elif raw_core_state in {'ASCEND_CONNECTED', 'CONNECTED'}:
+                        fairy_core_state = 'connected'
+                    elif raw_core_state and 'AUTH' in raw_core_state:
+                        fairy_core_state = 'reauth-required'
+                    else:
+                        fairy_core_state = 'offline'
+                    focus_ui_bridge.publish_core_connection(
+                        configured=configured,
+                        state=fairy_core_state,
+                        last_checked_at=(checked_at.isoformat() if checked_at else None),
                     )
                     if face_landmarks:
                         focus_ui_bridge.publish_face(face_landmarks, packet.image.shape[1], packet.image.shape[0])
@@ -1005,6 +1104,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         posture=posture_st,
                         fatigue=fusion_status.fatigue_level,
                         gesture=gesture_last_action or (f'{gesture_count} fingers' if gesture_count is not None else None),
+                        active_panel=active_panel,
+                        active_panel_sequence=active_panel_sequence,
                         emotion=expression_tracker.current_emotion,
                         last_heard=last_heard_str,
                         width=packet.image.shape[1],
@@ -1388,6 +1489,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Phone Watch focus-only roast feedback (Phase 4)')
     parser.add_argument('--config', type=Path, default=Path(__file__).with_name('config.yaml'))
+    parser.add_argument('--env-file', type=Path,
+                        help='load provider credentials from this owner-managed env file')
     parser.add_argument('--camera', type=int, help='override camera index')
     parser.add_argument('--confidence', type=float, help='override confidence, 0 to 1')
     parser.add_argument('--preview', action=argparse.BooleanOptionalAction, default=None)
@@ -1409,8 +1512,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     try:
-        from dotenv import load_dotenv
-        load_dotenv(args.config.resolve().parent / '.env', override=False)
+        from assistant.runtime_environment import load_runtime_environment
+        load_runtime_environment(args.config, args.env_file)
         config = load_config(args.config)
         if args.camera is not None:
             config = replace(config, camera=replace(config.camera, index=args.camera))

@@ -32,12 +32,13 @@ def test_detect_exposes_handedness_alongside_existing_landmarks():
     model = Mock()
     model.detect_for_video.return_value = SimpleNamespace(
         hand_landmarks=[[SimpleNamespace(x=.1, y=.2, z=.0)] * 21],
-        handedness=[[SimpleNamespace(category_name='Left')]],
+        handedness=[[SimpleNamespace(category_name='Left', score=.83)]],
     )
     tracker = HandTracker(HandConfig(), landmarker=model, image_factory=lambda rgb: rgb)
 
     assert tracker.detect(np.zeros((2, 2, 3), dtype=np.uint8), 1.0)
     assert tracker.last_handedness == ('Left',)
+    assert tracker.last_confidences == (.83,)
     tracker.close()
 
 

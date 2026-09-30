@@ -18,9 +18,64 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe main.py --download-model
 # Initialize SQLite without opening a camera (also automatic on normal startup):
 .\.venv\Scripts\python.exe main.py --init-db
-# Start in background mode:
-.\.venv\Scripts\python.exe main.py
+# Start the Fairy Eye daily interface:
+.\.venv\Scripts\python.exe main.py --focus
 ```
+
+## Fairy Eye: primary laptop interface
+
+The normal daily launch opens the integrated Fairy Eye experience in focus mode:
+
+```powershell
+.\.venv\Scripts\python.exe main.py --focus
+```
+
+This opens the local Fairy Eye UI while Vision owns the camera and microphone.
+Use `--no-fairy-ui` if you explicitly need the older camera-preview-only run.
+Use its Chat panel to type into the same laptop conversation as voice; typed
+chat does not require microphone permission. The Core badge reports the last
+observed connection state. The advanced dashboard remains available separately
+for history, settings, and memory approval. Phone PWA and Discord conversations
+remain separate sessions. Laptop chat transcripts are cleared when Vision exits;
+only memories you explicitly approve are retained.
+
+The companion keeps the eye and conversation in separate regions on a laptop;
+on narrow screens, the eye appears above the chat. The optional camera preview
+flows below these regions instead of covering them. The circular Fairy eye stays
+visually still while Vision speaks; the speaking label and separate voice
+indicator show activity. Microphone activity is shown beside the eye. The eye
+honors the operating system's reduced-motion setting.
+Use **Appearance → Automatic** to restore state-driven expressions after choosing
+a manual expression. The microphone and speech-output controls are independent.
+Core connectivity is a separate status and does not mean the local Vision runtime
+is disconnected.
+
+For a live laptop acceptance check, run `main.py --focus`, send one typed message,
+then test a short spoken prompt and a longer Vision TTS reply. Confirm the eye
+stays visually still while speaking, the chat remains usable, and Pause
+microphone, Mute speech, Stop, camera preview, and reduced motion behave as
+expected. To return to the older camera-preview-only interface, relaunch with
+`--no-fairy-ui`; the dashboard and Vision runtime remain available.
+
+The Fairy chat now reports AI-provider status separately from microphone and
+Core connectivity. It says `AI configured · not tested` until a real model
+response succeeds; failures are labeled offline and include only a safe reason
+category. Assistant bubbles identify AI, local-tool, or offline replies.
+
+For this worktree, launch the implementation with the already-installed runtime
+and select the owner-managed provider env file explicitly (credentials stay in
+that file and are not copied into the worktree):
+
+```powershell
+Set-Location 'D:\ascend-vision\.worktrees\codex-fairy-eye-visual-motion\ascend-vision'
+& 'D:\ascend-vision\ascend-vision\.venv\Scripts\python.exe' main.py --focus --env-file 'D:\ascend-vision\ascend-vision\.env'
+```
+
+Type `Who are you?` in Fairy chat. A real model reply should show an AI/provider
+label and update `AI responding`; if the configured credentials or selected
+model fail, the chat should instead explain that the AI connection is unavailable
+and show an offline reply label. Core can be offline while local AI chat still
+works, and microphone permission is not required for typed chat.
 
 For an existing Phase 4 environment, skip the environment-creation command.
 Gemini feedback requires `GEMINI_API_KEY`; SQLite needs no database server. The archive contains both official model assets and excludes databases.
@@ -46,10 +101,11 @@ only the dashboard. Detection, Gemini feedback and SQLite logging run separately
 The dashboard itself needs no camera, model downloads or Gemini credentials.
 It can also inspect existing history while detection is stopped.
 
-The dashboard's chat panel needs both processes running. Start `main.py` in the
-first window and `dashboard.py` in the second, using the same `--config` file if
-you override the default. Typed messages wait in the local queue while Vision
-is stopped; once Vision runs, the chat panel displays its generated text reply.
+The dashboard's chat panel needs both processes running. Start `main.py --focus`
+in the first window and `dashboard.py` in the second, using the same `--config`
+file if you override the default. Dashboard and Fairy Eye subscribe independently
+to the same live laptop turns; opening one does not consume messages from the
+other. Messages queued for a previous runtime are discarded at startup.
 Without a configured model provider, ordinary dashboard chat uses the existing
 offline reply. The dashboard remains available for statistics when Vision is off.
 

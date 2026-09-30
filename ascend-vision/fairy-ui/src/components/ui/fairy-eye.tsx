@@ -5,7 +5,7 @@ import { Mesh, Program, Renderer, Triangle } from 'ogl';
 import { cn } from '@/lib/utils';
 import { useMicrophone } from '@/hooks/use-microphone';
 import { stepEyeAnimation, type EyeAnimationState, type EyeMode } from '@/lib/eye-animation';
-import { constrainGaze, EXPRESSIONS, stepSpring, type EyeExpression } from '@/lib/eye-motion';
+import { constrainGaze, EXPRESSIONS, type EyeExpression } from '@/lib/eye-motion';
 export type { EyeExpression } from '@/lib/eye-motion';
 
 export interface FairyEyeProps {
@@ -31,7 +31,21 @@ export interface FairyEyeProps {
   /** Hue degree rotation (-180..180) for dynamic palette shifts. */
   hue?: number;
   maxHoverIntensity?: number;
+  /** Uses a stronger bounded gaze response for a valid camera face target. */
+  faceTracking?: boolean;
 }
+
+type EyePose = {
+  pupilOffset: { x: number; y: number };
+  irisScale: number;
+  dilation: number;
+  baseColor: string;
+  glowColor: string;
+  coreColor: string;
+  expression: EyeExpression;
+  hue: number;
+  maxHoverIntensity: number;
+};
 
 const vertex = `attribute vec2 position; attribute vec2 uv; varying vec2 vUv;
 void main(){vUv=uv;gl_Position=vec4(position,0.,1.);}`;
@@ -39,7 +53,7 @@ void main(){vUv=uv;gl_Position=vec4(position,0.,1.);}`;
 // Procedural geometry only: no external textures, images, or prerecorded clips.
 const fragment = `precision highp float;
 varying vec2 vUv;
-uniform float level, irisScale, dilation, blink, lid, lowerLid, lidSlant, focused, hue;
+uniform float level, irisScale, dilation, blink, lid, lowerLid, lidSlant, focused, hue, ringRotation;
 uniform vec2 gaze, resolution;
 uniform vec3 baseColor, glowColor, coreColor;
 
@@ -47,9 +61,8 @@ float disk(float r, float radius, float feather) {
   return 1.0 - smoothstep(radius - feather, radius + feather, r);
 }
 
-float eyeHeight(float x) {
-  float xx = abs(x) / 0.75;
-  return 0.43 * pow(max(0.0, 1.0 - xx * xx), 0.82);
+float ring(float r, float radius, float width) {
+  return 1.0 - smoothstep(width, width + 0.0025, abs(r - radius));
 }
 
 vec3 rgb2yiq(vec3 c) {
@@ -82,44 +95,86 @@ vec3 adjustHue(vec3 color, float hueDeg) {
 void main() {
   vec2 p = (vUv - 0.5) * 2.0;
   p.x *= resolution.x / resolution.y;
+  float r = length(p);
+  float a = atan(p.y, p.x);
+
   vec3 bCol = adjustHue(baseColor, hue);
   vec3 gCol = adjustHue(glowColor, hue);
   vec3 cCol = adjustHue(coreColor, hue);
-  float height = eyeHeight(p.x);
-  float edgeDistance = max(abs(p.x) - 0.75, abs(p.y) - height);
-  float scleraMask = 1.0 - smoothstep(-0.006, 0.006, edgeDistance);
-  float rim = exp(-pow(edgeDistance * 125.0, 2.0));
-  vec3 sclera = mix(vec3(0.94, 0.97, 0.98), vec3(0.61, 0.73, 0.79),
-    0.48 * smoothstep(0.08, 0.43, abs(p.y)));
-  vec3 col = sclera;
 
-  // The iris is half the visible eye width and clipped by the sclera mask.
-  vec2 irisCenter = gaze * vec2(0.15, 0.11);
-  vec2 irisPoint = (p - irisCenter) / irisScale;
-  float irisRadius = length(irisPoint);
-  float irisMask = disk(irisRadius, 0.37, 0.006);
-  float radial = 1.0 - smoothstep(0.06, 0.37, irisRadius);
-  float texture = sin(atan(irisPoint.y, irisPoint.x) * 22.0 + irisRadius * 25.0) * 0.035;
-  vec3 iris = mix(bCol * 0.62, gCol * (0.70 + level * 0.16), clamp(radial * 0.76 + texture, 0.0, 1.0));
-  col = mix(col, iris, irisMask);
-  col += gCol * 0.13 * exp(-pow((irisRadius - 0.36) * 95.0, 2.0)) * irisMask;
+  // Bounded glow comes from the shared motion model.
+  vec3 col = gCol * (0.065 + level * 0.20) * exp(-r * r * (2.9 - level * 0.8));
+  col += gCol * (0.20 + level * 0.48) * exp(-pow((r - 0.65) * 12.0, 2.0));
 
-  float pupilRadius = clamp(0.16 + dilation * 0.018 - focused * 0.016, 0.11, 0.20);
-  col = mix(col, vec3(0.016, 0.036, 0.055), disk(irisRadius, pupilRadius, 0.006));
-  vec2 reflection = p - vec2(-0.095, 0.115);
-  float catchlight = disk(length(reflection), 0.036, 0.008);
-  col = mix(col, mix(vec3(1.0), cCol, 0.12), catchlight * irisMask);
+  // Translucent spherical outer lens and luminous rim
+  col += bCol * 0.32 * disk(r, 0.65, 0.005);
+  col += gCol * (0.18 + level * 0.22) * ring(r, 0.651, 0.0015);
+  col += gCol * (0.10 + level * 0.16) * ring(r, 0.625, 0.001);
 
-  float closure = clamp((0.65 - lid) * 0.8 + blink * 0.9, 0.0, 1.0);
-  float upperEdge = height - closure * 0.55 + p.x * lidSlant * 0.12;
-  float lowerEdge = -height + max(lowerLid, 0.0) * 0.32 + blink * 0.42;
-  float upperCover = smoothstep(upperEdge - 0.006, upperEdge + 0.006, p.y);
-  float lowerCover = 1.0 - smoothstep(lowerEdge - 0.006, lowerEdge + 0.006, p.y);
-  col = mix(col, vec3(0.025, 0.055, 0.078), clamp(upperCover + lowerCover, 0.0, 1.0));
-  col += gCol * 0.24 * exp(-pow((p.y - upperEdge) * 105.0, 2.0)) * scleraMask;
-  col += gCol * 0.13 * exp(-pow((p.y - lowerEdge) * 105.0, 2.0)) * scleraMask;
-  col += gCol * (0.22 + level * 0.13) * rim;
-  gl_FragColor = vec4(max(col, vec3(0.0)), max(scleraMask, rim * 0.68));
+  // The spiked second ring turns independently; the outer lens stays still.
+  float corner = pow(abs(cos(2.0 * (a - ringRotation - 0.785398))), 24.0);
+  float shell = 0.526 + 0.065 * corner;
+  col = mix(col, bCol * 0.11, disk(r, shell, 0.003));
+  col += bCol * 0.36 * ring(r, shell, 0.004);
+  col += gCol * (0.045 + level * 0.08) * ring(r, 0.50, 0.001);
+
+  float scale = irisScale * mix(1.0, 0.92, focused);
+  vec2 q = (p - gaze * 0.025) / scale;
+  float angle = atan(q.y, q.x);
+  float ir = length(q);
+
+  // 4. Concentric Rings: Bright Inner White-Pink Ring & Secondary Cyan Depth Rings
+  float innerGlow = exp(-pow((ir - 0.425) * 27.0, 2.0));
+  col += gCol * (0.24 + level * 0.45) * innerGlow;
+  // Emissive white-pink pearl ring that flares with volume
+  vec3 brightRingCol = mix(cCol, vec3(1.0, 0.92, 0.96), 0.70) * (0.88 + level * 0.24);
+  col = mix(col, brightRingCol, disk(ir, 0.426, 0.0025));
+
+  for (int i = 0; i < 3; i++) {
+    float depth = float(i) / 2.0;
+    vec2 center = gaze * (0.035 + depth * 0.155);
+    float cr = length((p - center) / scale);
+    float radius = mix(0.331, 0.148, depth) * mix(1.0, 0.80, focused) + dilation * 0.018 + level * 0.025;
+    float lighting = 0.82 + 0.18 * cos(angle + depth * 0.8);
+    vec3 cone = mix(mix(cCol, gCol, 0.32) * 0.76, bCol * 0.24, depth) * lighting;
+    col = mix(col, cone, disk(cr, radius, 0.002));
+    col += gCol * (0.14 + 0.24 * depth + level * 0.35) * ring(cr, radius, 0.0009);
+  }
+
+  // Deep dark pupil center
+  float pupilRadius = clamp(0.14 + dilation * 0.018 + level * 0.02, 0.10, 0.22) * mix(1.0, 0.78, focused);
+  float pradius = length((p - gaze * 0.19) / scale);
+  col = mix(col, bCol * 0.10, disk(pradius, pupilRadius, 0.002));
+  col += gCol * (0.35 + level * 0.35) * ring(pradius, pupilRadius, 0.001);
+
+  col += gCol * 0.24 * exp(-pow((ir - 0.426) * 35.0, 2.0)) * (1.0 - disk(ir, 0.423, 0.003));
+
+  // Fixed Fairy glint follows the inner optical group; it never orbits.
+  col = mix(col, vec3(0.96, 0.97, 1.0), disk(length(q - vec2(0.145, -0.155)), 0.082, 0.005));
+
+  // Dual-visor mask: Upper eyelid with brow slant + Smiling lower eyelid crescent
+  float upperLidCut = lid - blink * 0.7 + 0.12 * p.x * p.x + abs(p.x) * lidSlant;
+  float topVisor = smoothstep(upperLidCut - 0.003, upperLidCut + 0.003, p.y) * disk(r, shell, 0.003);
+
+  // Lower smiling crescent (pushes up when smiling or happy)
+  float lowerLidCut = -0.65 + lowerLid + blink * 0.55 - 0.22 * p.x * p.x;
+  float bottomVisor = (1.0 - smoothstep(lowerLidCut - 0.003, lowerLidCut + 0.003, p.y)) * step(0.001, lowerLid + blink) * disk(r, shell, 0.003);
+
+  float visor = clamp(topVisor + bottomVisor, 0.0, 1.0);
+  col = mix(col, bCol * 0.095 + gCol * 0.014, visor);
+
+  // Luminous eyelid rim outlines
+  col += gCol * 0.09 * ring(p.y - 0.12 * p.x * p.x - abs(p.x) * lidSlant, lid - blink * 0.7, 0.001) * disk(r, shell, 0.003);
+  col += gCol * 0.10 * ring(p.y + 0.22 * p.x * p.x, lowerLidCut, 0.0012) * step(0.001, lowerLid + blink) * disk(r, shell, 0.003);
+
+  // Atmospheric edge glow and film grain
+  col += gCol * (0.05 + level * 0.08) * ring(r, 0.685, 0.0008);
+  float grain = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+  col += (grain - 0.5) * 0.012 * disk(r, 0.70, 0.05);
+  col *= 1.0 - 0.045 * (0.5 + 0.5 * sin(gl_FragCoord.y * 3.14159265));
+
+  float alpha = clamp(max(col.r, max(col.g, col.b)) * 1.5 + disk(r, 0.65, 0.006) * 0.92, 0.0, 1.0) * (1.0 - smoothstep(0.8, 0.98, r));
+  gl_FragColor = vec4(max(col, vec3(0.0)), alpha);
 }`;
 
 function rgb(hex: string) {
@@ -127,7 +182,6 @@ function rgb(hex: string) {
   return [1, 3, 5].map(index => parseInt(valid.slice(index, index + 2), 16) / 255);
 }
 const clamp = (value: number, min: number, max: number) => Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : min;
-const eyeOutline = 'M50 200 C107 84 293 84 350 200 C293 316 107 316 50 200 Z';
 
 /** Canonical Fairy Eye with a shared bounded motion state for WebGL and SVG. */
 export function FairyEye({
@@ -136,20 +190,29 @@ export function FairyEye({
   enableVoiceControl = false, voiceSensitivity = 1.5, audioLevel,
   onVoiceDetected, onAudioError, reducedMotion = false,
   expression = 'open', audioReactive = true, speaking = false, motionMode,
-  hue = 0, maxHoverIntensity = 0.8,
+  hue = 0, maxHoverIntensity = 0.8, faceTracking = false,
 }: FairyEyeProps) {
   const host = useRef<HTMLDivElement>(null);
   const assembly = useRef<HTMLDivElement>(null);
   const fallbackPupil = useRef<SVGGElement>(null);
-  const fallbackUpperLid = useRef<SVGPathElement>(null);
-  const fallbackLowerLid = useRef<SVGPathElement>(null);
+  const fallbackSpikes = useRef<SVGGElement>(null);
+  const fallbackVisor = useRef<SVGPathElement>(null);
+  const speechPose = useRef<EyePose | null>(null);
   const clipId = useId().replace(/:/g, '');
-  const scleraGradientId = `${clipId}-sclera`;
-  const irisGradientId = `${clipId}-iris`;
   const [webgl, setWebgl] = useState(false);
   const mic = useMicrophone(enableVoiceControl && audioLevel === undefined, voiceSensitivity);
-  const latest = useRef({ pupilOffset, irisScale, dilation, baseColor, glowColor, coreColor, audioLevel, onVoiceDetected, reducedMotion, expression, audioReactive, speaking, motionMode, hue, maxHoverIntensity });
-  latest.current = { pupilOffset, irisScale, dilation, baseColor, glowColor, coreColor, audioLevel, onVoiceDetected, reducedMotion, expression, audioReactive, speaking, motionMode, hue, maxHoverIntensity };
+  const speakingNow = speaking || motionMode === 'speaking';
+  if (!speakingNow) speechPose.current = null;
+  else if (!speechPose.current) speechPose.current = {
+    pupilOffset, irisScale, dilation, baseColor, glowColor, coreColor,
+    expression, hue, maxHoverIntensity,
+  };
+  const pose = speechPose.current ?? {
+    pupilOffset, irisScale, dilation, baseColor, glowColor, coreColor,
+    expression, hue, maxHoverIntensity,
+  };
+  const latest = useRef({ ...pose, audioLevel, onVoiceDetected, reducedMotion, audioReactive, speaking, motionMode, faceTracking });
+  latest.current = { ...pose, audioLevel, onVoiceDetected, reducedMotion, audioReactive, speaking, motionMode, faceTracking };
 
   useEffect(() => { if (mic.error) onAudioError?.(mic.error); }, [mic.error, onAudioError]);
 
@@ -194,6 +257,7 @@ export function FairyEye({
       program = new Program(gl, { vertex, fragment, transparent: true, uniforms: {
         level: { value: 0.4 }, blink: { value: 0 },
         gaze: { value: [0, 0] }, resolution: { value: [1, 1] },
+        ringRotation: { value: 0 },
         irisScale: { value: 1 }, dilation: { value: 0 },
         lid: { value: 0.65 }, lowerLid: { value: 0 }, lidSlant: { value: 0 },
         focused: { value: 0 }, hue: { value: 0 },
@@ -220,7 +284,6 @@ export function FairyEye({
     const curBase = initPal ? rgb(initPal.base) : rgb(latest.current.baseColor);
     const curGlow = initPal ? rgb(initPal.glow) : rgb(latest.current.glowColor);
     const curCore = initPal ? rgb(initPal.core) : rgb(latest.current.coreColor);
-    const drag = { x: 0, y: 0 }, velocity = { x: 0, y: 0 };
 
     const render = (now: number) => {
       const dtMs = Math.max(0, Math.min(now - previous, 50)); previous = now;
@@ -265,32 +328,30 @@ export function FairyEye({
         : props.audioReactive && (rms > 0.08 || Math.hypot(constrained.pupil.x, constrained.pupil.y) > 0.01)
           ? 'listening' : 'idle');
       eyeMotion = stepEyeAnimation(eyeMotion, {
-        mode, audioLevel: props.audioReactive ? rms : 0, gaze: constrained.pupil, reducedMotion: reduced,
+        mode, audioLevel: props.audioReactive ? rms : 0, gaze: constrained.pupil,
+        faceTracking: props.faceTracking, reducedMotion: reduced,
       }, dtMs);
       const still = reduced || mode === 'paused' || mode === 'offline';
-      if (still) {
-        drag.x = drag.y = velocity.x = velocity.y = 0;
-      } else if (mode !== 'speaking') {
-        stepSpring(drag, velocity, constrained.drag, dt);
-      }
+      if (still && assembly.current) assembly.current.style.transform = '';
 
-      if (assembly.current) {
-        assembly.current.style.transform = `perspective(800px) translate3d(${drag.x}px, ${drag.y}px, 0) rotateX(${-drag.y * 0.35}deg) rotateY(${drag.x * 0.35}deg)`;
-      }
-
-      // The fallback uses the same bounded iris scale, gaze and lid motion.
+      // SVG Fallback update with idle breathing & voice dilation
       if (fallbackPupil.current) {
         const totalScale = clamp(props.irisScale, 0.65, 1.2) * (1 - focused * 0.12) * eyeMotion.irisScale;
-        fallbackPupil.current.setAttribute('transform', `translate(${eyeMotion.gaze.x * 30} ${eyeMotion.gaze.y * 22}) translate(200 200) scale(${totalScale}) translate(-200 -200)`);
+        fallbackPupil.current.setAttribute('transform', `translate(${eyeMotion.gaze.x * 32} ${eyeMotion.gaze.y * 32}) translate(200 200) scale(${totalScale}) translate(-200 -200)`);
       }
-      if (fallbackUpperLid.current && fallbackLowerLid.current) {
-        const closure = clamp((0.65 - lid) * 0.8 + eyeMotion.blink * 0.9, 0, 1);
-        const upperY = 113 + closure * 110;
-        const lowerY = 287 - Math.max(lowerLid, 0) * 64 - eyeMotion.blink * 84;
-        const upperControl = (4 * upperY - 200) / 3;
-        const lowerControl = (4 * lowerY - 200) / 3;
-        fallbackUpperLid.current.setAttribute('d', `M0 0H400V200C300 ${upperControl + lidSlant * 18} 100 ${upperControl - lidSlant * 18} 0 200Z`);
-        fallbackLowerLid.current.setAttribute('d', `M0 400H400V200C300 ${lowerControl} 100 ${lowerControl} 0 200Z`);
+      if (fallbackSpikes.current) {
+        fallbackSpikes.current.setAttribute('transform', `rotate(${eyeMotion.ringRotation * 180 / Math.PI} 200 200)`);
+      }
+      if (fallbackVisor.current) {
+        const visibleLid = lid - eyeMotion.blink * 0.7;
+        const visibleLowerLid = lowerLid + eyeMotion.blink * 0.55;
+        const edge = 200 - visibleLid * 200;
+        if (visibleLowerLid > 0.04) {
+          const bEdge = 200 + 130 - visibleLowerLid * 160;
+          fallbackVisor.current.setAttribute('d', `M60 40H340V${edge - 24}Q200 ${edge + 24} 60 ${edge - 24}ZM60 360H340V${bEdge + 24}Q200 ${bEdge - 24} 60 ${bEdge + 24}Z`);
+        } else {
+          fallbackVisor.current.setAttribute('d', `M60 40H340V${edge - 24}Q200 ${edge + 24} 60 ${edge - 24}Z`);
+        }
       }
 
       if (mesh && program && renderer) {
@@ -298,6 +359,7 @@ export function FairyEye({
         u.level.value = eyeMotion.glow;
         u.blink.value = eyeMotion.blink;
         u.gaze.value = [eyeMotion.gaze.x, -eyeMotion.gaze.y];
+        u.ringRotation.value = eyeMotion.ringRotation;
         u.lid.value = lid;
         u.lowerLid.value = lowerLid;
         u.lidSlant.value = lidSlant;
@@ -318,37 +380,23 @@ export function FairyEye({
     return () => { cancelAnimationFrame(frame); releaseGL(false); latest.current.onVoiceDetected?.(false); };
   }, [mic.level]);
 
-  const activePal = (expression ? EXPRESSIONS[expression]?.palette : undefined);
-  const activeBase = activePal?.base ?? baseColor;
-  const activeGlow = activePal?.glow ?? glowColor;
-  const activeCore = activePal?.core ?? coreColor;
+  const activePal = (pose.expression ? EXPRESSIONS[pose.expression]?.palette : undefined);
+  const activeBase = activePal?.base ?? pose.baseColor!;
+  const activeGlow = activePal?.glow ?? pose.glowColor!;
+  const activeCore = activePal?.core ?? pose.coreColor!;
 
-  return <div ref={assembly} className={cn('relative aspect-square', className)} role="img" aria-label="Fairy eye, an audio-reactive celestial iris" data-expression={expression}>
+  return <div ref={assembly} className={cn('relative aspect-square', className)} role="img" aria-label="Fairy eye, an audio-reactive celestial iris" data-expression={pose.expression}>
     {!webgl && <svg className="eye-fallback" viewBox="0 0 400 400" aria-hidden="true">
-      <defs>
-        <clipPath id={clipId}><path d={eyeOutline}/></clipPath>
-        <radialGradient id={scleraGradientId}>
-          <stop offset="0%" stopColor="#f3f8fa"/>
-          <stop offset="72%" stopColor="#e6f0f4"/>
-          <stop offset="100%" stopColor="#9fb4c0"/>
-        </radialGradient>
-        <radialGradient id={irisGradientId}>
-          <stop offset="0%" stopColor={activeCore}/>
-          <stop offset="48%" stopColor={activeGlow}/>
-          <stop offset="100%" stopColor={activeBase}/>
-        </radialGradient>
-      </defs>
-      <path className="eye-sclera" d={eyeOutline} fill={`url(#${scleraGradientId})`}/>
-      <g ref={fallbackPupil} className="eye-iris-group" clipPath={`url(#${clipId})`}>
-        <circle className="eye-iris" cx="200" cy="200" r="73" fill={`url(#${irisGradientId})`} stroke={activeBase} strokeWidth="2"/>
-        <circle className="eye-pupil" cx="200" cy="200" r={32 + dilation * 4} fill="#07131f"/>
+      <circle cx="200" cy="200" r="133" fill={activeBase} stroke={activeGlow} />
+      <g ref={fallbackSpikes}><path d="M 117 86 Q200 116 283 86 L314 117 Q284 200 314 283 L283 314 Q200 284 117 314 L86 283 Q116 200 86 117 Z" fill="#04152b"/></g>
+      <g ref={fallbackPupil}>
+        <circle cx="200" cy="200" r="86" fill={activeCore}/><circle cx="200" cy="200" r="64" fill={activeGlow}/>
+        <circle cx="200" cy="200" r="58" fill={activeBase} stroke={activeGlow}/>
+        <circle cx="200" cy="200" r="51" fill={activeBase} stroke={activeGlow} strokeOpacity=".6"/>
+        <circle cx="200" cy="200" r={43 + dilation * 7} fill={activeBase}/><circle cx="229" cy="231" r="17" fill={activeCore}/>
       </g>
-      <ellipse className="eye-catchlight" cx="181" cy="177" rx="7" ry="9" fill="#f8fdff" clipPath={`url(#${clipId})`}/>
-      <g clipPath={`url(#${clipId})`}>
-        <path ref={fallbackUpperLid} className="eye-upper-lid" fill="#07131f" stroke={activeGlow} strokeWidth="1"/>
-        <path ref={fallbackLowerLid} className="eye-lower-lid" fill="#07131f" stroke={activeGlow} strokeWidth="1"/>
-      </g>
-      <path d={eyeOutline} fill="none" stroke={activeGlow} strokeOpacity=".55" strokeWidth="2"/>
+      <defs><clipPath id={clipId}><circle cx="200" cy="200" r="110"/></clipPath></defs>
+      <path ref={fallbackVisor} clipPath={`url(#${clipId})`} fill="#04152b"/>
     </svg>}
     <div ref={host} className="absolute inset-0" data-testid="fairy-renderer" />
   </div>;

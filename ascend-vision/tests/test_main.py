@@ -350,42 +350,50 @@ def test_dashboard_queue_receives_the_shared_assistant_answer(tmp_path):
     )
     app = create_app(config, chat_queue=ChatIpcQueue(tmp_path / "chat_ipc.db"))
     client = app.test_client()
-    submission = client.post('/api/chat/messages', json={'text': 'How is focus going?'})
-    assert submission.status_code == 202
-    message_id = submission.json['messageId']
+    message_id = None
 
     class Assistant:
         def respond(self, user_text, context, *, max_words, session_key):
             assert user_text == "How is focus going?"
             assert context.user_query == user_text
             assert max_words == 25
-            assert session_key == ("local", "dashboard", "local-dashboard")
+            assert session_key[:2] == ("local", "voice")
             return AssistantReply("Your focus is steady.", "model")
 
     class WaitingStream(Stream):
         def read(self, after_sequence, timeout):
+            nonlocal message_id
+            if message_id is None:
+                submission = client.post('/api/chat/messages', json={'text': 'How is focus going?'})
+                assert submission.status_code == 202
+                message_id = submission.json['messageId']
             deadline = time.monotonic() + 2.0
-            while not client.get('/api/chat/messages?after=0').json['messages'] and time.monotonic() < deadline:
+            events = []
+            while time.monotonic() < deadline:
+                events = client.get('/api/chat/events?after=0').json['events']
+                if any(event['kind'] == 'assistant' for event in events):
+                    break
                 time.sleep(0.01)
-            if not client.get('/api/chat/messages?after=0').json['messages']:
+            if not any(event['kind'] == 'assistant' for event in events):
                 raise AssertionError("Vision did not answer the queued dashboard message")
+            self.events = events
             raise KeyboardInterrupt
 
     class Face:
         def close(self):
             pass
 
+    capture = WaitingStream()
     run(
-        config, detector=Detector(), capture=WaitingStream(),
+        config, detector=Detector(), capture=capture,
         hand_tracker=Hands(), face_tracker=Face(), voice_listener=False,
         assistant_service=Assistant(),
     )
 
-    replies = client.get('/api/chat/messages?after=0').json['messages']
-    assert len(replies) == 1
-    assert replies[0]["messageId"] == message_id
-    assert replies[0]["status"] == "reply"
-    assert replies[0]["text"] == "Your focus is steady."
+    assert message_id
+    answers = [event for event in capture.events if event['kind'] == 'assistant']
+    assert len(answers) == 1
+    assert answers[0]["text"] == "Your focus is steady."
 
 
 def test_dashboard_chat_uses_stable_session_start_time(tmp_path, monkeypatch):
@@ -402,24 +410,24 @@ def test_dashboard_chat_uses_stable_session_start_time(tmp_path, monkeypatch):
     )
     queue = ChatIpcQueue(tmp_path / "chat_ipc.db")
     client = create_app(config, chat_queue=queue).test_client()
-    assert client.post('/api/chat/messages', json={'text': 'early chat'}).status_code == 202
     first_seen = threading.Event()
     second_seen = threading.Event()
     observed = []
 
     class Assistant:
         def respond(self, user_text, context, *, max_words, session_key):
-            assert session_key == ("local", "dashboard", "local-dashboard")
+            assert session_key[:2] == ("local", "voice")
             observed.append((context.session_duration_minutes, time.perf_counter()))
             (first_seen if user_text == 'early chat' else second_seen).set()
             return AssistantReply('Acknowledged.', 'offline')
 
     class DelayedBridge(ChatRuntimeBridge):
-        def __init__(self, queue, handler):
-            super().__init__(queue, handler, poll_seconds=0.01)
+        def __init__(self, queue, handler, **kwargs):
+            super().__init__(queue, handler, poll_seconds=0.01, **kwargs)
 
         def start(self):
             time.sleep(0.25)
+            assert client.post('/api/chat/messages', json={'text': 'early chat'}).status_code == 202
             super().start()
             assert first_seen.wait(2), 'queued chat was not handled before timer reset'
 
@@ -493,19 +501,27 @@ def test_runtime_discards_old_proposals_but_keeps_approved_memories(tmp_path):
     )
     app = create_app(config, chat_queue=queue, memory_store=memory)
     client = app.test_client()
-    submission = client.post('/api/chat/messages', json={'text': 'What do you remember about me?'})
-    message_id = submission.json['messageId']
+    message_id = None
 
     class WaitingStream(Stream):
         def read(self, after_sequence, timeout):
             frame = super().read(after_sequence, timeout)
             if self.sequence == 1:
                 return frame
+            nonlocal message_id
+            if message_id is None:
+                submission = client.post('/api/chat/messages', json={'text': 'What do you remember about me?'})
+                message_id = submission.json['messageId']
             deadline = time.monotonic() + 2.0
-            while not client.get('/api/chat/messages?after=0').json['messages'] and time.monotonic() < deadline:
+            events = []
+            while time.monotonic() < deadline:
+                events = client.get('/api/chat/events?after=0').json['events']
+                if any(event['kind'] == 'assistant' for event in events):
+                    break
                 time.sleep(0.01)
-            if not client.get('/api/chat/messages?after=0').json['messages']:
+            if not any(event['kind'] == 'assistant' for event in events):
                 raise AssertionError('Vision did not answer the memory query')
+            self.events = events
             raise KeyboardInterrupt
 
     processed = []
@@ -518,14 +534,15 @@ def test_runtime_discards_old_proposals_but_keeps_approved_memories(tmp_path):
         def close(self):
             pass
 
-    run(config, detector=Detector(), capture=WaitingStream(), hand_tracker=Hands(),
+    capture = WaitingStream()
+    run(config, detector=Detector(), capture=capture, hand_tracker=Hands(),
         face_tracker=Face(), voice_listener=False)
 
     assert memory.pending() == []
     assert [item['text'] for item in memory.active()] == ['I prefer green tea']
     assert len(processed) == 1
-    reply = client.get('/api/chat/messages?after=0').json['messages'][0]
-    assert reply['messageId'] == message_id
+    reply = next(event for event in capture.events if event['kind'] == 'assistant')
+    assert reply['turn_id'] == message_id
     assert 'green tea' in reply['text'].lower()
 
 
@@ -557,18 +574,26 @@ def test_runtime_answers_dashboard_hub_status_with_dedicated_credential(tmp_path
         feedback=replace(Config().feedback, enabled=False),
     )
     client = create_app(config, chat_queue=queue).test_client()
-    submission = client.post('/api/chat/messages', json={'text': 'Is Codex CLI still working?'})
+    submission = None
 
     class WaitingStream(Stream):
         def read(self, after_sequence, timeout):
             frame = super().read(after_sequence, timeout)
             if self.sequence == 1:
                 return frame
+            nonlocal submission
+            if submission is None:
+                submission = client.post('/api/chat/messages', json={'text': 'Is Codex CLI still working?'})
             deadline = time.monotonic() + 2.0
-            while not client.get('/api/chat/messages?after=0').json['messages'] and time.monotonic() < deadline:
+            events = []
+            while time.monotonic() < deadline:
+                events = client.get('/api/chat/events?after=0').json['events']
+                if any(event['kind'] == 'assistant' for event in events):
+                    break
                 time.sleep(0.01)
-            if not client.get('/api/chat/messages?after=0').json['messages']:
+            if not any(event['kind'] == 'assistant' for event in events):
                 raise AssertionError('Vision did not answer the status query')
+            self.events = events
             raise KeyboardInterrupt
 
     class Face:
@@ -578,17 +603,18 @@ def test_runtime_answers_dashboard_hub_status_with_dedicated_credential(tmp_path
         def close(self):
             pass
 
-    run(config, detector=Detector(), capture=WaitingStream(), hand_tracker=Hands(),
+    capture = WaitingStream()
+    run(config, detector=Detector(), capture=capture, hand_tracker=Hands(),
         face_tracker=Face(), voice_listener=False)
 
-    reply = client.get('/api/chat/messages?after=0').json['messages'][0]
-    assert reply['messageId'] == submission.json['messageId']
+    reply = next(event for event in capture.events if event['kind'] == 'assistant')
     assert reply['text'].startswith('Codex CLI is working.')
     assert 'status shelf' in reply['text']
     assert opened == [('http://localhost:8000', 'reader-id.reader-secret', 3.0)]
 
 
 def test_microphone_hub_status_reaches_assistant_without_replacing_session_status(tmp_path, monkeypatch):
+    from integrations.chat_ipc import ChatIpcQueue
     from voice_listener import VoiceCommandParser
 
     chats = []
@@ -656,14 +682,22 @@ def test_microphone_hub_status_reaches_assistant_without_replacing_session_statu
         storage=replace(config.storage, database=tmp_path / 'session.db'),
         ascend=replace(config.ascend, enabled=False),
         feedback=replace(config.feedback, enabled=False),
-        voice_commands=replace(config.voice_commands, enabled=True),
+        voice_commands=replace(config.voice_commands, enabled=True, conversational_mode=True),
     )
+    original_enqueue = ChatIpcQueue.enqueue
+
+    def record_enqueue(queue, text, source='dashboard', **kwargs):
+        chats.append((text, source))
+        return original_enqueue(queue, text, source=source, **kwargs)
+
+    monkeypatch.setattr(ChatIpcQueue, 'enqueue', record_enqueue)
     monkeypatch.setattr('main.FeedbackService', Feedback)
     monkeypatch.setattr('main.VoiceCommandListener', Listener)
 
     run(config, detector=Detector(), capture=Stream(), hand_tracker=Hands(), face_tracker=Face())
 
-    assert chats == ["What is Antigravity's status?", "Is Codex CLI still working?"]
+    assert chats == [("What is Antigravity's status?", 'voice'),
+                     ('Is Codex CLI still working?', 'voice')]
     assert len(announcements) == 1
     assert announcements[0].startswith('Session status:')
 
@@ -859,18 +893,28 @@ def test_memory_storage_failure_keeps_camera_and_dashboard_chat_available(tmp_pa
     )
     app = create_app(config, chat_queue=queue)
     client = app.test_client()
-    submission = client.post('/api/chat/messages', json={'text': 'hello'})
+    message_id = None
 
     class WaitingStream(Stream):
         def read(self, after_sequence, timeout):
             frame = super().read(after_sequence, timeout)
             if self.sequence == 1:
                 return frame
+            nonlocal message_id
+            if message_id is None:
+                submission = client.post('/api/chat/messages', json={'text': 'hello'})
+                assert submission.status_code == 202
+                message_id = submission.json['messageId']
             deadline = time.monotonic() + 5.0
-            while not client.get('/api/chat/messages?after=0').json['messages'] and time.monotonic() < deadline:
+            events = []
+            while time.monotonic() < deadline:
+                events = client.get('/api/chat/events?after=0').json['events']
+                if any(event['kind'] == 'assistant' for event in events):
+                    break
                 time.sleep(0.01)
-            if not client.get('/api/chat/messages?after=0').json['messages']:
+            if not any(event['kind'] == 'assistant' for event in events):
                 raise AssertionError('Chat stopped when memory storage failed')
+            self.events = events
             raise KeyboardInterrupt
 
     processed = []
@@ -887,8 +931,27 @@ def test_memory_storage_failure_keeps_camera_and_dashboard_chat_available(tmp_pa
     run(config, detector=Detector(), capture=stream, hand_tracker=Hands(),
         face_tracker=Face(), voice_listener=False)
 
-    replies = client.get('/api/chat/messages?after=0').json['messages']
     assert stream.closed and stream.captured_count >= 2
     assert len(processed) == 1
-    assert replies[0]['messageId'] == submission.json['messageId']
-    assert replies[0]['status'] == 'reply'
+    reply = next(event for event in stream.events if event['kind'] == 'assistant')
+    assert reply['turn_id'] == message_id
+
+
+def test_stop_control_targets_only_tracked_local_browser_tasks():
+    import main
+
+    calls = []
+
+    class BrowserClient:
+        def control(self, task_id, command, session_key):
+            calls.append((task_id, command, session_key))
+
+    session_key = ('local', 'voice', 'laptop-session')
+    assert main.stop_local_browser_tasks(
+        BrowserClient(), ('task-one', 'task-two'), session_key,
+    ) == 2
+    assert calls == [
+        ('task-one', 'stop', session_key),
+        ('task-two', 'stop', session_key),
+    ]
+    assert main.stop_local_browser_tasks(None, ('task-one',), session_key) == 0

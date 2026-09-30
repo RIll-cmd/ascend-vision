@@ -53,6 +53,7 @@ htmlcov/
 .coverage.*
 test-results/
 playwright-report/
+/ascend-vision/fairy-ui/artifacts/fairy-eye-review/
 .pytest-tmp-*/
 **/.pytest-tmp-*/
 
