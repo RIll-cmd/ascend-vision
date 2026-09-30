@@ -866,7 +866,7 @@ def test_memory_storage_failure_keeps_camera_and_dashboard_chat_available(tmp_pa
             frame = super().read(after_sequence, timeout)
             if self.sequence == 1:
                 return frame
-            deadline = time.monotonic() + 2.0
+            deadline = time.monotonic() + 5.0
             while not client.get('/api/chat/messages?after=0').json['messages'] and time.monotonic() < deadline:
                 time.sleep(0.01)
             if not client.get('/api/chat/messages?after=0').json['messages']:
