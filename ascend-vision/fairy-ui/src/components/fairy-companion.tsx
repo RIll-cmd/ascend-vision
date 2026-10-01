@@ -62,6 +62,7 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
   const settingsRef = useRef<HTMLDivElement>(null);
   const theme = themes[themeIndex];
   const state = vision.state;
+  const recovery = runtime && state?.runtimeMode === 'recovery-chat';
   const faceTarget = runtime ? (vision.connected ? state?.faceTarget : null) : browserFace;
   const isPaused = runtime ? state?.mode !== 'focus' : paused;
   const voiceActive = runtime ? Boolean(state?.voiceEnabled && vision.connected) : (microphone && !error);
@@ -173,13 +174,14 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
           />
         )}
         <span className={`status-dot ${eyeMode === 'paused' || eyeMode === 'offline' ? 'dim' : ''}`}/>
-        <span>{eyeMode === 'offline' ? 'Vision offline' : isPaused ? 'Background mode' : 'Focus mode'}</span>
+        <span>{eyeMode === 'offline' ? 'Vision offline' : recovery ? 'Recovery chat' : isPaused ? 'Background mode' : 'Focus mode'}</span>
         <span className="top-divider"/>
         <span className="version">COMPANION / 01</span>
       </div>
     </header>
 
     <section className="presence" aria-labelledby="presence-title">
+      {recovery && <p role="status" className="control-hint">{state?.runtimeNotice}</p>}
       <div className="session-label"><span className="tiny-cross">+</span> Your space to focus <span className="tiny-cross">+</span></div>
       <div className="eye-stage" data-eye-mode={eyeMode} onPointerMove={event => {
         const box = event.currentTarget.getBoundingClientRect();
@@ -219,14 +221,14 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
       <p aria-live="polite" className="control-hint">Eye expression: {manualExpression ? 'Manual' : 'Automatic'} · {expressionLabel}</p>
 
       <div className="controls" aria-label="Companion controls">
-        <Button variant={voiceActive ? 'default' : 'outline'} onClick={toggleVoice} aria-label={runtime ? (voiceActive ? 'Pause microphone' : 'Resume microphone') : (microphone ? 'Stop microphone' : 'Enable microphone')} aria-pressed={voiceActive} disabled={busy || (runtime && !vision.connected)}>
+        <Button variant={voiceActive ? 'default' : 'outline'} onClick={toggleVoice} aria-label={runtime ? (voiceActive ? 'Pause microphone' : 'Resume microphone') : (microphone ? 'Stop microphone' : 'Enable microphone')} aria-pressed={voiceActive} disabled={recovery || busy || (runtime && !vision.connected)}>
           {voiceActive ? <Mic size={16}/> : <MicOff size={16}/>}<span>{runtime ? (voiceActive ? 'Pause mic' : 'Resume mic') : (microphone ? 'Stop mic' : 'Enable mic')}</span>
         </Button>
-        {runtime && <Button variant="outline" onClick={() => void command('toggle-speech')} aria-label={speechMuted ? 'Unmute speech output' : 'Mute speech output'} aria-pressed={!speechMuted} disabled={busy || !vision.connected}>{speechMuted ? <VolumeX size={16}/> : <Volume2 size={16}/>}<span>{speechMuted ? 'Unmute speech' : 'Mute speech'}</span></Button>}
+        {runtime && <Button variant="outline" onClick={() => void command('toggle-speech')} aria-label={speechMuted ? 'Unmute speech output' : 'Mute speech output'} aria-pressed={!speechMuted} disabled={recovery || busy || !vision.connected}>{speechMuted ? <VolumeX size={16}/> : <Volume2 size={16}/>}<span>{speechMuted ? 'Unmute speech' : 'Mute speech'}</span></Button>}
         {runtime && <Button variant="outline" onClick={() => togglePanel('chat')} aria-expanded={showPanel} aria-label="Open chat with Vision"><MessageSquare size={16}/><span>Chat</span></Button>}
-        {runtime && <Button variant="ghost" size="icon" onClick={() => void command('stop-cancel')} aria-label="Stop speech or current browser tasks and pending actions" disabled={busy || !vision.connected}><CircleStop size={16}/></Button>}
-        <Button variant="outline" onClick={() => setShowCamera(value => !value)} aria-pressed={showCamera}>{showCamera ? <VideoOff size={16}/> : <Video size={16}/>}<span>{showCamera ? 'Hide camera' : 'Show camera'}</span></Button>
-        {runtime && <Button variant="ghost" size="icon" disabled={busy || !vision.connected} aria-label={isPaused ? 'Resume focus' : 'Pause focus'} onClick={() => void command('toggle-focus')}>{isPaused ? <Play size={16}/> : <Pause size={16}/>}</Button>}
+        {runtime && <Button variant="ghost" size="icon" onClick={() => void command('stop-cancel')} aria-label="Stop speech or current browser tasks and pending actions" disabled={recovery || busy || !vision.connected}><CircleStop size={16}/></Button>}
+        <Button variant="outline" disabled={recovery} onClick={() => setShowCamera(value => !value)} aria-pressed={showCamera}>{showCamera ? <VideoOff size={16}/> : <Video size={16}/>}<span>{showCamera ? 'Hide camera' : 'Show camera'}</span></Button>
+        {runtime && <Button variant="ghost" size="icon" disabled={recovery || busy || !vision.connected} aria-label={isPaused ? 'Resume focus' : 'Pause focus'} onClick={() => void command('toggle-focus')}>{isPaused ? <Play size={16}/> : <Pause size={16}/>}</Button>}
         {!runtime && <Button variant="ghost" size="icon" aria-label={paused ? 'Resume focus preview' : 'Pause focus preview'} onClick={() => setPaused(value => !value)}>{paused ? <Play size={16}/> : <Pause size={16}/>}</Button>}
         <div className="settings-anchor" ref={settingsRef}>
           <Button variant="ghost" size="icon" aria-label="Eye appearance" aria-expanded={showSettings} onClick={() => setShowSettings(value => !value)}><Sparkles size={16}/></Button>

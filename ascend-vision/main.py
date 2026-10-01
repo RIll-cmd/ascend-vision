@@ -12,6 +12,9 @@ import threading
 import time
 from contextlib import ExitStack
 
+if __name__ == '__main__':
+    print('ASCEND_STAGE=native_imports', flush=True)
+
 import cv2
 
 from capture import CameraCapture, CaptureError
@@ -19,6 +22,7 @@ from assistant.context import build_conversation_context
 from assistant.hub_status import parse_status_intent
 from assistant.memory import MemoryStore, UnavailableMemoryStore
 from assistant.service import AssistantService
+from assistant.runtime_health import microphone_availability
 from assistant.tool_runtime import ToolRuntime, ToolSpec
 from config import Config, load_config, number
 from detector import PhoneDetector, download_model
@@ -69,6 +73,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         number('duration', duration, .01)
 
     if detector is None:
+        print('ASCEND_STAGE=model_initialization', flush=True)
         detector = PhoneDetector(config.detector)
         LOG.info('Warming up %s on %s', config.detector.model.name, config.detector.device)
         detector.warmup(config.camera.width, config.camera.height)
@@ -107,6 +112,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
     resources = ExitStack()
     focus_ui_bridge = None
     if fairy_ui:
+        print('ASCEND_STAGE=fairy_host', flush=True)
         from focus_ui import FocusUI
         focus_ui_bridge = FocusUI()
         resources.callback(focus_ui_bridge.close)
@@ -737,7 +743,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             )
         if voice_listener is not False and voice_listener is not None:
             resources.callback(voice_listener.close)
+            print('ASCEND_STAGE=microphone_initialization', flush=True)
             voice_listener.start()
+        if focus_ui_bridge is not None:
+            focus_ui_bridge.health.update(microphone=microphone_availability(
+                voice_listener, configured=bool(config.voice_commands.enabled)))
 
         companion_runtime = None
         shadow_mode = bool(getattr(config.companion_context, 'shadow_mode_enabled', False))
@@ -825,6 +835,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             )
             resources.callback(chat_bridge.stop)
             chat_bridge.start()
+            if focus_ui_bridge is not None:
+                focus_ui_bridge.mark_chat_ready()
             resources.callback(local_conversation.stop_accepting)
         except (OSError, sqlite3.Error, RuntimeError) as exc:
             LOG.warning('Dashboard chat unavailable (%s); monitoring continues', type(exc).__name__)
@@ -837,6 +849,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         # Both model initializations are excluded from throughput and duration.
         start = time.perf_counter()
         next_report = start + config.runtime.stats_interval_seconds
+        print('ASCEND_STAGE=camera_initialization', flush=True)
         capture.start()
 
         if config.runtime.preview:
@@ -898,6 +911,9 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 pass
             LOG.info("Camera preview window '%s' created.", WINDOW)
         while duration is None or time.perf_counter() - start < duration:
+            if focus_ui_bridge is not None and focus_ui_bridge.shutdown_requested.is_set():
+                LOG.info('Stopping at owner launcher request')
+                break
             if focus_ui_bridge is not None:
                 for cmd in focus_ui_bridge.drain_commands():
                     if cmd == 'toggle-focus':
@@ -1053,6 +1069,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     rms = getattr(voice_listener, 'current_rms', 0.0) if voice_listener is not None else 0.0
                     is_speaking = getattr(feedback, 'is_speaking', lambda: False)()
                     voice_enabled = getattr(voice_listener, 'enabled', False) if voice_listener is not None else False
+                    focus_ui_bridge.health.update(microphone=microphone_availability(
+                        voice_listener, configured=bool(config.voice_commands.enabled)))
                     focus_ui_bridge.publish(
                         packet.image,
                         mode=manager.mode,
@@ -1513,6 +1531,7 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     try:
         from assistant.runtime_environment import load_runtime_environment
+        print('ASCEND_STAGE=config', flush=True)
         load_runtime_environment(args.config, args.env_file)
         config = load_config(args.config)
         if args.camera is not None:

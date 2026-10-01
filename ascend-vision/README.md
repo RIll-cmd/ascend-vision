@@ -1,5 +1,7 @@
 # Phone Watch â€” Phase 3
 
+For separate one-click Windows launchers for Ascend Vision and Ascend Hub, see `D:/ascend_hub/desktop/README.md` after integrating the desktop reliability branch. The Vision shortcut starts full Fairy and camera mode. If model or camera startup stalls, the launcher offers an explicit chat recovery mode; recovery chat has no camera, microphone, gestures, focus sessions, or browser automation.
+
 Local YOLO26n + MediaPipe hold detection with **background/focus sessions and
 SQLite logging**. Every confirmed pickup is persisted in either mode. Focus is
 user-controlled. Confirmed focus pickups generate a short Gemini roast and speak

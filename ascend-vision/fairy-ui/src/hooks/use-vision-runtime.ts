@@ -14,6 +14,8 @@ export interface HandLandmark {
 }
 
 export interface VisionState {
+  runtimeMode?: 'recovery-chat';
+  runtimeNotice?: string;
   mode: string;
   cameraReady: boolean;
   audioLevel: number;

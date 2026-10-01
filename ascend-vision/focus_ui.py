@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import hmac
+import os
 from pathlib import Path
 import queue
 import threading
@@ -11,6 +13,8 @@ import webbrowser
 from flask import Flask, Response, abort, jsonify, request, send_from_directory
 from werkzeug.serving import make_server
 
+from assistant.runtime_health import RuntimeHealth
+
 LOG = logging.getLogger(__name__)
 BUILD_DIR = Path(__file__).with_name('fairy-ui') / 'dist'
 
@@ -18,8 +22,11 @@ BUILD_DIR = Path(__file__).with_name('fairy-ui') / 'dist'
 class FocusUI:
     """Bounded in-memory frame/state mailbox; HTTP never accesses the camera."""
 
-    def __init__(self, *, build_dir=BUILD_DIR):
+    def __init__(self, *, build_dir=BUILD_DIR, health=None, launch_token=None):
         self.build_dir = Path(build_dir)
+        self.health = health or RuntimeHealth()
+        self._launch_token = os.environ.get('ASCEND_LAUNCH_TOKEN', '') if launch_token is None else launch_token
+        self.shutdown_requested = threading.Event()
         self._lock = threading.Lock()
         self._frame = None
         self._state = {'mode': 'focus', 'cameraReady': False, 'audioLevel': 0,
@@ -80,6 +87,23 @@ class FocusUI:
             with self._lock:
                 return jsonify(dict(self._state))
 
+        @app.get('/api/fairy/health')
+        def health():
+            # The supervisor passes the boot secret through the child environment;
+            # it never appears in URLs, stdout, browser state, or the response.
+            if self._launch_token and not hmac.compare_digest(
+                    request.headers.get('Authorization', ''), 'Bearer ' + self._launch_token):
+                abort(403)
+            return jsonify(self.health.snapshot())
+
+        @app.post('/api/fairy/shutdown')
+        def owner_shutdown():
+            if not self._launch_token or not hmac.compare_digest(
+                    request.headers.get('Authorization', ''), 'Bearer ' + self._launch_token):
+                abort(403)
+            self.shutdown_requested.set()
+            return jsonify(stopping=True), 202
+
         @app.get('/api/fairy/frame.jpg')
         def frame():
             with self._lock:
@@ -95,6 +119,10 @@ class FocusUI:
 
         @app.post('/api/fairy/command')
         def command():
+            with self._lock:
+                recovery = self._state.get('runtimeMode') == 'recovery-chat'
+            if recovery:
+                return jsonify(error='Hardware and automation controls are unavailable in recovery chat.'), 409
             payload = request.get_json(silent=True)
             if not isinstance(payload, dict) or set(payload) != {'command'}:
                 return jsonify(error='A command is required.'), 400
@@ -159,12 +187,26 @@ class FocusUI:
         self._chat_queue = chat_queue
         self._runtime_session_id = runtime_session_id
 
+    def mark_chat_ready(self):
+        if self._chat_queue is None or self._runtime_session_id is None:
+            raise RuntimeError('Bind the chat transport before marking it ready')
+        self.health.update(chat='ready')
+
+    def publish_recovery_mode(self):
+        self.health.update(camera='unavailable', microphone='unavailable')
+        with self._lock:
+            self._state['runtimeMode'] = 'recovery-chat'
+            self._state['runtimeNotice'] = (
+                'Recovery chat: camera, microphone, speech, focus sessions and automations '
+                'are unavailable. Stop this mode before restarting full Vision.')
+
     def publish_core_connection(self, *, configured: bool, state: str,
                                  last_checked_at: str | None = None):
         if type(configured) is not bool or state not in {
                 'unconfigured', 'connecting', 'connected', 'reauth-required',
                 'offline', 'stale'}:
             raise ValueError('invalid Core connection state')
+        self.health.update(core=state)
         with self._lock:
             self._state['coreConnection'] = {
                 'configured': configured,
@@ -185,6 +227,7 @@ class FocusUI:
             value = safe[key]
             if value is not None and (not isinstance(value, str) or len(value) > 80):
                 raise ValueError('invalid AI status field')
+        self.health.update(ai=safe['state'])
         with self._lock:
             self._state['aiStatus'] = safe
 
@@ -199,6 +242,7 @@ class FocusUI:
 
     def publish(self, image, **state):
         """Called from the vision loop. No encoding/network I/O on that thread."""
+        self.health.update(camera='ready')
         with self._lock:
             self._state.update(state, cameraReady=True)
             # Only retain an extra image while a preview client is requesting frames.
@@ -285,9 +329,11 @@ class FocusUI:
         self._server = make_server('127.0.0.1', 0, self.app, threaded=True)
         self._thread = threading.Thread(target=self._server.serve_forever, name='fairy-ui', daemon=True)
         self._thread.start()
+        self.health.update(ui='ready')
         url = f'http://127.0.0.1:{self._server.server_port}/?runtime=1'
+        print(f'ASCEND_FAIRY_URL={url}', flush=True)
         LOG.info('Fairy focus UI: %s', url)
-        if open_browser:
+        if open_browser and os.environ.get('ASCEND_OPEN_BROWSER') != '0':
             try:
                 webbrowser.open(url)
             except Exception as exc:
@@ -295,6 +341,7 @@ class FocusUI:
         return url
 
     def close(self):
+        self.health.fail('host_stopping')
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
