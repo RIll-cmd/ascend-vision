@@ -125,3 +125,24 @@ def test_page_excerpt_is_sized_to_the_provider(provider, expected_text):
     current = seen['prompt']['current_observation']
     assert len(current['visible_text_untrusted']) == expected_text
     assert len(current['elements_untrusted']) == (80 if provider == 'gemini' else 30)
+
+
+def test_excerpt_keeps_the_head_and_finds_a_passage_far_down_the_page():
+    from browser.planner import select_excerpt
+    filler = ('Unrelated reference material about other things. ' * 400)
+    text = 'PAGE TITLE AND INTRO. ' + filler + ' Path.walk() generates the file names in a directory tree. ' + filler
+    excerpt = select_excerpt(text, 'What does pathlib Path.walk do?', 4_500)
+    assert excerpt.startswith('PAGE TITLE AND INTRO.')
+    assert 'generates the file names' in excerpt
+    assert len(excerpt) <= 4_500 + 20
+    assert select_excerpt('short text', 'anything', 4_500) == 'short text'
+    assert select_excerpt(filler * 3, 'zebra', 4_500) == (filler * 3)[:4_500]
+
+
+def test_goal_words_move_matching_links_to_the_front_of_a_long_list():
+    from browser.executor import BrowserElement
+    from browser.planner import rank_elements
+    links = [BrowserElement(f'e{i}', 'link', f'Section {i}', 'page_link') for i in range(50)]
+    links.append(BrowserElement('target', 'link', 'Path.walk reference', 'page_link'))
+    ranked = rank_elements(links, 'What does Path.walk do?', 30)
+    assert ranked[0].element_ref == 'target' and len(ranked) == 30

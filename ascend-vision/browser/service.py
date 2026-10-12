@@ -10,8 +10,9 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from browser.authorization import ActionProposal, GrantBook
-from browser.contracts import BrowserDecision, BrowserTaskRequest
-from browser.executor import BrowserExecutor, BrowserObservation
+from browser.contracts import BrowserDecision, BrowserTaskRequest, ContractError
+from browser.executor import BrowserExecutor, BrowserObservation, BrowserUnavailable
+from browser.policy import PolicyDenied
 from browser.remote_contracts import RemoteBrowserBinding, RemoteBrowserTaskRequest
 
 
@@ -25,6 +26,21 @@ TOMBSTONE_SECONDS = 24 * 60 * 60
 # About ten research tasks per hour across the 25-hour retention window.
 # Count every lifecycle state so cleanup and shutdown never scan more than 256.
 MAX_RETAINED_TASKS = 256
+
+
+def failure_reason(exc: BaseException) -> str:
+    """A plain, safe reason for the owner. It names the kind of failure, never page or provider text."""
+    if isinstance(exc, BrowserUnavailable):
+        return 'Chrome could not be started for this task.'
+    if isinstance(exc, PolicyDenied):
+        return 'A page or link was outside the safe-browsing rules (private, local or blocked address), so Vision stopped.'
+    if isinstance(exc, ContractError):
+        return 'The AI gave a reply Vision could not use safely. Try the task again.'
+    if isinstance(exc, RuntimeError) and 'selected browser provider' in str(exc):
+        return 'The AI service did not answer (busy, too large, or out of free requests). Try again in a minute.'
+    if type(exc).__name__ == 'TimeoutError' or isinstance(exc, TimeoutError):
+        return 'A page took too long to load.'
+    return 'Vision could not safely complete this browser task.'
 
 
 class TaskNotFound(LookupError):
@@ -862,7 +878,7 @@ class BrowserTaskService:
             if effect_uncertain:
                 self._finish(task, 'unknown', 'The reviewed action may have reached the site; it was not retried.', [])
             else:
-                self._finish(task, 'failed', 'Vision could not safely complete this browser task.', [])
+                self._finish(task, 'failed', failure_reason(exc), [])
         finally:
             self._cleanup_selected_file(task)
 

@@ -762,3 +762,21 @@ def test_absolute_request_expiry_and_event_timestamps_still_use_wall_clock():
         assert service.events('task-1', 0, ('owner-1', 'dashboard', 'session-1')).result is not None
     finally:
         service.close()
+
+
+def test_failures_give_plain_safe_reasons_and_never_echo_provider_text():
+    from browser.contracts import ContractError
+    from browser.executor import BrowserUnavailable
+    from browser.policy import PolicyDenied
+    from browser.service import failure_reason
+
+    secret = 'sk-live-should-never-appear'
+    assert 'Chrome' in failure_reason(BrowserUnavailable(secret))
+    assert 'safe-browsing' in failure_reason(PolicyDenied(secret))
+    assert 'AI gave a reply' in failure_reason(ContractError(secret))
+    assert 'AI service did not answer' in failure_reason(
+        RuntimeError('No response from the selected browser provider (groq).'))
+    assert 'too long' in failure_reason(TimeoutError(secret))
+    for error in (ValueError(secret), KeyError(secret), RuntimeError(secret)):
+        text = failure_reason(error)
+        assert secret not in text and 'could not safely complete' in text

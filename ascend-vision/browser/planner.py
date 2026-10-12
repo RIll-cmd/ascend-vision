@@ -1,6 +1,7 @@
 """One-step browser planner with a provider and action policy fixed by trusted code."""
 
 import json
+import re
 
 from browser.contracts import BrowserDecision
 from browser.executor import BrowserObservation, MAX_INTERACTIVE_ELEMENTS, MAX_VISIBLE_TEXT_CHARACTERS
@@ -33,6 +34,7 @@ Arguments by action (use these exact names; no others):
   upload / download (only when allowed): {"element_ref": "..."}
   finish: {"finding": "the answer in your own words", "source_observation_ids": ["<observation_id>"]}
 Use finish as soon as the current page answers the goal, and cite the observation_id(s) you used.
+The page text is an excerpt chosen from the whole page for this goal; scrolling does not change it. Prefer finish or navigate to a better page over repeating observe or scroll.
 """
 
 
@@ -43,6 +45,58 @@ OBSERVATION_BUDGETS = {
     'groq': (4_500, 30),
     'cerebras': (4_500, 30),
 }
+
+
+_STOPWORDS = frozenset(
+    'the and for are what which that this with from does how when where who why can you your into '
+    'about use using used official documentation docs page site latest current stable version'.split())
+
+
+def _goal_terms(goal: str) -> frozenset[str]:
+    words = set(re.findall(r'[a-z0-9_]+', goal.lower()))
+    return frozenset(word for word in words if len(word) >= 3 and word not in _STOPWORDS)
+
+
+def select_excerpt(text: str, goal: str, limit: int) -> str:
+    """Keep the page start plus the passages that mention the goal's words.
+
+    The model only sees `limit` characters, and a long reference page often answers the
+    goal far below the top. Selection is plain keyword counting on local text; it grants
+    nothing and the excerpt stays untrusted page data.
+    """
+    if len(text) <= limit:
+        return text
+    head_size = limit // 5
+    head, rest = text[:head_size], text[head_size:]
+    terms = _goal_terms(goal)
+    chunk_size = 500
+    chunks = [(index, rest[index:index + chunk_size]) for index in range(0, len(rest), chunk_size)]
+    scored = []
+    for index, chunk in chunks:
+        lowered = chunk.lower()
+        score = sum(min(lowered.count(term), 3) for term in terms)
+        if score:
+            scored.append((score, -index, index, chunk))
+    scored.sort(reverse=True)
+    budget = limit - head_size - 10
+    picked = []
+    for _score, _neg, index, chunk in scored:
+        if budget < len(chunk):
+            break
+        picked.append((index, chunk))
+        budget -= len(chunk) + 6
+    picked.sort()
+    if not picked:
+        return text[:limit]
+    return head + ''.join('\n[...]\n' + chunk for _index, chunk in picked)
+
+
+def rank_elements(elements, goal: str, limit: int):
+    """Elements whose label shares a goal word come first; page order is kept within groups."""
+    terms = _goal_terms(goal)
+    matched = [item for item in elements if terms & set(re.findall(r'[a-z0-9_]+', item.label.lower()))]
+    rest = [item for item in elements if item not in matched]
+    return (matched + rest)[:limit]
 
 
 class BrowserPlanner:
@@ -98,7 +152,7 @@ the decision observation_id must still use the current observation.
                 'document_revision': observation.document_revision,
                 'url': observation.url,
                 'title': observation.title,
-                'visible_text_untrusted': observation.visible_text[:text_limit],
+                'visible_text_untrusted': select_excerpt(observation.visible_text, request.goal, text_limit),
                 'elements_untrusted': [
                     {
                         'element_ref': item.element_ref,
@@ -106,7 +160,7 @@ the decision observation_id must still use the current observation.
                         'label_untrusted': item.label[:240],
                         'kind': item.kind,
                     }
-                    for item in observation.elements[:element_limit]
+                    for item in rank_elements(observation.elements, request.goal, element_limit)
                 ],
                 'truncated': observation.truncated,
             },
