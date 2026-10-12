@@ -1,6 +1,7 @@
 """One-step browser planner with a provider and action policy fixed by trusted code."""
 
 import json
+import math
 import re
 
 from browser.contracts import BrowserDecision
@@ -34,14 +35,14 @@ Arguments by action (use these exact names; no others):
   upload / download (only when allowed): {"element_ref": "..."}
   finish: {"finding": "the answer in your own words", "source_observation_ids": ["<observation_id>"]}
 Use finish as soon as the current page answers the goal, and cite the observation_id(s) you used.
-The page text is an excerpt chosen from the whole page for this goal; scrolling does not change it. Prefer finish or navigate to a better page over repeating observe or scroll.
+The page text is an excerpt chosen from the whole page for this goal; scrolling does not change it. Prefer finish or navigate to a different page over repeating observe or scroll. Never navigate to the current page again or add a #fragment to it; the whole page is already in the excerpt.
 """
 
 
 # Free tiers of the smaller providers allow roughly 7,000 input tokens per minute, so their
 # page excerpt is smaller. Gemini keeps the full excerpt.
 OBSERVATION_BUDGETS = {
-    'gemini': (MAX_VISIBLE_TEXT_CHARACTERS, MAX_INTERACTIVE_ELEMENTS),
+    'gemini': (12_000, MAX_INTERACTIVE_ELEMENTS),
     'groq': (4_500, 30),
     'cerebras': (4_500, 30),
 }
@@ -71,11 +72,18 @@ def select_excerpt(text: str, goal: str, limit: int) -> str:
     terms = _goal_terms(goal)
     chunk_size = 500
     chunks = [(index, rest[index:index + chunk_size]) for index in range(0, len(rest), chunk_size)]
+    lowered = [(index, chunk, chunk.lower()) for index, chunk in chunks]
+    total = len(lowered)
+    # Rare goal words matter more than words that appear in every passage.
+    weight = {}
+    for term in terms:
+        seen_in = sum(1 for _i, _c, low in lowered if term in low)
+        if seen_in:
+            weight[term] = math.log((total + 1) / (seen_in + 0.5))
     scored = []
-    for index, chunk in chunks:
-        lowered = chunk.lower()
-        score = sum(min(lowered.count(term), 3) for term in terms)
-        if score:
+    for index, chunk, low in lowered:
+        score = sum(weight[term] * min(low.count(term), 3) for term in weight)
+        if score > 0:
             scored.append((score, -index, index, chunk))
     scored.sort(reverse=True)
     budget = limit - head_size - 10
@@ -135,7 +143,6 @@ or an item in this task's bounded routine_observations. Every action target and
 the decision observation_id must still use the current observation.
 """
         text_limit, element_limit = OBSERVATION_BUDGETS[request.provider]
-        text_limit = min(text_limit, MAX_VISIBLE_TEXT_CHARACTERS)
         element_limit = min(element_limit, MAX_INTERACTIVE_ELEMENTS)
         prompt = json.dumps({
             'task_id': request.task_id,

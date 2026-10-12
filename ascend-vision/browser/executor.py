@@ -11,7 +11,8 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from browser.policy import BrowserPolicy, PolicyDenied
 
 
-MAX_VISIBLE_TEXT_CHARACTERS = 12_000
+# Keep the whole page (long reference pages answer deep down); the planner sends a bounded excerpt.
+MAX_VISIBLE_TEXT_CHARACTERS = 150_000
 MAX_INTERACTIVE_ELEMENTS = 100
 
 
@@ -110,7 +111,7 @@ class BrowserExecutor:
                     pass
             self._context = self._browser.new_context(**context_options)
             self._context.set_default_timeout(5_000)
-            self._context.set_default_navigation_timeout(15_000)
+            self._context.set_default_navigation_timeout(30_000)
             self._context.route('**/*', self._guard_request)
             self._context.route_web_socket('**/*', self._block_web_socket)
             self._context.on('page', self._on_page)
@@ -209,7 +210,7 @@ class BrowserExecutor:
         self._policy.validate_url(url)
         self._request_blocked = False
         try:
-            self._page.goto(url, wait_until='domcontentloaded', timeout=15_000)
+            self._page.goto(url, wait_until='domcontentloaded', timeout=30_000)
         except Exception as exc:
             if self._request_blocked or 'blockedbyclient' in str(exc).lower().replace('_', ''):
                 raise PolicyDenied('A request was blocked by the public-research network policy.') from exc
