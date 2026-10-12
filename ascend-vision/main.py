@@ -9,6 +9,7 @@ from pathlib import Path
 import secrets
 import signal
 import sqlite3
+import sys
 import threading
 import time
 from contextlib import ExitStack
@@ -442,6 +443,25 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         if callable(bind_assistant):
             bind_assistant(assistant_service)
         feedback.start()
+        distraction_watch_config = getattr(config, 'distraction_watch', None)
+        if distraction_watch_config is not None and distraction_watch_config.enabled and sys.platform == 'win32':
+            try:
+                from integrations.distraction_watch import (
+                    DistractionStore, DistractionWatch, WindowsForegroundProbe)
+                distraction_watch = DistractionWatch(
+                    WindowsForegroundProbe(), distraction_watch_config.sites,
+                    is_focus=lambda: manager.mode == 'focus' and not manager.quit_requested,
+                    nudge=lambda site: feedback.submit_expression(f'distraction:{site}', cooldown=0.0),
+                    store=DistractionStore(Path(config.storage.database).parent / 'distractions.db'),
+                    grace_seconds=distraction_watch_config.grace_seconds,
+                    repeat_seconds=distraction_watch_config.repeat_seconds,
+                )
+                resources.callback(distraction_watch.stop)
+                distraction_watch.start()
+                LOG.info('Distraction watch on for %d sites (titles are never saved).',
+                         len(distraction_watch_config.sites))
+            except Exception as exc:
+                LOG.warning('Distraction watch unavailable (%s)', type(exc).__name__)
         if browser_voice_notifier is not None:
             browser_voice_notifier.start()
             resources.callback(browser_voice_notifier.stop)

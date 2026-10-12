@@ -246,6 +246,7 @@ test('stats and memory live in the same window and errors never look like zero',
   await page.route('**/api/fairy/stats**', route => route.fulfill({ json: {
     database_exists: true, summary: { pickups: 4, phone_seconds: 125, focus_seconds: 3600, longest_streak_seconds: 900 },
     days: [{ date: '2026-10-11', pickups: 1, focus: 1, background: 0 }, { date: '2026-10-12', pickups: 3, focus: 3, background: 0 }],
+    distractions: [{ site: 'YouTube', seconds: 720 }, { site: 'Reddit', seconds: 95 }],
   } }));
   let pending = [{ id: 7, text: 'I like green tea' }];
   await page.route('**/api/fairy/memory', route => route.fulfill({ json: { enabled: true, pending, active: [] } }));
@@ -255,6 +256,8 @@ test('stats and memory live in the same window and errors never look like zero',
   await page.getByRole('button', { name: /stats/ }).click();
   await expect(page.getByLabel('Pickup numbers')).toContainText('Phone pickups');
   await expect(page.getByLabel('Pickup numbers')).toContainText('1h 0m');
+  await expect(page.getByLabel('Time on distracting sites')).toContainText('YouTube');
+  await expect(page.getByLabel('Time on distracting sites')).toContainText('12m');
   await page.getByRole('button', { name: /memory/ }).click();
   await expect(page.getByLabel('Remembered facts')).toContainText('I like green tea');
   await page.getByRole('button', { name: 'Skip' }).click();

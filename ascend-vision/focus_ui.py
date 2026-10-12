@@ -223,10 +223,18 @@ class FocusUI:
                 return jsonify(error='Choose 7 or 28 days.'), 400
             zone = self._config.dashboard.timezone
             today = datetime.now(timezone.utc).astimezone(get_zone(zone)).date()
+            start = today - timedelta(days=int(raw) - 1)
             try:
-                return jsonify(read_stats(
-                    self._config.storage.database, today - timedelta(days=int(raw) - 1), today,
-                    zone=zone, timeout=self._config.storage.busy_timeout_seconds))
+                result = read_stats(self._config.storage.database, start, today,
+                                    zone=zone, timeout=self._config.storage.busy_timeout_seconds)
+                try:
+                    from integrations.distraction_watch import DistractionStore
+                    result['distractions'] = DistractionStore.totals(
+                        Path(self._config.storage.database).parent / 'distractions.db', start, today)
+                except Exception as exc:
+                    LOG.warning('Distraction totals unavailable (%s)', type(exc).__name__)
+                    result['distractions'] = None
+                return jsonify(result)
             except DashboardError as exc:
                 LOG.warning('Fairy stats read failed (%s)', type(exc).__name__)
                 return jsonify(error=str(exc)), 503

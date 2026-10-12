@@ -151,6 +151,12 @@ screen_audit:
   enabled: false # Periodic cloud screenshot audits are a separate opt-in.
   interval_seconds: 1800
 
+distraction_watch:
+  enabled: true # During focus, nudge when a listed site is the front browser tab. Titles are never saved.
+  grace_seconds: 60 # Quick looks are fine; nudge after this long on a listed site.
+  repeat_seconds: 300 # Then nudge again this often while you stay.
+  sites: [YouTube, Instagram, TikTok, Facebook, X, Twitter, Reddit, Netflix, Twitch] # Matched against the tab title.
+
 phone_chat:
   enabled: false # Enable only after all ASCEND_PHONE_* values are provisioned.
   voice_upload_enabled: false # Explicit opt-in; recordings are sent to Google Gemini for transcription.

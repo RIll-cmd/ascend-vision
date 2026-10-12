@@ -468,6 +468,26 @@ class ScreenAuditConfig:
 
 
 @dataclass(frozen=True)
+class DistractionWatchConfig:
+    """During focus, nudge when a listed site is the front browser tab for a while."""
+    enabled: bool = True
+    grace_seconds: float = 60.0
+    repeat_seconds: float = 300.0
+    sites: tuple[str, ...] = ('YouTube', 'Instagram', 'TikTok', 'Facebook', 'X', 'Twitter',
+                              'Reddit', 'Netflix', 'Twitch')
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('distraction_watch.enabled must be a YAML boolean')
+        number('distraction_watch.grace_seconds', self.grace_seconds, 0.0, 3600.0)
+        number('distraction_watch.repeat_seconds', self.repeat_seconds, 30.0, 86_400.0)
+        if (not isinstance(self.sites, (list, tuple)) or len(self.sites) > 100
+                or any(not isinstance(site, str) or not site.strip() or len(site) > 60 for site in self.sites)):
+            raise ValueError('distraction_watch.sites must be a list of up to 100 short site names')
+        object.__setattr__(self, 'sites', tuple(site.strip() for site in self.sites))
+
+
+@dataclass(frozen=True)
 class PhoneChatConfig:
     """Opt-in outbound phone worker; credentials and URL are environment-only."""
     enabled: bool = False
@@ -657,6 +677,7 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     ascend: AscendConfig = field(default_factory=AscendConfig)
     screen_audit: ScreenAuditConfig = field(default_factory=ScreenAuditConfig)
+    distraction_watch: DistractionWatchConfig = field(default_factory=DistractionWatchConfig)
     phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
     browser_automation: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
 
@@ -680,6 +701,7 @@ def load_config(path: Path) -> Config:
                 'dashboard': DashboardConfig, 'voice_commands': VoiceCommandConfig,
                 'llm': LLMConfig, 'ascend': AscendConfig,
                  'screen_audit': ScreenAuditConfig, 'phone_chat': PhoneChatConfig,
+                 'distraction_watch': DistractionWatchConfig,
                  'browser_automation': BrowserAutomationConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')

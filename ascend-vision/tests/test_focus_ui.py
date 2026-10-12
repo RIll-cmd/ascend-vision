@@ -195,6 +195,11 @@ def test_stats_and_memory_are_served_by_the_single_ui(tmp_path):
     ui.bind_data(config, memory)
     stats = client.get('/api/fairy/stats?days=7').json
     assert len(stats['days']) == 7 and stats['summary']['pickups'] == 0
+    assert stats['distractions'] == []
+    from datetime import date
+    from integrations.distraction_watch import DistractionStore
+    DistractionStore(tmp_path / 'distractions.db').add('YouTube', 125.0, date.today())
+    assert client.get('/api/fairy/stats?days=7').json['distractions'] == [{'site': 'YouTube', 'seconds': 125.0}]
     assert client.get('/api/fairy/stats?days=500').status_code == 400
     assert client.get('/api/fairy/stats?start=2020-01-01').status_code == 400
 

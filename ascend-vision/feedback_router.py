@@ -121,6 +121,10 @@ FALLBACK_EXPRESSION_REPLIES = {
 def get_expression_prompt_context(event_type: str) -> str:
     """Returns the LLM prompt context for the given event type."""
     norm = event_type.lower().strip()
+    if norm.startswith('distraction:'):
+        site = event_type.split(':', 1)[1].strip()[:60] or 'a distracting site'
+        return (f'{USER_NAME} is supposed to be focusing but has had {site} open in the browser for over a minute. '
+                f'Deliver a sharp, witty diva roast under 18 words telling them to close {site} and get back to work.')
     if norm in EXPRESSION_PROMPT_STRATEGIES:
         return EXPRESSION_PROMPT_STRATEGIES[norm]
     if 'studying' in norm or 'coding' in norm or 'code' in norm or 'study' in norm:
@@ -146,6 +150,13 @@ def get_expression_prompt_context(event_type: str) -> str:
 def get_fallback_expression_reply(event_type: str) -> str:
     """Returns an offline fallback line for the given event type."""
     norm = event_type.lower().strip()
+    if norm.startswith('distraction:'):
+        site = event_type.split(':', 1)[1].strip()[:60] or 'that site'
+        return random.choice((
+            f'{site} again, {USER_NAME}? Close it. Your focus session misses you.',
+            f'I see {site}. I also see unfinished work. Pick the right one, {USER_NAME}.',
+            f'{site} will still be there later. Your deadline will not. Back to work.',
+        ))
     if norm in FALLBACK_EXPRESSION_REPLIES:
         val = FALLBACK_EXPRESSION_REPLIES[norm]
         if isinstance(val, list):

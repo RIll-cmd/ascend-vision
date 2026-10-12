@@ -6,6 +6,7 @@ interface Stats {
   database_exists: boolean;
   summary: { pickups: number; phone_seconds: number; focus_seconds: number; longest_streak_seconds: number };
   days: Day[];
+  distractions?: { site: string; seconds: number }[] | null;
 }
 
 function duration(seconds: number) {
@@ -55,7 +56,14 @@ export function StatsPanel() {
           <span>{day.pickups}</span>
         </li>)}
       </ol>
-      <p className="fairy-chat-core-time">Counts are camera estimates, not a guarantee of grip.</p>
+      <h3>Distracting sites during focus</h3>
+      {stats.distractions == null
+        ? <p className="fairy-chat-empty">Site times are unavailable right now.</p>
+        : stats.distractions.length === 0
+          ? <p className="fairy-chat-empty">None in this period. Nice.</p>
+          : <ul className="fairy-memory-list" aria-label="Time on distracting sites">{stats.distractions.map(item =>
+              <li key={item.site}><p>{item.site}</p><strong>{duration(item.seconds)}</strong></li>)}</ul>}
+      <p className="fairy-chat-core-time">Counts are camera estimates, not a guarantee of grip. Site times come from browser tab names; pages are never saved.</p>
     </>}
   </section>;
 }
