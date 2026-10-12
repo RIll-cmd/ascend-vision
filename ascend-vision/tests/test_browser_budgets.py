@@ -41,7 +41,7 @@ def test_persistent_ledger_enforces_spend_across_tracker_restart(tmp_path):
 def test_price_table_rejects_stale_or_future_pricing():
     tracker = BudgetTracker(price_table(effective_date=date.today() - timedelta(days=31)))
     with pytest.raises(PricingUnavailable, match='older than 30 days'):
-        tracker.price_table.require_fresh()
+        tracker.price_table.require_fresh(as_of=date.today())
 
 
 def test_price_table_rejects_non_official_source():
