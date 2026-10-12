@@ -19,6 +19,32 @@ Use only the current observation_id and cite its evidence in finish decisions.
 """
 
 
+RESPONSE_FORMAT = """
+Reply with exactly one JSON object and nothing else (no Markdown, no extra fields):
+{"schema_version": 1, "observation_id": "<current_observation.observation_id>",
+ "action": "<one action>", "arguments": {<only that action's arguments>},
+ "expected_result": "<one short sentence>"}
+Arguments by action (use these exact names; no others):
+  navigate: {"url": "https://..."}            observe: {}            back: {}
+  click: {"element_ref": "<element_ref from the list>"}
+  scroll: {"direction": "up" or "down", "pixels": 1-2000}
+  wait_for: {"milliseconds": 1-10000}         ask_user: {"question": "..."}
+  fill / select (only when allowed): {"element_ref": "...", "value": "..."}
+  upload / download (only when allowed): {"element_ref": "..."}
+  finish: {"finding": "the answer in your own words", "source_observation_ids": ["<observation_id>"]}
+Use finish as soon as the current page answers the goal, and cite the observation_id(s) you used.
+"""
+
+
+# Free tiers of the smaller providers allow roughly 7,000 input tokens per minute, so their
+# page excerpt is smaller. Gemini keeps the full excerpt.
+OBSERVATION_BUDGETS = {
+    'gemini': (MAX_VISIBLE_TEXT_CHARACTERS, MAX_INTERACTIVE_ELEMENTS),
+    'groq': (4_500, 30),
+    'cerebras': (4_500, 30),
+}
+
+
 class BrowserPlanner:
     def __init__(self, router=None):
         self._router = router or get_router()
@@ -42,6 +68,7 @@ claim the website accepted or stored it without visible confirmation. A download
 only after the broker reports its bounded save result. Do not describe a proposal as done.
 Only JSON is accepted. Never execute code or claim a result without current evidence.
 """
+        system_prompt += RESPONSE_FORMAT
         if routine is not None:
             system_prompt += """
 The selected versioned routine is trusted configuration that narrows this task's
@@ -53,6 +80,9 @@ For a routine finish decision, source IDs may refer to the current observation
 or an item in this task's bounded routine_observations. Every action target and
 the decision observation_id must still use the current observation.
 """
+        text_limit, element_limit = OBSERVATION_BUDGETS[request.provider]
+        text_limit = min(text_limit, MAX_VISIBLE_TEXT_CHARACTERS)
+        element_limit = min(element_limit, MAX_INTERACTIVE_ELEMENTS)
         prompt = json.dumps({
             'task_id': request.task_id,
             'goal': request.goal,
@@ -68,7 +98,7 @@ the decision observation_id must still use the current observation.
                 'document_revision': observation.document_revision,
                 'url': observation.url,
                 'title': observation.title,
-                'visible_text_untrusted': observation.visible_text[:MAX_VISIBLE_TEXT_CHARACTERS],
+                'visible_text_untrusted': observation.visible_text[:text_limit],
                 'elements_untrusted': [
                     {
                         'element_ref': item.element_ref,
@@ -76,7 +106,7 @@ the decision observation_id must still use the current observation.
                         'label_untrusted': item.label[:240],
                         'kind': item.kind,
                     }
-                    for item in observation.elements[:MAX_INTERACTIVE_ELEMENTS]
+                    for item in observation.elements[:element_limit]
                 ],
                 'truncated': observation.truncated,
             },
