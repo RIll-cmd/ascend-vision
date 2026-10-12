@@ -49,11 +49,14 @@ class BrowserExecutor:
     """Runs Playwright synchronously; all methods must stay on one owner thread."""
 
     def __init__(self, *, policy: BrowserPolicy | None = None, headless: bool = False,
-                 max_pages: int = 3, profile_store=None, profile_owner: str | None = None,
+                 browser: str = 'chrome', max_pages: int = 3, profile_store=None, profile_owner: str | None = None,
                  profile_id: str | None = None, file_store=None, task_owner: str | None = None,
                  task_id: str | None = None, selected_file_token: str | None = None):
         if type(headless) is not bool or type(max_pages) is not int or not 1 <= max_pages <= 3:
             raise ValueError('invalid browser executor settings')
+        if browser not in ('chrome', 'chromium'):
+            raise ValueError('invalid browser executor settings')
+        self._browser_name = browser
         self._policy = policy or BrowserPolicy()
         self._headless = headless
         self._max_pages = max_pages
@@ -89,7 +92,10 @@ class BrowserExecutor:
             ) from exc
         try:
             self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.launch(headless=self._headless)
+            launch_options = {'headless': self._headless}
+            if self._browser_name == 'chrome':
+                launch_options['channel'] = 'chrome'
+            self._browser = self._playwright.chromium.launch(**launch_options)
             context_options = {
                 'service_workers': 'block',
                 'accept_downloads': self._policy.allows_action('download', target_kind='page_link'),
@@ -115,6 +121,10 @@ class BrowserExecutor:
             self.close()
             if isinstance(exc, BrowserUnavailable):
                 raise
+            if self._browser_name == 'chrome':
+                raise BrowserUnavailable(
+                    'Google Chrome could not be started. Install Chrome, or set '
+                    'browser_automation.browser to chromium.') from exc
             raise BrowserUnavailable('The isolated Chromium browser could not be started.') from exc
 
     def _on_page(self, page) -> None:

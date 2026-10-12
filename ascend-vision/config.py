@@ -505,6 +505,7 @@ class BrowserAutomationConfig:
     remote_writes_enabled: bool = False
     remote_scopes: tuple[dict, ...] = ()
     provider: str = 'gemini'
+    browser: str = 'chrome'
     scope_mode: str = 'public_research'
     profile_mode: str = 'ephemeral'
     max_decisions: int = 20
@@ -547,6 +548,8 @@ class BrowserAutomationConfig:
             raise ValueError('browser_automation.remote_writes_enabled requires remote_enabled and b3_enabled')
         if self.provider not in {'gemini', 'cerebras', 'groq'}:
             raise ValueError('browser_automation.provider must be gemini, cerebras or groq')
+        if self.browser not in {'chrome', 'chromium'}:
+            raise ValueError('browser_automation.browser must be chrome or chromium')
         if self.scope_mode != 'public_research':
             raise ValueError('browser_automation.scope_mode must be public_research in this release')
         if self.profile_mode != 'ephemeral':

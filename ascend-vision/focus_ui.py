@@ -15,9 +15,22 @@ from flask import Flask, Response, abort, jsonify, request, send_from_directory
 from werkzeug.serving import make_server
 
 from assistant.runtime_health import RuntimeHealth
+from browser.dashboard_routes import register_browser_routes
 from dashboard_stats import DashboardError, get_zone, read_stats
 
 LOG = logging.getLogger(__name__)
+FAIRY_BROWSER_SESSION = ('local', 'dashboard', 'local-fairy')
+
+
+class _LiveBrowserConfig:
+    """Routes are registered before the browser service exists; read settings when used."""
+    enabled = True
+
+    def __init__(self, owner):
+        self._owner = owner
+
+    def __getattr__(self, name):
+        return getattr(self._owner._browser_config, name)
 BUILD_DIR = Path(__file__).with_name('fairy-ui') / 'dist'
 
 
@@ -37,6 +50,7 @@ class FocusUI:
                        'hands': [], 'eyePoints': [], 'lipPoints': [],
                        'posture': None, 'fatigue': None, 'gesture': None,
                        'emotion': 'neutral', 'lastHeard': '',
+                       'webUse': {'enabled': False, 'writes': False},
                        'activePanel': None, 'activePanelSequence': 0, 'speakReplies': False,
                        'coreConnection': {'configured': False, 'state': 'unconfigured',
                                           'lastCheckedAt': None},
@@ -48,6 +62,8 @@ class FocusUI:
         self._runtime_session_id = None
         self._config = None
         self._memory = None
+        self._browser_client = None
+        self._browser_config = None
         self._server = None
         self._thread = None
         self.app = self._create_app()
@@ -58,7 +74,10 @@ class FocusUI:
 
         @app.before_request
         def local_only():
-            request.max_content_length = 20_000 if request.path == '/api/fairy/chat' else 1_024
+            request.max_content_length = (
+                20_000 if request.path in ('/api/fairy/chat', '/api/browser/tasks') else 1_024)
+            if request.path.startswith('/api/browser/') and self._browser_config is None:
+                return jsonify(error='Web use is turned off. Run Setup.bat to turn it on.'), 503
             origin = request.headers.get('Origin')
             if request.headers.get('Sec-Fetch-Site') == 'cross-site' or (origin and origin != request.host_url.rstrip('/')):
                 abort(403)
@@ -251,7 +270,17 @@ class FocusUI:
                 return jsonify(enabled=self._memory.enabled())
             return memory_action(apply)
 
+        register_browser_routes(app, lambda: self._browser_client, _LiveBrowserConfig(self),
+                                session_key=FAIRY_BROWSER_SESSION)
         return app
+
+    def bind_browser(self, client, browser_config):
+        """Expose the in-process browser service to the one Vision window."""
+        self._browser_client = client
+        self._browser_config = browser_config
+        with self._lock:
+            self._state['webUse'] = {'enabled': client is not None,
+                                     'writes': bool(client is not None and browser_config.b3_enabled)}
 
     def bind_data(self, config, memory_store):
         """Give the single UI read access to saved statistics and memory approvals."""

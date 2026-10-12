@@ -14,7 +14,8 @@ from browser.service import TaskNotFound, TaskQueueFull
 DASHBOARD_SESSION_KEY = ('local', 'dashboard', 'local-dashboard')
 
 
-def register_browser_routes(app, client, config, file_store=None) -> None:
+def register_browser_routes(app, client, config, file_store=None,
+                           session_key=DASHBOARD_SESSION_KEY) -> None:
     if not config.enabled:
         return
 
@@ -44,7 +45,7 @@ def register_browser_routes(app, client, config, file_store=None) -> None:
         request_fields = {
             'schema_version': 1,
             'task_id': request.headers.get('Idempotency-Key') or uuid.uuid4().hex,
-            'session_key': list(DASHBOARD_SESSION_KEY),
+            'session_key': list(session_key),
             'goal': payload.get('goal'),
             'provider': config.provider,
             'scope_mode': scope_mode,
@@ -75,7 +76,7 @@ def register_browser_routes(app, client, config, file_store=None) -> None:
                     return jsonify(error='Select one file and enable the upload action for this task.'), 400
                 try:
                     token, _item = file_store.stage_upload(
-                        DASHBOARD_SESSION_KEY[0], request_fields['task_id'], upload.filename, upload.stream,
+                        session_key[0], request_fields['task_id'], upload.filename, upload.stream,
                     )
                 except FileLimitExceeded as exc:
                     return jsonify(error=str(exc)), 413
@@ -88,31 +89,31 @@ def register_browser_routes(app, client, config, file_store=None) -> None:
             task = BrowserTaskRequest.from_payload(request_fields)
         except (TypeError, ValueError):
             if upload is not None and file_store is not None and 'selected_file_token' in request_fields:
-                file_store.cleanup_task(DASHBOARD_SESSION_KEY[0], request_fields['task_id'])
+                file_store.cleanup_task(session_key[0], request_fields['task_id'])
             return jsonify(error='Enter a research goal of 1–4000 characters.'), 400
         try:
             target = browser_client()
         except (OSError, RuntimeError):
             if upload is not None and file_store is not None:
-                file_store.cleanup_task(DASHBOARD_SESSION_KEY[0], request_fields['task_id'])
+                file_store.cleanup_task(session_key[0], request_fields['task_id'])
             return jsonify(error='The local browser service is unavailable.'), 503
         if target is None:
             if upload is not None and file_store is not None:
-                file_store.cleanup_task(DASHBOARD_SESSION_KEY[0], request_fields['task_id'])
+                file_store.cleanup_task(session_key[0], request_fields['task_id'])
             return jsonify(error='The local browser service is unavailable.'), 503
         try:
             receipt = target.submit(task)
         except TaskQueueFull:
             if upload is not None and file_store is not None:
-                file_store.cleanup_task(DASHBOARD_SESSION_KEY[0], request_fields['task_id'])
+                file_store.cleanup_task(session_key[0], request_fields['task_id'])
             return jsonify(error='The browser task queue is full.'), 429
         except ValueError:
             if upload is not None and file_store is not None:
-                file_store.cleanup_task(DASHBOARD_SESSION_KEY[0], request_fields['task_id'])
+                file_store.cleanup_task(session_key[0], request_fields['task_id'])
             return jsonify(error='That idempotency key is already bound to a different browser request.'), 409
         except (OSError, RuntimeError):
             if upload is not None and file_store is not None:
-                file_store.cleanup_task(DASHBOARD_SESSION_KEY[0], request_fields['task_id'])
+                file_store.cleanup_task(session_key[0], request_fields['task_id'])
             return jsonify(error='The local browser service is unavailable.'), 503
         return jsonify(taskId=receipt.task_id, state=receipt.state, eventCursor=receipt.event_cursor), 202
 
@@ -138,7 +139,7 @@ def register_browser_routes(app, client, config, file_store=None) -> None:
         try:
             task = BrowserTaskRequest.from_payload({
                 'schema_version': 1, 'task_id': task_id,
-                'session_key': list(DASHBOARD_SESSION_KEY),
+                'session_key': list(session_key),
                 'goal': 'Run the selected supported browser routine.',
                 'provider': config.provider, 'scope_mode': 'public_research',
                 'expires_at': time.time() + config.task_timeout_seconds,
@@ -197,7 +198,7 @@ def register_browser_routes(app, client, config, file_store=None) -> None:
         if target is None:
             return jsonify(error='The local browser service is unavailable.'), 503
         try:
-            page = target.events(task_id, int(raw_cursor), DASHBOARD_SESSION_KEY)
+            page = target.events(task_id, int(raw_cursor), session_key)
         except (TaskNotFound, PermissionError):
             abort(404)
         except (OSError, RuntimeError):
@@ -228,7 +229,7 @@ def register_browser_routes(app, client, config, file_store=None) -> None:
         if target is None:
             return jsonify(error='The local browser service is unavailable.'), 503
         try:
-            receipt = target.control(task_id, payload['command'], DASHBOARD_SESSION_KEY)
+            receipt = target.control(task_id, payload['command'], session_key)
         except (TaskNotFound, PermissionError):
             abort(404)
         except (OSError, RuntimeError):
@@ -253,7 +254,7 @@ def register_browser_routes(app, client, config, file_store=None) -> None:
         try:
             receipt = target.decide(
                 task_id, payload['actionId'], payload['proposalDigest'], payload['approved'],
-                DASHBOARD_SESSION_KEY,
+                session_key,
             )
         except (TaskNotFound, PermissionError):
             abort(404)
@@ -274,7 +275,7 @@ def register_browser_routes(app, client, config, file_store=None) -> None:
         if target is None:
             return jsonify(error='The local browser service is unavailable.'), 503
         try:
-            recorded = target.feedback(task_id, payload['verdict'], DASHBOARD_SESSION_KEY)
+            recorded = target.feedback(task_id, payload['verdict'], session_key)
         except (TaskNotFound, PermissionError):
             abort(404)
         except ValueError:
@@ -348,7 +349,7 @@ def register_browser_routes(app, client, config, file_store=None) -> None:
         if target is None:
             return jsonify(error='The local browser service is unavailable.'), 503
         try:
-            receipt = target.save_profile(task_id, DASHBOARD_SESSION_KEY)
+            receipt = target.save_profile(task_id, session_key)
         except (TaskNotFound, PermissionError):
             abort(404)
         except ValueError:
@@ -365,7 +366,7 @@ def register_browser_routes(app, client, config, file_store=None) -> None:
         if target is None:
             return jsonify(error='The local browser service is unavailable.'), 503
         try:
-            return jsonify(profiles=target.list_profiles(DASHBOARD_SESSION_KEY))
+            return jsonify(profiles=target.list_profiles(session_key))
         except (OSError, RuntimeError):
             return jsonify(error='The local browser service is unavailable.'), 503
 
@@ -377,7 +378,7 @@ def register_browser_routes(app, client, config, file_store=None) -> None:
         if target is None:
             return jsonify(error='The local browser service is unavailable.'), 503
         try:
-            cleared = target.clear_profile(profile_id, DASHBOARD_SESSION_KEY)
+            cleared = target.clear_profile(profile_id, session_key)
         except ValueError:
             return jsonify(error='This profile is invalid or currently in use.'), 409
         except (OSError, RuntimeError):

@@ -36,6 +36,7 @@ export interface VisionState {
   activePanel?: 'chat' | 'automation' | 'missions' | 'habits' | null;
   activePanelSequence?: number;
   speakReplies?: boolean;
+  webUse?: { enabled: boolean; writes: boolean };
   aiStatus?: {
     configured: boolean;
     state: 'unknown' | 'not-configured' | 'configured-untested' | 'requesting' | 'available' | 'request-failed';

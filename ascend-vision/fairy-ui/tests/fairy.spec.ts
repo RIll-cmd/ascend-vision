@@ -265,6 +265,42 @@ test('stats and memory live in the same window and errors never look like zero',
   await expect(page.getByLabel('Pickup numbers')).not.toContainText('Phone pickups');
 });
 
+test('web tab hides when off; when on it runs a task, asks before acting, and shows sources', async ({ page }) => {
+  let webUse = { enabled: false, writes: false };
+  await page.route('**/api/fairy/state', route => route.fulfill({ json: {
+    mode: 'focus', cameraReady: false, audioLevel: 0, voiceEnabled: false,
+    muted: false, speaking: false, elapsedSeconds: 0, webUse,
+  } }));
+  await page.goto('/?runtime=1');
+  await page.getByRole('button', { name: 'Open chat with Vision' }).click();
+  await expect(page.getByRole('button', { name: /^\d\s*browser$/ })).toHaveCount(0);
+
+  webUse = { enabled: true, writes: true };
+  await expect(page.getByRole('button', { name: /^\d\s*browser$/ })).toBeVisible();
+  let polls = 0;
+  let decided: any = null;
+  await page.route('**/api/browser/tasks', route => route.fulfill({ status: 202, json: { taskId: 'task1', state: 'queued', eventCursor: 0 } }));
+  await page.route('**/api/browser/tasks/task1?**', route => {
+    polls += 1;
+    if (decided) return route.fulfill({ json: { taskId: 'task1', state: 'completed', events: [{ sequence: 3, summary: 'Finished.' }], nextCursor: 3, resetRequired: false,
+      result: { findings: [{ text: 'It is version 1.2.', sources: ['https://example.com/docs', 'javascript:alert(1)'] }] } } });
+    if (polls < 2) return route.fulfill({ json: { taskId: 'task1', state: 'running', events: [{ sequence: 1, summary: 'Opened example.com' }], nextCursor: 1, resetRequired: false } });
+    return route.fulfill({ json: { taskId: 'task1', state: 'waiting_for_user', events: [{ sequence: 2, summary: 'Needs your OK', proposal: {
+      action_id: 'a1', digest: 'a'.repeat(64), action: 'click', origin: 'https://example.com', target_label: 'Next', expected_effect: 'Goes to the next page.' } }], nextCursor: 2, resetRequired: false } });
+  });
+  await page.route('**/api/browser/tasks/task1/decision', route => { decided = route.request().postDataJSON(); return route.fulfill({ json: { taskId: 'task1', state: 'running', eventCursor: 3 } }); });
+  await page.getByRole('button', { name: /^\d\s*browser$/ }).click();
+  await page.getByLabel('Web task').fill('find the version');
+  await page.getByRole('button', { name: 'Look it up' }).click();
+  await expect(page.getByText('Opened example.com')).toBeVisible();
+  await expect(page.getByRole('group', { name: 'Approve this action' })).toContainText('click at https://example.com');
+  await page.getByRole('button', { name: 'Approve', exact: true }).click();
+  await expect(page.getByLabel('Result')).toContainText('It is version 1.2.');
+  expect(decided).toEqual({ actionId: 'a1', proposalDigest: 'a'.repeat(64), approved: true });
+  await expect(page.getByRole('link', { name: 'https://example.com/docs' })).toBeVisible();
+  await expect(page.locator('a[href^="javascript"]')).toHaveCount(0);
+});
+
 test('face detection runs with hidden preview and attention moves inside the stationary orb', async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).hasTestFace = true;

@@ -166,6 +166,7 @@ browser_automation:
   remote_writes_enabled: false # Phone review of signed-in site actions is a separate opt-in.
   remote_scopes: []
   provider: gemini
+  browser: chrome # Installed Google Chrome in its own clean window; or chromium (Playwright download).
   scope_mode: public_research
   profile_mode: ephemeral
   max_decisions: 20

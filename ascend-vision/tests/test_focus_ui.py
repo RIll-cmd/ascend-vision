@@ -210,3 +210,36 @@ def test_stats_and_memory_are_served_by_the_single_ui(tmp_path):
 
     ui.bind_data(config, UnavailableMemoryStore())
     assert client.get('/api/fairy/memory').status_code == 503
+
+
+def test_browser_routes_are_off_until_bound_and_use_the_fairy_session():
+    from browser.service import EventPage, TaskReceipt
+    from config import BrowserAutomationConfig
+
+    class Client:
+        def submit(self, task):
+            self.task = task
+            return TaskReceipt(task.task_id, 'queued', 1)
+
+        def events(self, task_id, after, session_key):
+            self.events_key = session_key
+            return EventPage(task_id, 'running', (), after, False, None)
+
+    ui = FocusUI()
+    http = ui.app.test_client()
+    assert http.get('/api/fairy/state').json['webUse'] == {'enabled': False, 'writes': False}
+    assert http.post('/api/browser/tasks', json={'goal': 'find docs'}).status_code == 503
+
+    client = Client()
+    ui.bind_browser(client, BrowserAutomationConfig(enabled=True))
+    assert http.get('/api/fairy/state').json['webUse'] == {'enabled': True, 'writes': False}
+    goal = 'x' * 3000  # larger than the default 1 KiB request limit
+    receipt = http.post('/api/browser/tasks', json={'goal': goal})
+    assert receipt.status_code == 202
+    assert client.task.session_key == ('local', 'dashboard', 'local-fairy')
+    assert client.task.scope_mode == 'public_research' and client.task.capabilities == ()
+    assert http.get(f"/api/browser/tasks/{receipt.json['taskId']}").json['state'] == 'running'
+    assert client.events_key == ('local', 'dashboard', 'local-fairy')
+    assert http.post('/api/browser/tasks', json={'goal': 'hi'},
+                     headers={'Origin': 'https://example.com'}).status_code == 403
+    assert http.post('/api/browser/tasks', json={'goal': 'hi', 'scopeMode': 'selected_origins'}).status_code == 400

@@ -366,6 +366,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     )
                 except Exception as exc:
                     LOG.warning('Local browser research unavailable (%s)', type(exc).__name__)
+            if browser_task_client is not None and focus_ui_bridge is not None:
+                focus_ui_bridge.bind_browser(browser_task_client, config.browser_automation)
             if browser_task_client is not None:
                 if config.browser_automation.remote_enabled:
                     try:

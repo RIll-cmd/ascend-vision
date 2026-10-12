@@ -300,3 +300,39 @@ def test_selected_origin_file_upload_and_download_use_only_managed_file_paths(tm
             }
             assert 'Download' in downloaded.title
             assert (tmp_path / 'downloads' / 'report.txt').read_bytes() == b'fixture report contents'
+
+
+def _fake_playwright(monkeypatch, launch):
+    import sys
+    from types import SimpleNamespace
+    context = SimpleNamespace(
+        set_default_timeout=lambda *_: None, set_default_navigation_timeout=lambda *_: None,
+        route=lambda *_: None, route_web_socket=lambda *_: None, on=lambda *_: None,
+        new_page=lambda: SimpleNamespace(), close=lambda: None)
+    browser = SimpleNamespace(new_context=lambda **_: context, close=lambda: None)
+    chromium = SimpleNamespace(launch=lambda **options: launch(options) or browser)
+    runtime = SimpleNamespace(chromium=chromium, stop=lambda: None)
+    sync_api = SimpleNamespace(sync_playwright=lambda: SimpleNamespace(start=lambda: runtime))
+    monkeypatch.setitem(sys.modules, 'playwright', SimpleNamespace(sync_api=sync_api))
+    monkeypatch.setitem(sys.modules, 'playwright.sync_api', sync_api)
+
+
+def test_chrome_channel_is_requested_only_for_chrome(monkeypatch):
+    launches = []
+    _fake_playwright(monkeypatch, launches.append)
+    with BrowserExecutor(browser='chrome'):
+        pass
+    with BrowserExecutor(browser='chromium'):
+        pass
+    assert launches == [{'headless': False, 'channel': 'chrome'}, {'headless': False}]
+
+
+def test_missing_chrome_gives_a_plain_actionable_error(monkeypatch):
+    from browser.executor import BrowserUnavailable
+    def missing(_options):
+        raise RuntimeError('Chromium distribution chrome is not found')
+    _fake_playwright(monkeypatch, missing)
+    with pytest.raises(BrowserUnavailable, match='Install Chrome'):
+        BrowserExecutor(browser='chrome').__enter__()
+    with pytest.raises(ValueError):
+        BrowserExecutor(browser='firefox')

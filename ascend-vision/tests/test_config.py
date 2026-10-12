@@ -68,6 +68,7 @@ def test_browser_automation_is_disabled_and_uses_bounded_local_defaults(tmp_path
     assert cfg.browser_automation.enabled is False
     assert cfg.browser_automation.b3_enabled is False
     assert cfg.browser_automation.provider == 'gemini'
+    assert cfg.browser_automation.browser == 'chrome'
     assert cfg.browser_automation.max_decisions == 20
     assert cfg.browser_automation.max_actions == 30
     assert cfg.browser_automation.max_pages == 3
