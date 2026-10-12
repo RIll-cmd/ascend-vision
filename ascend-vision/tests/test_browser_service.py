@@ -777,6 +777,9 @@ def test_failures_give_plain_safe_reasons_and_never_echo_provider_text():
     assert 'AI service did not answer' in failure_reason(
         RuntimeError('No response from the selected browser provider (groq).'))
     assert 'too long' in failure_reason(TimeoutError(secret))
+    assert 'only reads pages' in failure_reason(
+        PermissionError('This browser action is not available in the selected task scope.'))
+    assert 'only reads pages' not in failure_reason(PermissionError('The one-time browser action grant expired.'))
     for error in (ValueError(secret), KeyError(secret), RuntimeError(secret)):
         text = failure_reason(error)
         assert secret not in text and 'could not safely complete' in text

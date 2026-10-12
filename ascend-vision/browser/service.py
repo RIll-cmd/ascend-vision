@@ -36,6 +36,9 @@ def failure_reason(exc: BaseException) -> str:
         return 'A page or link was outside the safe-browsing rules (private, local or blocked address), so Vision stopped.'
     if isinstance(exc, ContractError):
         return 'The AI gave a reply Vision could not use safely. Try the task again.'
+    if isinstance(exc, PermissionError) and 'not available in the selected task scope' in str(exc):
+        return ('That task needs typing, buttons or forms, which are turned off. Vision only reads pages right now, '
+                'so it stopped without doing it.')
     if isinstance(exc, RuntimeError) and 'selected browser provider' in str(exc):
         return 'The AI service did not answer (busy, too large, or out of free requests). Try again in a minute.'
     if type(exc).__name__ == 'TimeoutError' or isinstance(exc, TimeoutError):
