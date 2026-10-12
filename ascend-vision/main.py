@@ -6,6 +6,7 @@ import logging
 import math
 import os
 from pathlib import Path
+import secrets
 import signal
 import sqlite3
 import threading
@@ -389,9 +390,19 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                                 and session_key[1] == 'voice'
                                 and session_key[2] == str(getattr(manager, 'session_id', 'default')))
 
+                    def publish_browser_result(text):
+                        # Chat and conversation start later; look them up when the task ends.
+                        if chat_queue is None or local_conversation is None:
+                            return
+                        chat_queue.publish_event(
+                            local_conversation.runtime_session_id, turn_id=secrets.token_hex(8),
+                            source='browser', kind='assistant', text=text, reply_source='tool',
+                        )
+
                     browser_voice_notifier = BrowserVoiceCompletionNotifier(
                         browser_task_client, feedback, voice_session_is_current,
                         task_timeout_seconds=config.browser_automation.task_timeout_seconds,
+                        chat_publisher=publish_browser_result,
                     )
                 except Exception as exc:
                     LOG.warning('Browser voice result delivery unavailable (%s)', type(exc).__name__)
