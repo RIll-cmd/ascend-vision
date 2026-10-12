@@ -23,7 +23,7 @@ def _is_local(address) -> bool:
 
 
 @pytest.fixture(autouse=True)
-def no_real_keys_or_network(request, monkeypatch):
+def no_real_keys_or_network(request, monkeypatch, tmp_path):
     saved = dict(os.environ)
     module = request.node.module.__name__
     if module != 'test_runtime_environment':  # that module tests .env loading with its own files
@@ -42,6 +42,9 @@ def no_real_keys_or_network(request, monkeypatch):
     def no_download(*_args, **_kwargs):
         raise OSError('tests may not download model files')
 
+    # The shared "key limited" record lives in a temporary folder during tests.
+    monkeypatch.setattr('ai_key_status._STORE', None, raising=False)
+    monkeypatch.setattr('ai_key_status.default_path', lambda: tmp_path / 'ai-key-status.sqlite3', raising=False)
     if module != 'test_tts_engine':  # that module fakes the HTTP response itself
         monkeypatch.setattr('tts_engine._download_file', no_download, raising=False)
     yield

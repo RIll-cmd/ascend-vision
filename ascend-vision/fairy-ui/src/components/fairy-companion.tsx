@@ -134,6 +134,18 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
     : ai?.state === 'available' ? 'good'
     : ai?.state === 'request-failed' || ai?.state === 'not-configured' ? 'danger'
       : ai?.state === 'configured-untested' || ai?.state === 'requesting' ? 'warning' : 'neutral';
+  const providerName: Record<string, string> = { gemini: 'Gemini', groq: 'Groq', cerebras: 'Cerebras' };
+  const keyNotice = (() => {
+    const entries = Object.entries(state?.aiKeys ?? {}).filter(([, value]) => value.total > 0);
+    const out = entries.find(([, value]) => value.limited >= value.total);
+    if (out) {
+      const until = out[1].freeAt ? ` until ${new Date(out[1].freeAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : '';
+      return { variant: 'danger' as const, text: `${providerName[out[0]] ?? out[0]} keys used up${until}` };
+    }
+    const low = entries.find(([, value]) => value.limited > 0 && value.total - value.limited <= 1);
+    if (low) return { variant: 'warning' as const, text: `${providerName[low[0]] ?? low[0]} keys low · ${low[1].total - low[1].limited} of ${low[1].total} left` };
+    return null;
+  })();
   const panelCopy = {
     browser: { title: 'Look it up on the web', detail: '' },
     stats: { title: 'Your numbers', detail: '' },
@@ -157,6 +169,7 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
       <div className="top-status">
         <StatusBadge variant={coreVariant} text={coreLabel} title={core?.lastCheckedAt ? `Last checked ${new Date(core.lastCheckedAt).toLocaleTimeString()}` : 'Core status has not been checked'} />
         <StatusBadge variant={aiVariant} text={aiLabel} pulse={false} title={ai?.lastSuccessAt ? `Last real model response ${new Date(ai.lastSuccessAt).toLocaleString()}${ai.model ? ` · ${ai.model}` : ''}` : 'AI status is based on provider configuration and actual responses, not Core or microphone status.'} />
+        {keyNotice && <StatusBadge variant={keyNotice.variant} text={keyNotice.text} pulse={false} title="Your AI keys hit their provider limits. Vision switches to keys that still work." />}
         {state?.gesture && (
           <StatusBadge
             variant={state.gesture.includes('Muted') ? 'danger' : 'info'}

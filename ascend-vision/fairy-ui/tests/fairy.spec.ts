@@ -301,6 +301,19 @@ test('web tab hides when off; when on it runs a task, asks before acting, and sh
   await expect(page.locator('a[href^="javascript"]')).toHaveCount(0);
 });
 
+test('key badge warns when keys run low or out, and stays hidden otherwise', async ({ page }) => {
+  let aiKeys: any = { gemini: { total: 2, limited: 0, freeAt: null }, groq: { total: 5, limited: 0, freeAt: null } };
+  await page.route('**/api/fairy/state', route => route.fulfill({ json: {
+    mode: 'focus', cameraReady: false, audioLevel: 0, voiceEnabled: false, muted: false, speaking: false, elapsedSeconds: 0, aiKeys,
+  } }));
+  await page.goto('/?runtime=1');
+  await expect(page.locator('.top-status')).not.toContainText('keys');
+  aiKeys = { gemini: { total: 2, limited: 1, freeAt: '2026-10-13T01:40:00Z' }, groq: { total: 5, limited: 0, freeAt: null } };
+  await expect(page.locator('.top-status')).toContainText('Gemini keys low · 1 of 2 left');
+  aiKeys = { gemini: { total: 2, limited: 2, freeAt: '2026-10-13T01:40:00Z' }, groq: { total: 5, limited: 0, freeAt: null } };
+  await expect(page.locator('.top-status')).toContainText('Gemini keys used up until');
+});
+
 test('face detection runs with hidden preview and attention moves inside the stationary orb', async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).hasTestFace = true;

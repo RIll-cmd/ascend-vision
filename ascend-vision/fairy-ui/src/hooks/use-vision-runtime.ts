@@ -37,6 +37,7 @@ export interface VisionState {
   activePanelSequence?: number;
   speakReplies?: boolean;
   webUse?: { enabled: boolean; writes: boolean };
+  aiKeys?: Record<string, { total: number; limited: number; freeAt?: string | null }>;
   aiStatus?: {
     configured: boolean;
     state: 'unknown' | 'not-configured' | 'configured-untested' | 'requesting' | 'available' | 'request-failed';

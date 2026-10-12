@@ -137,8 +137,10 @@ class ProviderKeyPool:
         client_factory,
         explicit_client=None,
         cooldown_seconds: float = 60.0,
+        status_store=None,
     ):
         self.provider = provider
+        self.status_store = status_store
         self.keys = [k.strip() for k in keys if k and k.strip()]
         self.client_factory = client_factory
         self.explicit_client = explicit_client
@@ -164,8 +166,28 @@ class ProviderKeyPool:
                 self._clients[key] = self.client_factory(key)
             return self._clients[key]
 
+    def _limited_elsewhere(self) -> dict[str, float]:
+        """Keys another Vision process (or an earlier run) found limited; fingerprint -> until."""
+        if self.status_store is None:
+            return {}
+        try:
+            return self.status_store.limited_until(self.provider, self.keys)
+        except Exception:
+            return {}
+
+    def _note_limit(self, key: str, exc: Exception) -> None:
+        from ai_key_status import retry_seconds
+        seconds = retry_seconds(exc)
+        with self._lock:
+            self._cooldown_until[key] = time.monotonic() + seconds
+        if self.status_store is not None:
+            try:
+                self.status_store.record_limit(self.provider, key, seconds)
+            except Exception as store_exc:
+                LOG.debug('[ROUTER] key status not recorded (%s)', type(store_exc).__name__)
+
     def execute_with_failover(self, call_fn, *, max_attempts: int | None = None):
-        """Executes call_fn(client). If rotatable limit/error occurs and backup keys exist, rotates and retries."""
+        """Call with keys that are not limited first; spend at most max_attempts real calls."""
         if self.explicit_client is not None:
             return call_fn(self.explicit_client)
 
@@ -174,29 +196,22 @@ class ProviderKeyPool:
         if max_attempts is not None and (type(max_attempts) is not int or max_attempts < 1):
             raise ValueError('max_attempts must be a positive integer')
 
+        from ai_key_status import fingerprint
         now = time.monotonic()
-        total_keys = len(self.keys)
-        if total_keys == 1 or max_attempts == 1:
-            key = self.keys[0]
-            with self._lock:
-                if key not in self._clients:
-                    self._clients[key] = self.client_factory(key)
-                client = self._clients[key]
-            return call_fn(client)
-
+        elsewhere = self._limited_elsewhere()
         with self._lock:
             start_index = self._current_index
+            ordered = [(start_index + offset) % len(self.keys) for offset in range(len(self.keys))]
+            limited = {idx for idx in ordered
+                       if self._cooldown_until.get(self.keys[idx], 0.0) > now
+                       or fingerprint(self.keys[idx]) in elsewhere}
+        candidates = [idx for idx in ordered if idx not in limited] or ordered[:1]
+        budget = min(len(candidates), max_attempts or len(candidates))
 
         last_error = None
-        for attempt in range(min(total_keys, max_attempts or total_keys)):
-            idx = (start_index + attempt) % total_keys
+        for idx in candidates[:budget]:
             key = self.keys[idx]
-
             with self._lock:
-                cooldown = self._cooldown_until.get(key, 0.0)
-                # If on cooldown, skip it unless this is our last option
-                if now < cooldown and attempt < total_keys - 1:
-                    continue
                 if key not in self._clients:
                     try:
                         self._clients[key] = self.client_factory(key)
@@ -204,25 +219,22 @@ class ProviderKeyPool:
                         last_error = exc
                         continue
                 client = self._clients[key]
-
             try:
-                res = call_fn(client)
+                result = call_fn(client)
                 with self._lock:
                     self._current_index = idx
-                return res
+                return result
             except Exception as exc:
                 last_error = exc
-                if self._is_rotatable_error(exc):
-                    with self._lock:
-                        self._cooldown_until[key] = time.monotonic() + self.cooldown_seconds
-                        self._current_index = (idx + 1) % total_keys
-                    LOG.warning(
-                        "[ROUTER] %s key %d/%d encountered limit/error (%s). Switching to backup key...",
-                        self.provider.upper(), idx + 1, total_keys, exc
-                    )
-                    time.sleep(0.5)
-                else:
+                if not self._is_rotatable_error(exc):
                     raise
+                self._note_limit(key, exc)
+                with self._lock:
+                    self._current_index = (idx + 1) % len(self.keys)
+                if len(candidates) > 1:
+                    LOG.warning("[ROUTER] %s key %d/%d is limited (%s). Trying another key...",
+                                self.provider.upper(), idx + 1, len(self.keys), type(exc).__name__)
+                    time.sleep(0.5)
 
         raise last_error
 
@@ -295,6 +307,26 @@ class LLMRouter:
         if gemini_clients:
             self._gemini_pool.keys = [f"mock_gemini_{i}" for i in range(len(gemini_clients))]
             self._gemini_pool._clients = {k: c for k, c in zip(self._gemini_pool.keys, gemini_clients)}
+
+        # Real keys share their "limited until" state with Vision's other process; injected test clients do not.
+        if not any(item is not None for item in (groq_client, cerebras_client, gemini_client,
+                                                  groq_clients, cerebras_clients, gemini_clients)):
+            from ai_key_status import shared_store
+            store = shared_store()
+            for pool in (self._groq_pool, self._cerebras_pool, self._gemini_pool):
+                pool.status_store = store
+
+    def key_summary(self) -> dict:
+        """Per provider: total keys, how many are limited now, and when the next frees up."""
+        from ai_key_status import shared_store
+        store = shared_store()
+        if store is None:
+            return {}
+        try:
+            return store.summary({pool.provider: pool.keys for pool in
+                                  (self._gemini_pool, self._groq_pool, self._cerebras_pool)})
+        except Exception:
+            return {}
 
     @staticmethod
     def _parse_keys(env_var_name: str) -> list[str]:

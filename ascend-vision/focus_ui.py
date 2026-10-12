@@ -64,6 +64,8 @@ class FocusUI:
         self._memory = None
         self._browser_client = None
         self._browser_config = None
+        self._key_status = None
+        self._key_cache = (0.0, None)
         self._server = None
         self._thread = None
         self.app = self._create_app()
@@ -107,8 +109,12 @@ class FocusUI:
 
         @app.get('/api/fairy/state')
         def state():
+            keys = self._key_summary()
             with self._lock:
-                return jsonify(dict(self._state))
+                snapshot = dict(self._state)
+            if keys is not None:
+                snapshot['aiKeys'] = keys
+            return jsonify(snapshot)
 
         @app.get('/api/fairy/health')
         def health():
@@ -273,6 +279,23 @@ class FocusUI:
         register_browser_routes(app, lambda: self._browser_client, _LiveBrowserConfig(self),
                                 session_key=FAIRY_BROWSER_SESSION)
         return app
+
+    def bind_key_status(self, summary_provider):
+        """A callable returning per-provider key counts; read at most every few seconds."""
+        self._key_status = summary_provider
+
+    def _key_summary(self):
+        if self._key_status is None:
+            return None
+        fetched_at, cached = self._key_cache
+        if time.monotonic() - fetched_at < 5:
+            return cached
+        try:
+            cached = self._key_status()
+        except Exception:
+            cached = None
+        self._key_cache = (time.monotonic(), cached)
+        return cached
 
     def bind_browser(self, client, browser_config):
         """Expose the in-process browser service to the one Vision window."""

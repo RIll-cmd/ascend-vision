@@ -290,6 +290,18 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             memory_store = UnavailableMemoryStore()
         if focus_ui_bridge is not None:
             focus_ui_bridge.bind_data(config, memory_store)
+        from ai_key_status import KeyLowNotifier, keys_from_env, shared_store
+
+        def ai_key_summary():
+            store = shared_store()
+            return store.summary(keys_from_env({
+                'gemini': config.llm.gemini_api_key_env, 'groq': config.llm.groq_api_key_env,
+                'cerebras': config.llm.cerebras_api_key_env,
+            })) if store is not None else {}
+
+        key_low_notifier = KeyLowNotifier()
+        if focus_ui_bridge is not None:
+            focus_ui_bridge.bind_key_status(ai_key_summary)
         core_base_url = (os.getenv("ASCEND_CORE_BASE_URL") or os.getenv("ASCEND_BASE_URL", "http://localhost:8000")).strip()
         token_store = None
         context_store = None
@@ -1492,6 +1504,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     break
             if time.perf_counter() >= next_report:
                 report()
+                try:
+                    for notice in key_low_notifier.messages(ai_key_summary()):
+                        feedback.speak_announcement(notice)
+                except Exception as exc:
+                    LOG.debug('AI key check skipped (%s)', type(exc).__name__)
                 next_report = time.perf_counter() + config.runtime.stats_interval_seconds
     except KeyboardInterrupt:
         LOG.info('Stopping at user request')
