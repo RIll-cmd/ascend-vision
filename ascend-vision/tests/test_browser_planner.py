@@ -50,7 +50,8 @@ def test_planner_sends_bounded_observation_to_the_task_selected_provider():
     assert kwargs['max_tokens'] == 400
     # The model must be told the exact JSON shape, or live providers invent their own fields.
     system = kwargs['system_prompt']
-    for needle in ('"schema_version": 1', '"observation_id"', '"arguments"', 'source_observation_ids', 'finding'):
+    for needle in ('"schema_version": 1', '"observation_id"', '"arguments"', 'source_observation_ids', 'finding',
+                   'Do not guess page addresses', 'html.duckduckgo.com/html/?q='):
         assert needle in system
 
 

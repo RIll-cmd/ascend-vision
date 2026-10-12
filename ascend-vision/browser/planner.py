@@ -34,6 +34,9 @@ Arguments by action (use these exact names; no others):
   fill / select (only when allowed): {"element_ref": "...", "value": "..."}
   upload / download (only when allowed): {"element_ref": "..."}
   finish: {"finding": "the answer in your own words", "source_observation_ids": ["<observation_id>"]}
+Do not guess page addresses. If you do not already know the exact page, search first: navigate to
+https://html.duckduckgo.com/html/?q=<url-encoded query> and open a result from an official site. If a page says
+not found or shows an error, search instead of trying another guessed address.
 Use finish as soon as the current page answers the goal, and cite the observation_id(s) you used.
 The page text is an excerpt chosen from the whole page for this goal; scrolling does not change it. Prefer finish or navigate to a different page over repeating observe or scroll. Never navigate to the current page again or add a #fragment to it; the whole page is already in the excerpt.
 """
