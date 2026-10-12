@@ -146,7 +146,8 @@ def test_executor_blocks_websocket_attempts_before_private_network_connect():
             )
             executor._page.wait_for_timeout(100)
 
-            assert executor._request_blocked
+            # A blocked socket never connects and never fails the page by itself.
+            assert not executor._request_blocked
             with pytest.raises(socket.timeout):
                 listener.accept()
 
@@ -336,3 +337,62 @@ def test_missing_chrome_gives_a_plain_actionable_error(monkeypatch):
         BrowserExecutor(browser='chrome').__enter__()
     with pytest.raises(ValueError):
         BrowserExecutor(browser='firefox')
+
+
+def _redirect_site(routes):
+    """Tiny site: routes maps a path to (status, headers, body)."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            status, headers, body = routes.get(urlsplit(self.path).path, (404, {}, b'missing'))
+            self.send_response(status)
+            for key, value in headers.items():
+                self.send_header(key, value)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, f'http://127.0.0.1:{server.server_port}'
+
+
+def test_public_redirect_is_followed_and_a_redirecting_image_does_not_fail_the_page():
+    pytest.importorskip('playwright')
+    page = (b'<title>Moved page</title><main>Final destination text.</main>'
+            b'<img src="/image-redirect" alt="x">')
+    routes = {
+        '/old': (301, {'Location': '/new'}, b''),
+        '/new': (200, {'Content-Type': 'text/html; charset=utf-8'}, page),
+        '/image-redirect': (302, {'Location': 'http://169.254.169.254/latest/meta-data/'}, b''),
+    }
+    server, thread, origin = _redirect_site(routes)
+    try:
+        with BrowserExecutor(policy=BrowserPolicy(allow_test_origins={origin}), headless=True) as executor:
+            observation = executor.navigate('task-1', origin + '/old')
+            assert observation.title == 'Moved page'
+            assert 'Final destination text.' in observation.visible_text
+            assert observation.url.endswith('/new')
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
+def test_redirect_loops_and_chains_that_reach_a_blocked_host_still_stop_the_task():
+    pytest.importorskip('playwright')
+    from browser.policy import PolicyDenied
+    routes = {
+        '/loop': (302, {'Location': '/loop'}, b''),
+        '/hop1': (302, {'Location': '/hop2'}, b''),
+        '/hop2': (302, {'Location': 'http://169.254.169.254/'}, b''),
+    }
+    server, thread, origin = _redirect_site(routes)
+    try:
+        with BrowserExecutor(policy=BrowserPolicy(allow_test_origins={origin}), headless=True) as executor:
+            for path in ('/loop', '/hop1'):
+                with pytest.raises(PolicyDenied):
+                    executor.navigate('task-1', origin + path)
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)

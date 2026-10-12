@@ -6,7 +6,7 @@ import hashlib
 import secrets
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from browser.policy import BrowserPolicy, PolicyDenied
 
@@ -132,36 +132,64 @@ class BrowserExecutor:
         if len(self._pages) > self._max_pages:
             page.close()
 
-    def _guard_request(self, route) -> None:
+    MAX_REDIRECT_HOPS = 5
+
+    @staticmethod
+    def _is_main_navigation(request) -> bool:
         try:
-            self._policy.validate_url(route.request.url)
-            # `continue_()` only routes the original URL; Playwright follows a
-            # redirect without invoking this handler for the destination. Fetch
-            # one hop ourselves and refuse redirects so every destination is
-            # validated before the browser can contact it.
+            return bool(request.is_navigation_request() and request.frame.parent_frame is None)
+        except Exception:
+            return True  # Unknown requests get the stricter main-page handling.
+
+    def _guard_request(self, route) -> None:
+        """Validate every hop before the browser can reach it.
+
+        The browser follows redirects it receives without calling this handler for the
+        destination, so this handler follows them itself, one validated hop at a time.
+        A blocked page stops the task; a blocked image, script or tracker is only dropped.
+        """
+        request = route.request
+        main = self._is_main_navigation(request)
+        try:
+            url = request.url
+            self._policy.validate_url(url)
             response = route.fetch(max_redirects=0, timeout=15_000)
+            hops = 0
+            while 300 <= response.status < 400 and response.headers.get('location'):
+                hops += 1
+                if hops > self.MAX_REDIRECT_HOPS:
+                    raise ValueError('too many redirects')
+                url = urljoin(url, response.headers['location'])
+                self._policy.validate_url(url)
+                response = route.fetch(url=url, max_redirects=0, timeout=15_000)
             if 300 <= response.status < 400:
-                self._request_blocked = True
-                route.abort('blockedbyclient')
-                return
-            route.fulfill(response=response)
+                raise ValueError('redirect without a destination')
+            if main and hops:
+                # The page address must change, so hand the browser the validated final URL.
+                route.fulfill(status=302, headers={'location': url, 'cache-control': 'no-store'})
+            else:
+                route.fulfill(response=response)
         except (PolicyDenied, ValueError):
-            self._request_blocked = True
-            route.abort('blockedbyclient')
+            self._block(route, main)
         except Exception:
             # Fail closed if the request cannot be safely inspected/fulfilled.
+            self._block(route, main)
+
+    def _block(self, route, main: bool) -> None:
+        if main:
             self._request_blocked = True
-            try:
-                route.abort('blockedbyclient')
-            except Exception:
-                pass
+        try:
+            route.abort('blockedbyclient')
+        except Exception:
+            pass
 
     def _block_web_socket(self, route) -> None:
         # BrowserContext.route() does not cover WebSocket handshakes. Public
         # research has no supported need for sockets. Playwright does not
         # connect routed WebSockets unless the handler explicitly calls
         # connect_to_server(); leaving it unconnected blocks the destination.
-        self._request_blocked = True
+        # A dropped socket never fails the page by itself.
+        return None
 
     def _require_page(self, task_id: str):
         if not isinstance(task_id, str) or not task_id:
