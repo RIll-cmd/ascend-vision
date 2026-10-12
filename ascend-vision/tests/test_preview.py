@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from unittest.mock import Mock
 
 from capture import Frame
-from config import Config
+from config import Config, RuntimeConfig
 from detector import PhoneBox
 from main import run
 
@@ -22,7 +22,7 @@ def test_preview_quit_cleans_up_and_does_not_mutate_capture_frame(monkeypatch):
     monkeypatch.setattr('main.cv2.imshow', lambda name, image: shown.append(image))
     monkeypatch.setattr('main.cv2.waitKey', lambda *a: ord('q'))
     monkeypatch.setattr('main.cv2.destroyAllWindows', lambda: closed.append(True))
-    run(Config(), detector=detector, capture=capture, hand_tracker=hands)
+    run(Config(runtime=RuntimeConfig(preview=True)), detector=detector, capture=capture, hand_tracker=hands)
     assert len(shown) == 1
     assert shown[0].any()
     assert not frame.any()

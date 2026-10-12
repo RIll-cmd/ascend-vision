@@ -10,7 +10,7 @@ def isolated_runtime(request, tmp_path, monkeypatch):
     monkeypatch.setenv('PYTHON_DOTENV_DISABLED', '1')
     monkeypatch.chdir(tmp_path)
     class TestControls:
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             pass
         def start(self):
             pass

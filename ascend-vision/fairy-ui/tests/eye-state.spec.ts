@@ -68,7 +68,7 @@ test('runtime mode, transcript, mic, speech and Core status stay independent', a
   await expect(page.getByText('Core offline', { exact: true })).toBeVisible();
 });
 
-test('automatic expression clears, manual expression persists until Automatic is chosen', async ({ page }) => {
+test('expression follows the detected emotion automatically', async ({ page }) => {
   const state = { mode: 'focus', cameraReady: false, audioLevel: 0, voiceEnabled: false,
     muted: false, speaking: false, elapsedSeconds: 0, emotion: 'smiling', posture: 'slouched', phoneBox: { x1: .1 } };
   await page.route('**/api/fairy/state', route => route.fulfill({ json: state }));
@@ -77,13 +77,6 @@ test('automatic expression clears, manual expression persists until Automatic is
   await expect(eye).toHaveAttribute('data-expression', 'happy');
   state.emotion = 'neutral';
   await expect(eye).toHaveAttribute('data-expression', 'open');
-  await page.getByRole('button', { name: 'Eye appearance', exact: true }).click();
-  await page.getByRole('button', { name: 'angry expression' }).click();
-  await expect(eye).toHaveAttribute('data-expression', 'angry');
-  await expect(page.getByText('Manual · Angry')).toBeVisible();
   state.emotion = 'smiling';
-  await expect(eye).toHaveAttribute('data-expression', 'angry');
-  await page.getByRole('button', { name: 'Automatic expression' }).click();
   await expect(eye).toHaveAttribute('data-expression', 'happy');
-  await expect(page.getByText('Automatic · Happy')).toBeVisible();
 });

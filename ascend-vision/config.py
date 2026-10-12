@@ -62,7 +62,7 @@ class DetectorConfig:
 
 @dataclass(frozen=True)
 class RuntimeConfig:
-    preview: bool = True
+    preview: bool = False
     stats_interval_seconds: float = 5.
     target_fps: float = 15.
 
@@ -249,19 +249,12 @@ class StorageConfig:
 
 @dataclass(frozen=True)
 class SessionConfig:
-    initial_mode: str = 'background'
+    # Vision always starts in focus; pausing keeps logging quietly without roasts.
     tray: bool = True
-    hotkey_enabled: bool = True
-    hotkey: str = 'ctrl+alt+f'
 
     def __post_init__(self):
-        if self.initial_mode not in ('background', 'focus'):
-            raise ValueError('sessions.initial_mode must be background or focus')
-        for name in ('tray', 'hotkey_enabled'):
-            if type(getattr(self, name)) is not bool:
-                raise ValueError(f'sessions.{name} must be a YAML boolean')
-        if not isinstance(self.hotkey, str) or not self.hotkey.strip():
-            raise ValueError('sessions.hotkey must be a nonempty hotkey string')
+        if type(self.tray) is not bool:
+            raise ValueError('sessions.tray must be a YAML boolean')
 
 
 @dataclass(frozen=True)

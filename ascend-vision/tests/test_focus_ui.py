@@ -104,17 +104,17 @@ def test_face_target_is_normalized_mirrored_and_cleared_on_face_loss():
 
 
 @pytest.mark.parametrize('flags, expected_fairy, expected_preview', [
+    ([], True, False),
     (['--focus'], True, False),
-    (['--focus', '--no-fairy-ui'], False, True),
-    (['--focus', '--preview'], True, True),
-    (['--fairy-ui'], True, False),
+    (['--no-fairy-ui', '--preview'], False, True),
+    (['--preview'], True, True),
 ])
 def test_cli_launch_selection(monkeypatch, tmp_path, flags, expected_fairy, expected_preview):
     import main
     from config import Config, RuntimeConfig
     (tmp_path / 'index.html').write_text('<title>Built</title>')
     monkeypatch.setattr('focus_ui.BUILD_DIR', tmp_path)
-    monkeypatch.setattr(main, 'load_config', lambda _path: Config(runtime=RuntimeConfig(preview=True)))
+    monkeypatch.setattr(main, 'load_config', lambda _path: Config(runtime=RuntimeConfig(preview=False)))
     calls = []
     monkeypatch.setattr(main, 'run', lambda config, **kwargs: calls.append((config, kwargs)))
     assert main.main(flags) == 0
@@ -122,8 +122,6 @@ def test_cli_launch_selection(monkeypatch, tmp_path, flags, expected_fairy, expe
     config, kwargs = calls[0]
     assert kwargs.get('fairy_ui', False) is expected_fairy
     assert config.runtime.preview is expected_preview
-    if '--focus' in flags:
-        assert config.sessions.initial_mode == 'focus'
 
 
 def test_vision_loop_publishes_existing_capture_and_cleans_up(monkeypatch, tmp_path):
@@ -149,7 +147,7 @@ def test_vision_loop_publishes_existing_capture_and_cleans_up(monkeypatch, tmp_p
 
     class Bridge(FocusUI):
         closed = False
-        def start(self):
+        def start(self, **kwargs):
             self.commands.put_nowait('toggle-focus')
             return 'http://127.0.0.1/'
         def close(self):
@@ -165,7 +163,7 @@ def test_vision_loop_publishes_existing_capture_and_cleans_up(monkeypatch, tmp_p
     feedback.is_muted.return_value = False
     monkeypatch.setattr(main, 'FeedbackService', lambda *args: feedback)
     capture = Capture()
-    config = Config(runtime=RuntimeConfig(preview=False), sessions=SessionConfig(initial_mode='focus'))
+    config = Config(runtime=RuntimeConfig(preview=False), sessions=SessionConfig())
     config = replace(config, storage=replace(config.storage, database=tmp_path / 'session.db'),
                      ascend=replace(config.ascend, enabled=False))
     main.run(config, capture=capture, detector=Mock(detect=Mock(return_value=None)),
@@ -177,3 +175,38 @@ def test_vision_loop_publishes_existing_capture_and_cleans_up(monkeypatch, tmp_p
     assert state['mode'] == 'background'
     assert state['audioLevel'] == 0
     assert capture.closed and bridge.closed
+
+
+def test_stats_and_memory_are_served_by_the_single_ui(tmp_path):
+    from dataclasses import replace
+    from assistant.memory import MemoryStore, UnavailableMemoryStore
+    from config import Config
+    from db import Database
+
+    config = Config()
+    config = replace(config, storage=replace(config.storage, database=tmp_path / 'vision.db'))
+    with Database(config.storage.database, timeout=1):
+        pass
+    memory = MemoryStore(tmp_path / 'memory.db')
+    ui = FocusUI()
+    client = ui.app.test_client()
+    assert client.get('/api/fairy/stats').status_code == 503
+    assert client.get('/api/fairy/memory').status_code == 503
+    ui.bind_data(config, memory)
+    stats = client.get('/api/fairy/stats?days=7').json
+    assert len(stats['days']) == 7 and stats['summary']['pickups'] == 0
+    assert client.get('/api/fairy/stats?days=500').status_code == 400
+    assert client.get('/api/fairy/stats?start=2020-01-01').status_code == 400
+
+    proposal = memory.propose('I like green tea')
+    assert [item['text'] for item in client.get('/api/fairy/memory').json['pending']] == ['I like green tea']
+    approved = client.post(f'/api/fairy/memory/proposals/{proposal}/approve').json['memory']
+    assert [item['text'] for item in client.get('/api/fairy/memory').json['active']] == ['I like green tea']
+    assert client.put('/api/fairy/memory/settings', json={'enabled': 'yes'}).status_code == 400
+    assert client.put('/api/fairy/memory/settings', json={'enabled': False}).json == {'enabled': False}
+    assert client.delete(f"/api/fairy/memory/{approved['id']}").json == {'deleted': True}
+    assert client.post('/api/fairy/memory/proposals/999/reject',
+                       headers={'Origin': 'https://example.com'}).status_code == 403
+
+    ui.bind_data(config, UnavailableMemoryStore())
+    assert client.get('/api/fairy/memory').status_code == 503

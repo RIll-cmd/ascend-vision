@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, timedelta, timezone
 import hmac
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ from flask import Flask, Response, abort, jsonify, request, send_from_directory
 from werkzeug.serving import make_server
 
 from assistant.runtime_health import RuntimeHealth
+from dashboard_stats import DashboardError, get_zone, read_stats
 
 LOG = logging.getLogger(__name__)
 BUILD_DIR = Path(__file__).with_name('fairy-ui') / 'dist'
@@ -44,6 +46,8 @@ class FocusUI:
         self.commands: queue.Queue[str] = queue.Queue(maxsize=16)
         self._chat_queue = None
         self._runtime_session_id = None
+        self._config = None
+        self._memory = None
         self._server = None
         self._thread = None
         self.app = self._create_app()
@@ -180,7 +184,79 @@ class FocusUI:
                            cursor=events[-1]['cursor'] if events else cursor,
                            sessionId=self._runtime_session_id)
 
+        def memory_unavailable():
+            return jsonify(error='Vision memory is temporarily unavailable.'), 503
+
+        @app.get('/api/fairy/stats')
+        def stats():
+            if self._config is None:
+                return jsonify(error='Statistics are not ready yet.'), 503
+            if request.args.keys() - {'days'}:
+                return jsonify(error='Unknown filter.'), 400
+            raw = request.args.get('days', '7')
+            if raw not in ('7', '28'):
+                return jsonify(error='Choose 7 or 28 days.'), 400
+            zone = self._config.dashboard.timezone
+            today = datetime.now(timezone.utc).astimezone(get_zone(zone)).date()
+            try:
+                return jsonify(read_stats(
+                    self._config.storage.database, today - timedelta(days=int(raw) - 1), today,
+                    zone=zone, timeout=self._config.storage.busy_timeout_seconds))
+            except DashboardError as exc:
+                LOG.warning('Fairy stats read failed (%s)', type(exc).__name__)
+                return jsonify(error=str(exc)), 503
+
+        @app.get('/api/fairy/memory')
+        def memory_list():
+            if self._memory is None:
+                return memory_unavailable()
+            try:
+                return jsonify(enabled=self._memory.enabled(), pending=self._memory.pending(),
+                               active=self._memory.active(''))
+            except Exception as exc:
+                LOG.warning('Fairy memory read failed (%s)', type(exc).__name__)
+                return memory_unavailable()
+
+        def memory_action(action):
+            if self._memory is None:
+                return memory_unavailable()
+            try:
+                return action()
+            except ValueError as exc:
+                return jsonify(error=str(exc)), 400
+            except Exception as exc:
+                LOG.warning('Fairy memory request failed (%s)', type(exc).__name__)
+                return memory_unavailable()
+
+        @app.post('/api/fairy/memory/proposals/<int:proposal_id>/approve')
+        def memory_approve(proposal_id):
+            return memory_action(lambda: jsonify(memory=self._memory.approve(proposal_id)))
+
+        @app.post('/api/fairy/memory/proposals/<int:proposal_id>/reject')
+        def memory_reject(proposal_id):
+            return memory_action(lambda: jsonify(rejected=self._memory.reject(proposal_id)))
+
+        @app.delete('/api/fairy/memory/<int:memory_id>')
+        def memory_delete(memory_id):
+            return memory_action(lambda: jsonify(deleted=self._memory.delete(memory_id)))
+
+        @app.put('/api/fairy/memory/settings')
+        def memory_settings():
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict) or set(payload) != {'enabled'} or type(payload['enabled']) is not bool:
+                return jsonify(error='enabled must be a boolean.'), 400
+
+            def apply():
+                self._memory.set_enabled(payload['enabled'])
+                return jsonify(enabled=self._memory.enabled())
+            return memory_action(apply)
+
         return app
+
+    def bind_data(self, config, memory_store):
+        """Give the single UI read access to saved statistics and memory approvals."""
+        self._config = config
+        self._memory = memory_store
 
     def bind_chat(self, chat_queue, runtime_session_id: str):
         """Connect the UI bridge to the active runtime-owned local conversation."""

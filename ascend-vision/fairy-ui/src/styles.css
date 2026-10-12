@@ -82,7 +82,7 @@ input[type=range] { width: 100%; margin: 14px 0; accent-color: #acd8ff; }
 .fairy-chat-heading { display: flex; justify-content: space-between; align-items: center; padding: 18px 18px 13px; border-bottom: 1px solid #9ac8ed14; }
 .fairy-chat-heading h2 { margin: 5px 0 0; font: 300 22px 'Segoe UI Light', 'Segoe UI', sans-serif; letter-spacing: -.025em; }
 .chat-kicker { color: #82a4c2; font: 8px 'Consolas', monospace; letter-spacing: .16em; }
-.fairy-panel-nav { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; padding: 10px 12px; border-bottom: 1px solid #9ac8ed12; }
+.fairy-panel-nav { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; padding: 10px 12px; border-bottom: 1px solid #9ac8ed12; }
 .fairy-panel-nav button { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; border: 1px solid transparent; border-radius: 9px; color: #8ea5bc; background: #ffffff04; font: 9px 'Consolas', monospace; text-transform: capitalize; }
 .fairy-panel-nav button span { color: #a3d4f6; }
 .fairy-panel-nav button[aria-pressed=true] { color: #dcefff; border-color: #73b7e540; background: #61a8d815; }
@@ -219,3 +219,21 @@ input[type=range] { width: 100%; margin: 14px 0; accent-color: #acd8ff; }
 .fairy-panel-nav button span { color: #b9dff8; font: 600 11px 'Segoe UI', sans-serif; }
 .footer { color: #b1c6d9; font: 11px 'Segoe UI', sans-serif; letter-spacing: 0; }
 .footer .camera-status { color: #b1c6d9; font: 11px 'Segoe UI', sans-serif; }
+
+.fairy-data-panel { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+.fairy-data-panel h3 { margin: 6px 0 0; color: #a3d4f6; font: 600 11px 'Segoe UI', sans-serif; letter-spacing: .08em; text-transform: uppercase; }
+.fairy-data-toggle { display: flex; gap: 6px; }
+.fairy-data-toggle button { height: 32px; font-size: 11px; }
+.fairy-data-toggle button[aria-pressed=true] { color: #dcefff; border: 1px solid #73b7e540; background: #61a8d815; }
+.fairy-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; }
+.fairy-stat-grid div { padding: 10px 12px; border: 1px solid #9ac8ed18; border-radius: 10px; background: #ffffff05; }
+.fairy-stat-grid dt { color: #8ea5bc; font-size: 10px; }
+.fairy-stat-grid dd { margin: 4px 0 0; color: #dcefff; font: 600 20px 'Segoe UI', sans-serif; }
+.fairy-bars { list-style: none; margin: 0; padding: 0; height: 120px; display: flex; align-items: flex-end; gap: 3px; }
+.fairy-bars li { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; min-width: 0; }
+.fairy-bars i { width: 100%; border-radius: 3px 3px 0 0; background: #61a8d8; }
+.fairy-bars span { color: #8ea5bc; font-size: 9px; }
+.fairy-memory-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.fairy-memory-list li { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border: 1px solid #9ac8ed18; border-radius: 10px; }
+.fairy-memory-list p { flex: 1; margin: 0; color: #c9dced; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.fairy-memory-list button { height: 32px; font-size: 11px; flex: 0 0 auto; }

@@ -182,7 +182,7 @@ def test_main_loop_arbitrates_companion_prompt_against_frame_warning(tmp_path, m
         Config(runtime=RuntimeConfig(preview=False),
                companion_context=CompanionContextConfig(enabled=True, proactive_enabled=True),
                feedback=FeedbackConfig(enabled=True),
-               sessions=SessionConfig(initial_mode='focus'),
+               sessions=SessionConfig(),
                hold=HoldConfig(threshold_frames=1)),
         storage=replace(Config().storage, database=tmp_path / 'session.db'),
         ascend=replace(Config().ascend, enabled=False),
@@ -265,7 +265,7 @@ def test_full_loop_persists_both_modes_without_splitting_a_hold(monkeypatch):
     from config import HoldConfig
     managers = []
     class Controls:
-        def __init__(self, config, manager):
+        def __init__(self, config, manager, url=None):
             managers.append(manager)
         def start(self): pass
         def refresh(self): pass
@@ -278,7 +278,7 @@ def test_full_loop_persists_both_modes_without_splitting_a_hold(monkeypatch):
             if self.sequence > 6:
                 raise KeyboardInterrupt
             if self.sequence == 2:
-                managers[0].request('focus')
+                managers[0].request('background')
             return Frame(self.sequence, datetime.now(timezone.utc), self.sequence * .1,
                          np.full((4, 4, 3), self.sequence, dtype=np.uint8))
     class SwitchingHands(Hands):
@@ -288,7 +288,7 @@ def test_full_loop_persists_both_modes_without_splitting_a_hold(monkeypatch):
         detector=Detector(), capture=SwitchingStream(), hand_tracker=SwitchingHands())
     with sqlite3.connect('data/phone_watch.db') as db:
         rows = db.execute('SELECT mode,duration_seconds FROM phone_events ORDER BY id').fetchall()
-        assert [row[0] for row in rows] == ['background', 'focus']
+        assert [row[0] for row in rows] == ['focus', 'background']
         assert [row[1] for row in rows] == pytest.approx([.3, .1])
         assert db.execute('SELECT COUNT(*) FROM sessions WHERE end_time IS NULL').fetchone()[0] == 0
 
@@ -326,8 +326,17 @@ def test_feedback_result_persists_to_original_event_at_shutdown(monkeypatch, mod
     class NearHands(Hands):
         def detect(self, *args): return [[(1., 1., 0.)] * 21]
     monkeypatch.setattr('main.FeedbackService', Feedback)
+    class PauseFirst:
+        def __init__(self, config, manager, url=None):
+            self.manager = manager
+        def start(self):
+            if mode == 'background':
+                self.manager.request('background')
+        def refresh(self): pass
+        def close(self): pass
+    monkeypatch.setattr('main.DesktopControls', PauseFirst)
     run(Config(runtime=RuntimeConfig(preview=False), hold=HoldConfig(threshold_frames=1),
-               sessions=SessionConfig(initial_mode=mode)),
+               sessions=SessionConfig()),
         detector=Detector(), capture=Stream(), hand_tracker=NearHands())
     assert services[0].closed
     with sqlite3.connect('data/phone_watch.db') as db:
@@ -742,7 +751,7 @@ def test_opt_in_context_runtime_wires_existing_session_state_and_closes_cleanly(
         voice_listener=False)
 
     assert len(servers) == 1 and servers[0].started
-    assert servers[0].final_snapshot.fields['focusSession'].value == 'background'
+    assert servers[0].final_snapshot.fields['focusSession'].value == 'focus'
     assert servers[0].final_snapshot.fields['foregroundCategory'].value == 'development'
 
 
@@ -780,7 +789,7 @@ def test_opted_in_activity_recorder_receives_only_live_context_snapshots(tmp_pat
         voice_listener=False)
 
     assert observed[0] == ('created', 'UTC', False)
-    assert any(item[1] == 'background' and item[2] is True for item in observed[1:])
+    assert any(item[1] == 'focus' and item[2] is True for item in observed[1:])
 
 
 def test_main_supplies_deterministic_daily_summary_to_the_local_assistant(tmp_path, monkeypatch):

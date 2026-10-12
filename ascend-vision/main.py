@@ -111,15 +111,13 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
     face_tracker_available = face_tracker is not None
     resources = ExitStack()
     focus_ui_bridge = None
+    fairy_url = None
     if fairy_ui:
         print('ASCEND_STAGE=fairy_host', flush=True)
         from focus_ui import FocusUI
         focus_ui_bridge = FocusUI()
         resources.callback(focus_ui_bridge.close)
-        try:
-            focus_ui_bridge.start(open_browser=not config.runtime.preview)
-        except TypeError:
-            focus_ui_bridge.start()
+        fairy_url = focus_ui_bridge.start(open_browser=not config.runtime.preview)
 
     def collect_feedback():
         for result in feedback.drain():
@@ -186,7 +184,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         manager = SessionManager(database, heartbeat_seconds=config.storage.heartbeat_seconds,
                                  update_seconds=config.storage.update_seconds)
         resources.callback(manager.close)
-        manager.start(config.sessions.initial_mode)
+        manager.start('focus')
         try:
             from assistant.activity_summary import ActivityHistoryStore, render_daily_summary
             activity_history_store = ActivityHistoryStore(
@@ -277,7 +275,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 context_publisher.start()
                 LOG.info('Redacted laptop context sharing is enabled for the paired phone account.')
         chat_session_started_at = time.perf_counter()
-        controls = DesktopControls(config.sessions, manager)
+        controls = DesktopControls(config.sessions, manager, url=fairy_url)
         resources.callback(controls.close)
         controls.start()
         feedback = FeedbackService(config.feedback, config.hold.cooldown_seconds)
@@ -289,6 +287,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         except (OSError, sqlite3.Error, RuntimeError) as exc:
             LOG.warning('Assistant memory unavailable (%s); chat remains stateless', type(exc).__name__)
             memory_store = UnavailableMemoryStore()
+        if focus_ui_bridge is not None:
+            focus_ui_bridge.bind_data(config, memory_store)
         core_base_url = (os.getenv("ASCEND_CORE_BASE_URL") or os.getenv("ASCEND_BASE_URL", "http://localhost:8000")).strip()
         token_store = None
         context_store = None
@@ -1475,8 +1475,6 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         calibration_drag["end"] = None
                         continue
                     break
-                if key == ord(' '):
-                    manager.request('toggle')
                 if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                     break
             if time.perf_counter() >= next_report:
@@ -1505,19 +1503,19 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Phone Watch focus-only roast feedback (Phase 4)')
+    parser = argparse.ArgumentParser(description='Ascend Vision focus companion')
     parser.add_argument('--config', type=Path, default=Path(__file__).with_name('config.yaml'))
     parser.add_argument('--env-file', type=Path,
                         help='load provider credentials from this owner-managed env file')
     parser.add_argument('--camera', type=int, help='override camera index')
     parser.add_argument('--confidence', type=float, help='override confidence, 0 to 1')
-    parser.add_argument('--preview', action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument('--preview', action=argparse.BooleanOptionalAction, default=None,
+                        help='developer OpenCV window; Fairy Eye is the app UI')
     parser.add_argument('--duration', type=float, help='stop after this many seconds, excluding warmup')
     parser.add_argument('--download-model', action='store_true', help='download both models and exit without opening camera')
     parser.add_argument('--init-db', action='store_true', help='initialize SQLite schema and exit without camera access')
-    parser.add_argument('--focus', action='store_true', help='explicitly start in focus mode')
+    parser.add_argument('--focus', action='store_true', help='accepted for older launchers; Vision always starts in focus')
     parser.add_argument('--tray', action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument('--hotkey', action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument('--feedback', action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument('--fairy-ui', action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument('--test-speech', nargs='?', const='Phone Watch speech is ready.', type=str, default=None, help='speak an offline diagnostic line (optionally provide custom text), without camera/API/database')
@@ -1538,21 +1536,13 @@ def main(argv=None):
             config = replace(config, camera=replace(config.camera, index=args.camera))
         if args.confidence is not None:
             config = replace(config, detector=replace(config.detector, confidence=args.confidence))
-        fairy_ui_requested = args.fairy_ui
-        if fairy_ui_requested is None:
-            fairy_ui_requested = bool(args.focus)
+        fairy_ui_requested = args.fairy_ui is not False
         if args.preview is not None:
             config = replace(config, runtime=replace(config.runtime, preview=args.preview))
-        elif fairy_ui_requested:
-            config = replace(config, runtime=replace(config.runtime, preview=False))
         if args.duration is not None:
             number('duration', args.duration, .01)
-        if args.focus:
-            config = replace(config, sessions=replace(config.sessions, initial_mode='focus'))
         if args.tray is not None:
             config = replace(config, sessions=replace(config.sessions, tray=args.tray))
-        if args.hotkey is not None:
-            config = replace(config, sessions=replace(config.sessions, hotkey_enabled=args.hotkey))
         if args.feedback is not None:
             config = replace(config, feedback=replace(config.feedback, enabled=args.feedback))
         if args.test_speech is not None:

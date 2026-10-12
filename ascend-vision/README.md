@@ -1,98 +1,61 @@
-# Phone Watch â€” Phase 3
+# Ascend Vision
 
-For separate one-click Windows launchers for Ascend Vision and Ascend Hub, see `D:/ascend_hub/desktop/README.md` after integrating the desktop reliability branch. The Vision shortcut starts full Fairy and camera mode. If model or camera startup stalls, the launcher offers an explicit chat recovery mode; recovery chat has no camera, microphone, gestures, focus sessions, or browser automation.
+A friendly eye on your desk that notices when you pick up your phone, keeps you
+company while you focus, and chats with you by voice or text. Everything runs
+on your computer.
 
-Local YOLO26n + MediaPipe hold detection with **background/focus sessions and
-SQLite logging**. Every confirmed pickup is persisted in either mode. Focus is
-user-controlled. Confirmed focus pickups generate a short Gemini roast and speak
-it with offline Windows TTS; background mode remains silent. Phase 5 adds an independent local habit dashboard.
+## Get started (Windows)
 
-## Install or upgrade
+1. **Double-click `Setup.bat`.** It installs everything and asks for one free
+   AI key (press Enter to skip; Vision still works with simple replies).
+2. **Double-click `Start Vision.bat`.** Your browser opens the Vision window.
+3. **That's it.** Vision starts in focus mode. Allow the camera if asked.
 
-From the extracted `phone_watch` directory, in Windows PowerShell:
+Setup needs Python 3.11 and Node.js (LTS) installed once; the window tells you
+if one is missing.
 
-```powershell
-# Only needed if you do not already have an environment:
-py -3.11 -m venv .venv
-# Install the exact tested environment:
-.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
-# Prepare both local models (existing files are reused):
-.\.venv\Scripts\python.exe main.py --download-model
-# Initialize SQLite without opening a camera (also automatic on normal startup):
-.\.venv\Scripts\python.exe main.py --init-db
-# Start the Fairy Eye daily interface:
-.\.venv\Scripts\python.exe main.py --focus
-```
+## Using Vision
 
-## Fairy Eye: primary laptop interface
+Everything is in the one Vision window:
 
-The normal daily launch opens the integrated Fairy Eye experience in focus mode:
+- **The eye** reacts to you. Click **Chat** to talk to it.
+- **Chat / Stats / Memory** tabs: type to Vision, see your phone-pickup numbers
+  for 7 or 28 days, and approve or forget what Vision remembers. Say
+  "Remember that..." to propose a fact; nothing is kept until you press Keep.
+- **Pause** (the pause button) stops the roasts. Vision still counts pickups
+  quietly. Press it again to resume.
+- **Mic and speech** buttons mute listening or talking independently.
+- **Quit** from the tray icon (or close the Vision window's terminal).
 
-```powershell
-.\.venv\Scripts\python.exe main.py --focus
-```
+There are no modes to learn: Vision always starts in focus. Pickups are camera
+estimates, not proof of grip, and nothing leaves your computer except short
+text sent to your AI provider (see below).
 
-This opens the local Fairy Eye UI while Vision owns the camera and microphone.
-Use `--no-fairy-ui` if you explicitly need the older camera-preview-only run.
-Use its Chat panel to type into the same laptop conversation as voice; typed
-chat does not require microphone permission. The Core badge reports the last
-observed connection state. The advanced dashboard remains available separately
-for history, settings, and memory approval. Phone PWA and Discord conversations
-remain separate sessions. Laptop chat transcripts are cleared when Vision exits;
-only memories you explicitly approve are retained.
+## Settings you may want
 
-The companion keeps the eye and conversation in separate regions on a laptop;
-on narrow screens, the eye appears above the chat. The optional camera preview
-flows below these regions instead of covering them. The circular Fairy eye stays
-visually still while Vision speaks; the speaking label and separate voice
-indicator show activity. Microphone activity is shown beside the eye. The eye
-honors the operating system's reduced-motion setting.
-Use **Appearance → Automatic** to restore state-driven expressions after choosing
-a manual expression. The microphone and speech-output controls are independent.
-Core connectivity is a separate status and does not mean the local Vision runtime
-is disconnected.
+Everything has a default. Edit `config.yaml` only if you need to:
 
-For a live laptop acceptance check, run `main.py --focus`, send one typed message,
-then test a short spoken prompt and a longer Vision TTS reply. Confirm the eye
-stays visually still while speaking, the chat remains usable, and Pause
-microphone, Mute speech, Stop, camera preview, and reduced motion behave as
-expected. To return to the older camera-preview-only interface, relaunch with
-`--no-fairy-ui`; the dashboard and Vision runtime remain available.
+| Want to... | Change |
+| --- | --- |
+| Use a different camera | `camera.index` |
+| Turn roasts off | `feedback.enabled: false` |
+| Hide the tray icon | `sessions.tray: false` |
+| Turn on desk/context awareness (off by default) | `companion_context.enabled: true` |
 
-The Fairy chat now reports AI-provider status separately from microphone and
-Core connectivity. It says `AI configured · not tested` until a real model
-response succeeds; failures are labeled offline and include only a safe reason
-category. Assistant bubbles identify AI, local-tool, or offline replies.
+Advanced and experimental features (phone chat, Discord, browser automation,
+proactive check-ins, Core link) are off by default and are described below.
+Reference notes follow for people who want the details.
 
-For this worktree, launch the implementation with the already-installed runtime
-and select the owner-managed provider env file explicitly (credentials stay in
-that file and are not copied into the worktree):
+---
 
-```powershell
-Set-Location 'D:\ascend-vision\.worktrees\codex-fairy-eye-visual-motion\ascend-vision'
-& 'D:\ascend-vision\ascend-vision\.venv\Scripts\python.exe' main.py --focus --env-file 'D:\ascend-vision\ascend-vision\.env'
-```
+# Reference
 
-Type `Who are you?` in Fairy chat. A real model reply should show an AI/provider
-label and update `AI responding`; if the configured credentials or selected
-model fail, the chat should instead explain that the AI connection is unavailable
-and show an offline reply label. Core can be offline while local AI chat still
-works, and microphone permission is not required for typed chat.
+## Advanced: the separate habit dashboard (optional)
 
-For an existing Phase 4 environment, skip the environment-creation command.
-Gemini feedback requires `GEMINI_API_KEY`; SQLite needs no database server. The archive contains both official model assets and excludes databases.
-Existing databases are retained; startup creates missing schema objects without
-dropping tables or data. Schema versions newer than this app are rejected.
-
-The lock targets Windows/Python 3.11. `requirements.txt` pins runtime dependencies;
-`requirements-dev.txt` adds pytest. Use `.venv/bin/python` on Linux/macOS. Native
-tray/hotkey support was verified on Windows; other desktops may need platform
-setup. Use `--no-tray --no-hotkey` when those integrations are unavailable.
-
-## Phase 5: open the habit dashboard
-
-From the extracted project directory, run this in a **second PowerShell window**
-while detection runs in the first:
+The Vision window already shows your stats and memory. This older, fuller
+dashboard is only needed for browser automation, laptop context controls, daily
+reflection, and the Core sign-in handoff. From the project directory, run this
+in a **second PowerShell window** while Vision runs:
 
 ```powershell
 .\.venv\Scripts\python.exe dashboard.py
@@ -344,33 +307,25 @@ need a larger output-token allowance for reasoning. No cloud TTS is used.
 
 ## Session controls
 
-- **Tray menu:** Focus mode toggle, Start focus, Return to background, Quit.
-  Green means background; orange means focus. Check the notification-area overflow
-  if the icon is hidden by Windows.
-- **Global shortcut:** `Ctrl+Alt+F`, configurable in YAML. It triggers on release.
-- **Preview shortcut:** `Space` toggles focus while the preview is focused.
-  It uses a different key from the default global shortcut to avoid double toggles.
-- **Exit:** tray Quit, preview Q/Escape/window close, or Ctrl+C.
+- **Tray menu:** Open Vision, Pause (still counts pickups, no roasts), Quit.
+  Check the notification-area overflow if the icon is hidden by Windows.
+- **Exit:** tray Quit, or Ctrl+C in the terminal.
+- Vision always starts in focus mode. Pause is the only other state.
 
 ```powershell
-# Explicitly start a focus session:
-.\.venv\Scripts\python.exe main.py --focus
-# Background logging without the preview, with tray/hotkey controls:
-.\.venv\Scripts\python.exe main.py --no-preview
-# Bounded run without desktop integrations:
-.\.venv\Scripts\python.exe main.py --no-preview --no-tray --no-hotkey --duration 60
-# Bounded focus run:
-.\.venv\Scripts\python.exe main.py --focus --no-preview --no-tray --no-hotkey --duration 60
+# Normal start (what Start Vision.bat runs):
+.\.venv\Scripts\python.exe main.py
+# Bounded run without the tray:
+.\.venv\Scripts\python.exe main.py --no-tray --duration 60
+# Developer-only OpenCV camera window (the Vision window is the app UI):
+.\.venv\Scripts\python.exe main.py --preview
 # Override camera or phone confidence:
 .\.venv\Scripts\python.exe main.py --camera 1 --confidence 0.65
 ```
 
-Background is the default and has no audible alerts or toast notifications.
-The optional preview and console logs remain available for calibration. Focus
-speaks only for newly confirmed focus pickups outside cooldown. Commands apply between inference iterations;
-slow inference can delay an apparent mode change or exit request. The preview
-and tray reflect the applied mode. A failed tray/hotkey setup produces a warning
-and leaves detection/logging running with the remaining controls.
+Paused sessions count pickups silently with no audible alerts. Focus speaks only
+for newly confirmed pickups outside the cooldown. Commands apply between
+inference iterations; slow inference can delay an apparent change or exit.
 
 ## Storage and session semantics
 
@@ -381,7 +336,7 @@ playback); failed, cancelled-before-playback and background events retain NULL.
 A small `app_state` table stores recovery heartbeats; `PRAGMA user_version=1`
 identifies the initial schema.
 
-- Startup opens a background session unless focus was explicitly selected.
+- Startup opens a focus session. Pausing records a `background` session (stored name for "paused"): pickups are still counted, with no roasts.
 - A mode change atomically ends the current session and opens the new one at the
   same boundary. Re-selecting the current mode does nothing.
 - A confirmed hold inserts one `phone_events` row immediately. Its timestamp,
@@ -395,7 +350,7 @@ identifies the initial schema.
   be assigned to a newly switched session. Candidates that confirm after a switch
   belong to the mode at confirmation.
 - Camera/model/database errors stop the run and attempt finalization. Independent
-  cleanup callbacks release camera, MediaPipe, tray, hotkey and database resources
+  cleanup callbacks release camera, MediaPipe, tray and database resources
   even if another cleanup or persistence operation fails. Persistence errors are
   surfaced, never treated as successful logging.
 
@@ -439,10 +394,7 @@ storage:
   heartbeat_seconds: 5.0
   update_seconds: 1.0
 sessions:
-  initial_mode: background
   tray: true
-  hotkey_enabled: true
-  hotkey: ctrl+alt+f
 ```
 
 The existing detector, camera, hands and hold settings remain configurable:

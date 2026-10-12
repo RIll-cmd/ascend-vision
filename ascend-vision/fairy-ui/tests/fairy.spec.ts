@@ -229,21 +229,40 @@ test('SVG fallback is visible when WebGL is unavailable', async ({ page }) => {
   await expect(page.locator('video')).toBeVisible();
 });
 
-test('all expressions render distinctly and audio toggle does not stop capture', async ({ page }) => {
+test('audio toggle does not stop capture and expressions stay automatic', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Eye appearance', exact: true }).click();
-  const eye = page.getByRole('img', { name: 'Fairy eye, an audio-reactive celestial iris' });
-  const pictures: Buffer[] = [];
-  for (const expression of ['open', 'half', 'squint', 'focus']) {
-    await page.getByRole('button', { name: `${expression} expression`, exact: true }).click();
-    await expect(eye).toHaveAttribute('data-expression', expression);
-    await page.waitForTimeout(500); // Allow the intentional interpolated shutter to settle.
-    pictures.push(await eye.screenshot({ path: `test-results/eye-${expression}.png` }));
-  }
-  expect(new Set(pictures.map(image => image.toString('base64'))).size).toBe(4);
+  await expect(page.getByRole('button', { name: /expression$/ })).toHaveCount(0);
   await page.getByRole('button', { name: 'Audio reactivity', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Audio reactivity' })).toHaveAttribute('aria-pressed', 'false');
   await expect(page.locator('.camera-status')).toContainText('Camera active');
+});
+
+test('stats and memory live in the same window and errors never look like zero', async ({ page }) => {
+  await page.route('**/api/fairy/state', route => route.fulfill({ json: {
+    mode: 'focus', cameraReady: false, audioLevel: 0, voiceEnabled: false,
+    muted: false, speaking: false, elapsedSeconds: 0,
+  } }));
+  await page.route('**/api/fairy/stats**', route => route.fulfill({ json: {
+    database_exists: true, summary: { pickups: 4, phone_seconds: 125, focus_seconds: 3600, longest_streak_seconds: 900 },
+    days: [{ date: '2026-10-11', pickups: 1, focus: 1, background: 0 }, { date: '2026-10-12', pickups: 3, focus: 3, background: 0 }],
+  } }));
+  let pending = [{ id: 7, text: 'I like green tea' }];
+  await page.route('**/api/fairy/memory', route => route.fulfill({ json: { enabled: true, pending, active: [] } }));
+  await page.route('**/api/fairy/memory/proposals/7/reject', route => { pending = []; return route.fulfill({ json: { rejected: true } }); });
+  await page.goto('/?runtime=1');
+  await page.getByRole('button', { name: 'Open chat with Vision' }).click();
+  await page.getByRole('button', { name: /stats/ }).click();
+  await expect(page.getByLabel('Pickup numbers')).toContainText('Phone pickups');
+  await expect(page.getByLabel('Pickup numbers')).toContainText('1h 0m');
+  await page.getByRole('button', { name: /memory/ }).click();
+  await expect(page.getByLabel('Remembered facts')).toContainText('I like green tea');
+  await page.getByRole('button', { name: 'Skip' }).click();
+  await expect(page.getByLabel('Remembered facts')).not.toContainText('I like green tea');
+  await page.route('**/api/fairy/stats**', route => route.fulfill({ status: 503, json: { error: 'Statistics are unavailable.' } }));
+  await page.getByRole('button', { name: /stats/ }).click();
+  await expect(page.getByRole('alert')).toContainText('Statistics are unavailable.');
+  await expect(page.getByLabel('Pickup numbers')).not.toContainText('Phone pickups');
 });
 
 test('face detection runs with hidden preview and attention moves inside the stationary orb', async ({ page }) => {

@@ -11,6 +11,8 @@ import { useCamera } from '@/hooks/use-camera';
 import { useVisionRuntime } from '@/hooks/use-vision-runtime';
 import { useFaceTarget } from '@/hooks/use-face-target';
 import { useLocalChat } from '@/hooks/use-local-chat';
+import { StatsPanel } from '@/components/stats-panel';
+import { MemoryPanel } from '@/components/memory-panel';
 
 const themes = [
   { name: 'Celestial', base: '#172660', glow: '#2937d7', core: '#f0f0f6' },
@@ -21,20 +23,6 @@ function formatTime(seconds: number) {
   return `${Math.floor(seconds / 3600).toString().padStart(2, '0')}:${Math.floor(seconds / 60 % 60).toString().padStart(2, '0')}:${Math.floor(seconds % 60).toString().padStart(2, '0')}`;
 }
 
-const ALL_EXPRESSIONS: { id: EyeExpression; label: string; icon: string }[] = [
-  { id: 'open', label: 'Normal', icon: '✨' },
-  { id: 'happy', label: 'Happy', icon: '😊' },
-  { id: 'sleepy', label: 'Sleepy', icon: '😴' },
-  { id: 'sad', label: 'Sad', icon: '🥺' },
-  { id: 'focus', label: 'Focus', icon: '🎯' },
-  { id: 'stern', label: 'Stern', icon: '⚡' },
-  { id: 'angry', label: 'Angry', icon: '😡' },
-  { id: 'curious', label: 'Curious', icon: '🤔' },
-  { id: 'surprised', label: 'Surprised', icon: '😲' },
-  { id: 'half', label: 'Half', icon: '🌙' },
-  { id: 'squint', label: 'Squint', icon: '😑' },
-  { id: 'disappointed', label: 'Disappointed', icon: '😞' },
-];
 
 /** Integrated Python mode shares capture; standalone mode owns browser media. */
 export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
@@ -42,7 +30,6 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
   const vision = useVisionRuntime(runtime);
   const chat = useLocalChat(runtime);
   const browserFace = useFaceTarget(camera.stream);
-  const [manualExpression, setManualExpression] = useState<EyeExpression | null>(null);
   const [audioReactive, setAudioReactive] = useState(true);
   const [showCamera, setShowCamera] = useState(false);
   const [microphone, setMicrophone] = useState(false);
@@ -53,7 +40,7 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
   const [themeIndex, setThemeIndex] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [showPanel, setShowPanel] = useState(runtime);
-  const [panelOverride, setPanelOverride] = useState<'chat' | 'automation' | 'missions' | 'habits'>('chat');
+  const [panelOverride, setPanelOverride] = useState<'chat' | 'stats' | 'memory' | 'automation' | 'missions' | 'habits'>('chat');
   const [draft, setDraft] = useState('');
   const [sensitivity, setSensitivity] = useState(1.5);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
@@ -75,8 +62,7 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
     speaking: Boolean(speaking), thinking: runtime && chat.status === 'thinking',
     listening: voiceActive && (runtime ? (state?.audioLevel ?? 0) > 0.08 : detected),
   });
-  const expression = manualExpression ?? (runtime ? automaticEyeExpression(state ?? undefined) : 'open');
-  const expressionLabel = ALL_EXPRESSIONS.find(item => item.id === expression)?.label ?? 'Normal';
+  const expression: EyeExpression = runtime ? automaticEyeExpression(state ?? undefined) : 'open';
   const currentSeconds = runtime ? (state?.elapsedSeconds ?? 0) : seconds;
 
   useEffect(() => {
@@ -148,6 +134,8 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
     : ai?.state === 'request-failed' || ai?.state === 'not-configured' ? 'danger'
       : ai?.state === 'configured-untested' || ai?.state === 'requesting' ? 'warning' : 'neutral';
   const panelCopy = {
+    stats: { title: 'Your numbers', detail: '' },
+    memory: { title: 'What Vision remembers', detail: '' },
     chat: { title: 'Talk to Vision', detail: 'Type here whenever the microphone is unavailable. Laptop chat can use the current local context.' },
     automation: { title: 'Browser automation', detail: 'Describe the page task in chat. Vision will show a preview and ask before any consequential action.' },
     missions: { title: 'Ascend missions', detail: 'Ask Vision to read your current Core missions. Answers depend on a live Core connection.' },
@@ -174,7 +162,7 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
           />
         )}
         <span className={`status-dot ${eyeMode === 'paused' || eyeMode === 'offline' ? 'dim' : ''}`}/>
-        <span>{eyeMode === 'offline' ? 'Vision offline' : recovery ? 'Recovery chat' : isPaused ? 'Background mode' : 'Focus mode'}</span>
+        <span>{eyeMode === 'offline' ? 'Vision offline' : recovery ? 'Recovery chat' : isPaused ? 'Paused' : 'Focus mode'}</span>
         <span className="top-divider"/>
         <span className="version">COMPANION / 01</span>
       </div>
@@ -218,8 +206,6 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
         />
       </div>
 
-      <p aria-live="polite" className="control-hint">Eye expression: {manualExpression ? 'Manual' : 'Automatic'} · {expressionLabel}</p>
-
       <div className="controls" aria-label="Companion controls">
         <Button variant={voiceActive ? 'default' : 'outline'} onClick={toggleVoice} aria-label={runtime ? (voiceActive ? 'Pause microphone' : 'Resume microphone') : (microphone ? 'Stop microphone' : 'Enable microphone')} aria-pressed={voiceActive} disabled={recovery || busy || (runtime && !vision.connected)}>
           {voiceActive ? <Mic size={16}/> : <MicOff size={16}/>}<span>{runtime ? (voiceActive ? 'Pause mic' : 'Resume mic') : (microphone ? 'Stop mic' : 'Enable mic')}</span>
@@ -228,17 +214,12 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
         {runtime && <Button variant="outline" onClick={() => togglePanel('chat')} aria-expanded={showPanel} aria-label="Open chat with Vision"><MessageSquare size={16}/><span>Chat</span></Button>}
         {runtime && <Button variant="ghost" size="icon" onClick={() => void command('stop-cancel')} aria-label="Stop speech or current browser tasks and pending actions" disabled={recovery || busy || !vision.connected}><CircleStop size={16}/></Button>}
         <Button variant="outline" disabled={recovery} onClick={() => setShowCamera(value => !value)} aria-pressed={showCamera}>{showCamera ? <VideoOff size={16}/> : <Video size={16}/>}<span>{showCamera ? 'Hide camera' : 'Show camera'}</span></Button>
-        {runtime && <Button variant="ghost" size="icon" disabled={recovery || busy || !vision.connected} aria-label={isPaused ? 'Resume focus' : 'Pause focus'} onClick={() => void command('toggle-focus')}>{isPaused ? <Play size={16}/> : <Pause size={16}/>}</Button>}
+        {runtime && <Button variant="ghost" size="icon" disabled={recovery || busy || !vision.connected} aria-label={isPaused ? 'Resume focus' : 'Pause focus'} title={isPaused ? 'Paused: still counting quietly, no roasts' : 'Pause roasts'} onClick={() => void command('toggle-focus')}>{isPaused ? <Play size={16}/> : <Pause size={16}/>}</Button>}
         {!runtime && <Button variant="ghost" size="icon" aria-label={paused ? 'Resume focus preview' : 'Pause focus preview'} onClick={() => setPaused(value => !value)}>{paused ? <Play size={16}/> : <Pause size={16}/>}</Button>}
         <div className="settings-anchor" ref={settingsRef}>
           <Button variant="ghost" size="icon" aria-label="Eye appearance" aria-expanded={showSettings} onClick={() => setShowSettings(value => !value)}><Sparkles size={16}/></Button>
           {showSettings && <div className="settings-panel" aria-label="Eye appearance settings" style={{ maxHeight: 'min(70svh, 440px)', overflowY: 'auto' }}><div className="settings-heading">Make it your own<Button variant="ghost" size="icon" onClick={() => setShowSettings(false)} aria-label="Close appearance settings"><X size={14}/></Button></div>
             <span className="settings-label">LIGHT SPECTRUM</span><div className="theme-options">{themes.map((item, index) => <button key={item.name} aria-label={`${item.name} theme`} aria-pressed={index === themeIndex} onClick={() => setThemeIndex(index)}><i style={{ background: item.glow }}/><span>{item.name}</span></button>)}</div>
-            <span className="settings-label">EXPRESSION</span>
-            <div role="group" aria-label="Eye expressions" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 4, margin: '10px 0 16px' }}>
-              <Button variant="ghost" aria-label="Automatic expression" aria-pressed={manualExpression === null} onClick={() => setManualExpression(null)}>✨ Automatic</Button>
-              {ALL_EXPRESSIONS.map(item => <Button key={item.id} variant="ghost" aria-label={`${item.id} expression`} aria-pressed={manualExpression === item.id} onClick={() => setManualExpression(item.id)} title={item.label}>{item.icon} {item.label}</Button>)}
-            </div>
             <Button variant="ghost" aria-label="Audio reactivity" aria-pressed={audioReactive} onClick={() => setAudioReactive(value => !value)}><AudioLines size={16}/> Audio reactivity</Button>
             <label className="sensitivity-label" htmlFor="sensitivity">Voice sensitivity <span>{sensitivity.toFixed(1)}×</span></label><input id="sensitivity" type="range" min="0.5" max="3" step="0.1" value={sensitivity} onChange={event => setSensitivity(Number(event.target.value))}/>
             <label className="motion-option"><input type="checkbox" checked={reducedMotion} onChange={event => setReducedMotion(event.target.checked)}/> Reduce eye motion</label>
@@ -255,9 +236,12 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
         <Button variant="ghost" size="icon" aria-label="Close chat panel" onClick={() => setShowPanel(false)}><X size={17}/></Button>
       </header>
       <nav className="fairy-panel-nav" aria-label="Vision panels">
-        {(['chat', 'automation', 'missions', 'habits'] as const).map((panel, index) => <button key={panel} type="button" aria-pressed={panel === selectedPanel} onClick={() => togglePanel(panel)}><span>{index + 1}</span>{panel}</button>)}
+        {(['chat', 'stats', 'memory'] as const).map((panel, index) => <button key={panel} type="button" aria-pressed={panel === selectedPanel} onClick={() => togglePanel(panel)}><span>{index + 1}</span>{panel}</button>)}
       </nav>
-      {selectedPanel !== 'chat' && <section className="fairy-panel-note"><p>{panelCopy.detail}</p><Button variant="outline" onClick={() => { setDraft(selectedPanel === 'missions' ? 'What are my current Ascend missions?' : selectedPanel === 'habits' ? 'Can you help me review my habits?' : 'Help me with a browser task.'); setPanelOverride('chat'); }}>Ask in chat</Button></section>}
+      {selectedPanel !== 'chat' && selectedPanel !== 'stats' && selectedPanel !== 'memory' && <section className="fairy-panel-note"><p>{panelCopy.detail}</p><Button variant="outline" onClick={() => { setDraft(selectedPanel === 'missions' ? 'What are my current Ascend missions?' : selectedPanel === 'habits' ? 'Can you help me review my habits?' : 'Help me with a browser task.'); setPanelOverride('chat'); }}>Ask in chat</Button></section>}
+      {selectedPanel === 'stats' && <StatsPanel/>}
+      {selectedPanel === 'memory' && <MemoryPanel/>}
+      {selectedPanel !== 'stats' && selectedPanel !== 'memory' && <>
       <div className="fairy-chat-events" aria-live="polite" aria-relevant="additions text">
         {chat.events.filter(event => event.kind !== 'status').map(event => <article key={event.cursor} className={`fairy-chat-message ${event.kind}`}>
           <span>{event.kind === 'user' ? (event.source === 'voice' ? 'YOU · VOICE' : 'YOU') : `VISION · ${event.reply_source === 'model' ? `AI${event.provider ? ` / ${event.provider}` : ''}` : event.reply_source === 'tool' ? 'LOCAL TOOL' : event.reply_source === 'offline' ? 'OFFLINE RESPONSE' : 'SOURCE UNKNOWN'}`}</span><p>{event.text}</p>
@@ -270,6 +254,7 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
         <textarea value={draft} onChange={event => setDraft(event.target.value)} maxLength={4000} rows={2} placeholder="Message Vision…" aria-label="Message Vision" disabled={!vision.connected || !chat.sessionId} />
         <div className="fairy-chat-compose-footer"><span role="status">{chat.error || chat.status || (speechMuted ? 'Speech output muted; replies stay visible.' : 'Typed chat works without the microphone.')}</span><Button type="submit" disabled={!draft.trim() || chat.sending || !vision.connected || !chat.sessionId}>{chat.sending ? 'Sending…' : 'Send'}</Button></div>
       </form>
+      </>}
       <p className="fairy-chat-core-time">{aiLabel}{ai?.lastSuccessAt ? ` · last successful response ${new Date(ai.lastSuccessAt).toLocaleTimeString()}` : ''}</p>
       {core?.lastCheckedAt && <p className="fairy-chat-core-time">{coreLabel} · checked {new Date(core.lastCheckedAt).toLocaleTimeString()}</p>}
     </aside>}

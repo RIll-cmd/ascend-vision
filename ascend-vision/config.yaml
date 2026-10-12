@@ -15,7 +15,7 @@ detector:
   every_n_frames: 2
   cpu_threads: 2
 runtime:
-  preview: true
+  preview: false # Developer-only OpenCV window; Fairy Eye is the app UI.
   stats_interval_seconds: 5.0
   target_fps: 15.0
 companion_context:
@@ -79,10 +79,7 @@ storage:
   heartbeat_seconds: 5.0
   update_seconds: 1.0
 sessions:
-  initial_mode: background
   tray: true
-  hotkey_enabled: true
-  hotkey: ctrl+alt+f
 feedback:
   enabled: true
   model: gemini-3.6-flash
