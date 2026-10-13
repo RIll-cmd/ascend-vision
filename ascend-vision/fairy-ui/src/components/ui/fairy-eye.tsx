@@ -53,12 +53,26 @@ void main(){vUv=uv;gl_Position=vec4(position,0.,1.);}`;
 // Procedural geometry only: no external textures, images, or prerecorded clips.
 const fragment = `precision highp float;
 varying vec2 vUv;
-uniform float level, irisScale, dilation, blink, lid, lowerLid, lidSlant, focused, hue, ringRotation;
+uniform float level, irisScale, dilation, blink, lid, lowerLid, lidSlant, focused, hue, ringRotation, voice;
 uniform vec2 gaze, resolution;
 uniform vec3 baseColor, glowColor, coreColor;
 
 float disk(float r, float radius, float feather) {
   return 1.0 - smoothstep(radius - feather, radius + feather, r);
+}
+
+// The iris is a ball: layers sit at different depths, shift by different amounts and
+// squash along the gaze direction as the eye turns (foreshortening).
+vec2 eyeball(vec2 p, vec2 g, float depthShift, float scale) {
+  vec2 d = p - g * depthShift;
+  float m = length(g);
+  if (m > 0.001) {
+    vec2 n = g / m;
+    float along = dot(d, n);
+    float squash = mix(1.0, 0.70, smoothstep(0.0, 0.75, m));
+    d = (d - along * n) + n * (along / squash);
+  }
+  return d / scale;
 }
 
 float ring(float r, float radius, float width) {
@@ -112,14 +126,14 @@ void main() {
   col += gCol * (0.10 + level * 0.16) * ring(r, 0.625, 0.001);
 
   // The spiked second ring turns independently; the outer lens stays still.
-  float corner = pow(abs(cos(2.0 * (a - ringRotation - 0.785398))), 24.0);
-  float shell = 0.526 + 0.065 * corner;
+  float corner = pow(abs(cos(2.0 * (a - ringRotation - 0.785398))), mix(24.0, 18.0, voice));
+  float shell = 0.526 + (0.065 + 0.014 * voice) * corner + 0.005 * voice * sin(a * 6.0 + ringRotation * 9.0);
   col = mix(col, bCol * 0.11, disk(r, shell, 0.003));
   col += bCol * 0.36 * ring(r, shell, 0.004);
   col += gCol * (0.045 + level * 0.08) * ring(r, 0.50, 0.001);
 
   float scale = irisScale * mix(1.0, 0.92, focused);
-  vec2 q = (p - gaze * 0.025) / scale;
+  vec2 q = eyeball(p, gaze, 0.16, scale);
   float angle = atan(q.y, q.x);
   float ir = length(q);
 
@@ -132,8 +146,7 @@ void main() {
 
   for (int i = 0; i < 3; i++) {
     float depth = float(i) / 2.0;
-    vec2 center = gaze * (0.035 + depth * 0.155);
-    float cr = length((p - center) / scale);
+    float cr = length(eyeball(p, gaze, 0.20 + depth * 0.12, scale));
     float radius = mix(0.331, 0.148, depth) * mix(1.0, 0.80, focused) + dilation * 0.018 + level * 0.025;
     float lighting = 0.82 + 0.18 * cos(angle + depth * 0.8);
     vec3 cone = mix(mix(cCol, gCol, 0.32) * 0.76, bCol * 0.24, depth) * lighting;
@@ -143,7 +156,7 @@ void main() {
 
   // Deep dark pupil center
   float pupilRadius = clamp(0.14 + dilation * 0.018 + level * 0.02, 0.10, 0.22) * mix(1.0, 0.78, focused);
-  float pradius = length((p - gaze * 0.19) / scale);
+  float pradius = length(eyeball(p, gaze, 0.34, scale));
   col = mix(col, bCol * 0.10, disk(pradius, pupilRadius, 0.002));
   col += gCol * (0.35 + level * 0.35) * ring(pradius, pupilRadius, 0.001);
 
@@ -197,17 +210,10 @@ export function FairyEye({
   const fallbackPupil = useRef<SVGGElement>(null);
   const fallbackSpikes = useRef<SVGGElement>(null);
   const fallbackVisor = useRef<SVGPathElement>(null);
-  const speechPose = useRef<EyePose | null>(null);
   const clipId = useId().replace(/:/g, '');
   const [webgl, setWebgl] = useState(false);
   const mic = useMicrophone(enableVoiceControl && audioLevel === undefined, voiceSensitivity);
-  const speakingNow = speaking || motionMode === 'speaking';
-  if (!speakingNow) speechPose.current = null;
-  else if (!speechPose.current) speechPose.current = {
-    pupilOffset, irisScale, dilation, baseColor, glowColor, coreColor,
-    expression, hue, maxHoverIntensity,
-  };
-  const pose = speechPose.current ?? {
+  const pose: EyePose = {
     pupilOffset, irisScale, dilation, baseColor, glowColor, coreColor,
     expression, hue, maxHoverIntensity,
   };
@@ -257,7 +263,7 @@ export function FairyEye({
       program = new Program(gl, { vertex, fragment, transparent: true, uniforms: {
         level: { value: 0.4 }, blink: { value: 0 },
         gaze: { value: [0, 0] }, resolution: { value: [1, 1] },
-        ringRotation: { value: 0 },
+        ringRotation: { value: 0 }, voice: { value: 0 },
         irisScale: { value: 1 }, dilation: { value: 0 },
         lid: { value: 0.65 }, lowerLid: { value: 0 }, lidSlant: { value: 0 },
         focused: { value: 0 }, hue: { value: 0 },
@@ -337,7 +343,7 @@ export function FairyEye({
       // SVG Fallback update with idle breathing & voice dilation
       if (fallbackPupil.current) {
         const totalScale = clamp(props.irisScale, 0.65, 1.2) * (1 - focused * 0.12) * eyeMotion.irisScale;
-        fallbackPupil.current.setAttribute('transform', `translate(${eyeMotion.gaze.x * 32} ${eyeMotion.gaze.y * 32}) translate(200 200) scale(${totalScale}) translate(-200 -200)`);
+        fallbackPupil.current.setAttribute('transform', `translate(${eyeMotion.gaze.x * 44} ${eyeMotion.gaze.y * 44}) translate(200 200) scale(${totalScale}) translate(-200 -200)`);
       }
       if (fallbackSpikes.current) {
         fallbackSpikes.current.setAttribute('transform', `rotate(${eyeMotion.ringRotation * 180 / Math.PI} 200 200)`);
@@ -360,6 +366,7 @@ export function FairyEye({
         u.blink.value = eyeMotion.blink;
         u.gaze.value = [eyeMotion.gaze.x, -eyeMotion.gaze.y];
         u.ringRotation.value = eyeMotion.ringRotation;
+        u.voice.value = eyeMotion.voice;
         u.lid.value = lid;
         u.lowerLid.value = lowerLid;
         u.lidSlant.value = lidSlant;

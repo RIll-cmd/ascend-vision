@@ -48,9 +48,8 @@ test('AI HUD overlays targeting reticle and responds to posture & phone telemetr
   // Verify topbar gesture status badge
   await expect(page.locator('.topbar')).toContainText('5 fingers');
 
-  // Verify Dynamic Island subtitle toast
-  await expect(page.getByTestId('dynamic-island')).toBeVisible();
-  await expect(page.getByText('Focus on coding')).toBeVisible();
+  // What Vision heard shows as the live caption on the screen
+  await expect(page.locator('.crt-caption')).toContainText('Focus on coding');
 
   // Open camera preview
   await page.getByRole('button', { name: 'Show camera', exact: true }).click();

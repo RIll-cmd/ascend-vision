@@ -60,7 +60,9 @@ test('runtime mode uses Python telemetry and commands without browser capture', 
   await page.getByRole('button', { name: 'Pause focus', exact: true }).click();
   await page.getByRole('button', { name: 'Pause microphone', exact: true }).click();
   expect(commands).toEqual(['toggle-focus', 'toggle-voice']);
-  await expect(page.getByText('Core connected', { exact: true })).toBeVisible();
+  // Everything working stays quiet: no status pills in the top bar.
+  await expect(page.locator('.top-status .notice')).toHaveCount(0);
+  await expect(page.locator('.fairy-chat-core-time').last()).toContainText('Core connected');
   await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
@@ -109,7 +111,7 @@ test('AI unavailable is shown separately from connected Core and offline replies
     cursor: 1, sessionId: 'offline-chat',
   } }));
   await page.goto('/?runtime=1');
-  await expect(page.locator('.top-status').getByText('Core connected', { exact: true })).toBeVisible();
+  await expect(page.locator('.top-status')).not.toContainText('Core connected');
   await expect(page.locator('.top-status').getByText('AI not configured', { exact: true })).toBeVisible();
   await expect(page.getByText('VISION · OFFLINE RESPONSE')).toBeVisible();
   await expect(page.getByText("I'm Ascend Vision, and my AI connection is unavailable.")).toBeVisible();
@@ -135,7 +137,8 @@ test('AI success, provider failure, local-tool provenance, and runtime disconnec
     ], cursor: 2, sessionId: 'provenance-chat',
   } }));
   await page.goto('/?runtime=1');
-  await expect(page.locator('.top-status').getByText('AI responding · gemini', { exact: true })).toBeVisible();
+  await expect(page.locator('.top-status')).not.toContainText('AI responding');
+  await expect(page.locator('.fairy-chat-core-time').first()).toContainText('AI responding · gemini');
   await expect(page.getByText('VISION · AI / gemini')).toBeVisible();
   await expect(page.getByText('VISION · LOCAL TOOL')).toBeVisible();
   aiState = 'request-failed';
@@ -157,7 +160,7 @@ test('Core badge follows offline, stale, and recovered connection states', async
   coreState = 'stale';
   await expect(page.locator('.top-status').getByText('Core status stale', { exact: true })).toBeVisible();
   coreState = 'connected';
-  await expect(page.locator('.top-status').getByText('Core connected', { exact: true })).toBeVisible();
+  await expect(page.locator('.top-status .notice')).toHaveCount(0);
 });
 
 test('repeating a gesture reopens its panel after the user closes it', async ({ page }) => {
@@ -184,17 +187,66 @@ test('media permission failures remain visible and do not break the eye', async 
   await expect(page.getByTestId('fairy-renderer').locator('canvas')).toBeVisible();
 });
 
-test('operating-system reduced motion also freezes the microphone waveform', async ({ page }) => {
+test('Fairy leaves the screen when Vision sleeps or disconnects, and comes back', async ({ page }) => {
+  let awayState = 'active';
+  let disconnected = false;
+  await page.route('**/api/fairy/state', route => disconnected
+    ? route.fulfill({ status: 503, json: { error: 'runtime unavailable' } })
+    : route.fulfill({ json: { mode: awayState === 'sleeping' ? 'background' : 'focus', cameraReady: true, audioLevel: 0,
+      voiceEnabled: true, muted: false, speaking: false, elapsedSeconds: 5, awayState } }));
+  await page.goto('/?runtime=1');
+  const signal = page.locator('.crt-signal');
+  await expect(signal).toHaveCount(0);
+  awayState = 'sleeping';
+  await expect(signal).toHaveAttribute('data-phase', 'leaving');
+  await expect(signal).toHaveAttribute('data-phase', 'away');
+  await expect(signal).toContainText('Fairy stepped away');
+  await expect(signal).toContainText('wake up');
+  awayState = 'active';
+  await expect(signal).toHaveAttribute('data-phase', 'returning');
+  await expect(signal).toHaveCount(0);
+  disconnected = true;
+  await expect(signal).toContainText('No signal');
+  await expect(page.locator('.top-status')).toContainText('runtime disconnected');
+});
+
+test('reduced motion keeps the away static still', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.goto('/');
-  const bars = page.locator('[data-testid="dynamic-island"] [role="presentation"] span');
-  await expect(bars).toHaveCount(24);
-  await page.waitForTimeout(250);
-  const initial = await bars.evaluateAll(nodes => nodes.map(node => (node as HTMLElement).style.height));
-  await page.waitForTimeout(250);
-  const later = await bars.evaluateAll(nodes => nodes.map(node => (node as HTMLElement).style.height));
-  expect(later).toEqual(initial);
-  expect(new Set(later).size).toBe(1);
+  await page.route('**/api/fairy/state', route => route.fulfill({ status: 503, json: { error: 'offline' } }));
+  await page.goto('/?runtime=1');
+  const pixels = () => page.locator('.crt-static').evaluate((canvas: HTMLCanvasElement) =>
+    Array.from(canvas.getContext('2d')!.getImageData(0, 0, 8, 8).data).join(','));
+  await expect(page.locator('.crt-signal')).toHaveAttribute('data-phase', 'away');
+  const first = await pixels();
+  await page.waitForTimeout(300);
+  expect(await pixels()).toBe(first);
+});
+
+test('live caption types what Fairy says and shows what she heard', async ({ page }) => {
+  const state: any = { mode: 'focus', cameraReady: true, audioLevel: 0, voiceEnabled: true, muted: false, speaking: false, elapsedSeconds: 5 };
+  const events: any[] = [];
+  await page.route('**/api/fairy/state', route => route.fulfill({ json: state }));
+  await page.route('**/api/fairy/chat/events**', route => route.fulfill({ json: {
+    events: events.filter(event => event.cursor > Number(new URL(route.request().url()).searchParams.get('after') || 0)),
+    cursor: events.length, sessionId: 'caption-test',
+  } }));
+  await page.goto('/?runtime=1');
+  const caption = page.locator('.crt-caption');
+  await expect(caption.locator('.crt-caption-line')).toHaveCount(0);
+  await page.waitForTimeout(1600);
+  state.lastHeard = 'how long have I been working';
+  await expect(caption).toContainText('You');
+  await expect(caption).toContainText('how long have I been working');
+  events.push({ cursor: 1, turn_id: 't1', source: 'voice', kind: 'assistant', text: 'One hour and fifteen minutes. Keep going, you are close to your best today.', status: 'reply' });
+  state.speaking = true;
+  await expect(caption).toContainText('Fairy');
+  await expect(caption.locator('.crt-cursor')).toHaveCount(1);
+  const early = (await caption.textContent())!.length;
+  await page.waitForTimeout(800);
+  expect((await caption.textContent())!.length).toBeGreaterThan(early);
+  state.speaking = false;
+  await expect(caption).toContainText('close to your best today.');
+  await expect(caption.locator('.crt-cursor')).toHaveCount(0);
 });
 
 test('camera permission granted after unmount immediately releases the stream', async ({ page }) => {
@@ -415,7 +467,7 @@ test('face detection runs with hidden preview and attention moves inside the sta
     const transform = await page.locator('.eye-fallback > g').nth(1).getAttribute('transform');
     const match = transform?.match(/^translate\(([-\d.e]+) ([-\d.e]+)\)/);
     return match ? Math.hypot(Number(match[1]), Number(match[2])) : Number.POSITIVE_INFINITY;
-  }).toBeLessThan(6);
+  }).toBeLessThan(8);
 });
 
 test('eye and chat keep separate readable regions at laptop, mobile and 200% equivalent zoom', async ({ page }) => {

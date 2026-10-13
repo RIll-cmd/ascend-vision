@@ -31,7 +31,7 @@ test('WebGL context loss releases the canvas and resize observer while SVG conti
   expect(errors).toEqual([]);
 });
 
-test('thirty simulated seconds of speaking keep the original orb visually still', async ({ page }) => {
+test('while speaking the eye keeps tracking, keeps its expression live and spins its ring faster', async ({ page }) => {
   await page.addInitScript(() => {
     const callbacks = new Map<number, FrameRequestCallback>();
     let frameId = 0;
@@ -79,7 +79,7 @@ test('thirty simulated seconds of speaking keep the original orb visually still'
   speaking = true;
   await expect(page.getByRole('heading', { name: 'Fairy is speaking.' })).toBeVisible();
   emotion = 'fatigue';
-  await expect(page.locator('.eye-visual')).toHaveAttribute('data-expression', 'open');
+  await expect(page.locator('.eye-visual')).toHaveAttribute('data-expression', 'sleepy');
   const observations = await page.evaluate(() => (window as any).advanceEyeFrames(30 * 60)) as {
     pupil: string | null; spikes: string | null; assembly: string;
   }[];
@@ -89,11 +89,15 @@ test('thirty simulated seconds of speaking keep the original orb visually still'
   });
   expect(observations).toHaveLength(1800);
   expect(values.every(value => value?.length === 3 && value.every(Number.isFinite))).toBe(true);
-  expect(Math.abs(values[0]![0])).toBeGreaterThan(1);
-  expect(values.every(value => Math.abs(value![0] - values[0]![0]) < 0.001 && Math.abs(value![1] - values[0]![1]) < 0.001)).toBe(true);
+  // Still looking toward the pointer, and never stuck on one point.
+  expect(values.every(value => value![0] < 0)).toBe(true);
+  expect(new Set(values.map(value => `${value![0].toFixed(2)},${value![1].toFixed(2)}`)).size).toBeGreaterThan(3);
   expect(values.every(value => value![2] >= 0.94 && value![2] <= 1.06)).toBe(true);
-  expect(values.every(value => Math.abs(value![2] - values[0]![2]) < 0.001)).toBe(true);
-  expect(observations.every(value => value.spikes === observations[0].spikes)).toBe(true);
+  // The spiked ring turns faster than its calm speed (one turn per 12 s = 0.5 degrees per frame).
+  const angle = (value: string | null) => Number(value?.match(/^rotate[(]([-.e0-9]+)/)?.[1] ?? NaN);
+  const perFrame = ((angle(observations[1799].spikes) - angle(observations[1700].spikes) + 360) % 360) / 99;
+  expect(perFrame).toBeGreaterThan(0.75);
+  expect(perFrame).toBeLessThan(1.2);
   expect(observations.every(({ assembly }) => assembly === observations[0].assembly)).toBe(true);
 });
 
@@ -137,7 +141,7 @@ test('idle and speaking states render without WebGL errors', async ({ page }) =>
   const speakingFrame = await page.getByTestId('fairy-renderer').locator('canvas').screenshot();
   await page.waitForTimeout(2000);
   const laterSpeakingFrame = await page.getByTestId('fairy-renderer').locator('canvas').screenshot();
-  expect(laterSpeakingFrame.equals(speakingFrame)).toBe(true);
+  expect(laterSpeakingFrame.equals(speakingFrame)).toBe(false);
   await page.screenshot({ path: 'test-results/task2-speaking.png' });
   expect(errors).toEqual([]);
 });

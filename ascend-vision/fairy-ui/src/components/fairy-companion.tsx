@@ -1,16 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import { Aperture, ArrowUpRight, Video, VideoOff, AudioLines, CircleStop, Headphones, MessageSquare, Mic, MicOff, Pause, Play, Radio, ShieldCheck, Sparkles, Volume2, VolumeX, X } from 'lucide-react';
+import { Video, VideoOff, AudioLines, CircleStop, MessageSquare, Mic, MicOff, Pause, Play, SlidersHorizontal, Volume2, VolumeX, X } from 'lucide-react';
 import { FairyEye, type EyeExpression } from '@/components/ui/fairy-eye';
 import { EXPRESSIONS } from '@/lib/eye-motion';
 import { automaticEyeExpression, resolveEyeMode } from '@/lib/eye-state';
 import { Button } from '@/components/ui/button';
 import { CameraPreview } from '@/components/ui/camera-preview';
-import { StatusBadge } from '@/components/ui/status-badge';
-import { DynamicIsland } from '@/components/ui/dynamic-island';
+import { CrtSignal, type SignalReason } from '@/components/ui/crt-signal';
 import { useCamera } from '@/hooks/use-camera';
 import { useVisionRuntime } from '@/hooks/use-vision-runtime';
 import { useFaceTarget } from '@/hooks/use-face-target';
 import { useLocalChat } from '@/hooks/use-local-chat';
+import { useLiveCaption } from '@/hooks/use-live-caption';
 import { StatsPanel } from '@/components/stats-panel';
 import { MemoryPanel } from '@/components/memory-panel';
 import { BrowserPanel } from '@/components/browser-panel';
@@ -25,6 +25,7 @@ function formatTime(seconds: number) {
   return `${Math.floor(seconds / 3600).toString().padStart(2, '0')}:${Math.floor(seconds / 60 % 60).toString().padStart(2, '0')}:${Math.floor(seconds % 60).toString().padStart(2, '0')}`;
 }
 
+type Notice = { variant: 'warning' | 'danger' | 'info'; text: string; title?: string };
 
 /** Integrated Python mode shares capture; standalone mode owns browser media. */
 export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
@@ -59,6 +60,7 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
   const selectedPanel = panelOverride;
   const cameraActive = runtime ? Boolean(state?.cameraReady && vision.connected) : Boolean(camera.stream);
   const speaking = runtime && state?.speaking;
+  const audioLevel = runtime ? (state?.audioLevel ?? 0) : (detected ? 0.35 : 0);
   const eyeMode = resolveEyeMode({
     runtime, connected: vision.connected, paused: isPaused,
     speaking: Boolean(speaking), thinking: runtime && chat.status === 'thinking',
@@ -66,6 +68,9 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
   });
   const expression: EyeExpression = runtime ? automaticEyeExpression(state ?? undefined) : 'open';
   const currentSeconds = runtime ? (state?.elapsedSeconds ?? 0) : seconds;
+  const caption = useLiveCaption({ events: chat.events, speaking: Boolean(speaking), lastHeard: state?.lastHeard });
+  const asleep = runtime && state?.awayState === 'sleeping';
+  const signal: SignalReason | null = runtime && !vision.connected ? 'offline' : asleep ? 'sleeping' : null;
 
   useEffect(() => {
     if (runtime) return;
@@ -116,9 +121,6 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
 
   const core = state?.coreConnection;
   const ai = state?.aiStatus;
-  const coreVariant = core?.state === 'connected' ? 'good'
-    : core?.state === 'connecting' || core?.state === 'stale' ? 'warning'
-      : core?.state === 'reauth-required' || core?.state === 'offline' ? 'danger' : 'neutral';
   const coreLabel = core?.state === 'connected' ? 'Core connected'
     : core?.state === 'connecting' ? 'Core connecting'
       : core?.state === 'reauth-required' ? 'Core sign-in required'
@@ -131,22 +133,31 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
         : ai.state === 'requesting' ? 'AI responding · request in progress'
           : ai.state === 'request-failed' ? `AI request failed${ai.lastFailure ? ` · ${ai.lastFailure.replaceAll('_', ' ')}` : ''}`
             : `AI responding${ai.provider ? ` · ${ai.provider}` : ''}`;
-  const aiVariant = runtime && !vision.connected ? 'neutral'
-    : ai?.state === 'available' ? 'good'
-    : ai?.state === 'request-failed' || ai?.state === 'not-configured' ? 'danger'
-      : ai?.state === 'configured-untested' || ai?.state === 'requesting' ? 'warning' : 'neutral';
   const providerName: Record<string, string> = { gemini: 'Gemini', groq: 'Groq', cerebras: 'Cerebras' };
-  const keyNotice = (() => {
+  const keyNotice = ((): Notice | null => {
     const entries = Object.entries(state?.aiKeys ?? {}).filter(([, value]) => value.total > 0);
     const out = entries.find(([, value]) => value.limited >= value.total);
     if (out) {
       const until = out[1].freeAt ? ` until ${new Date(out[1].freeAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : '';
-      return { variant: 'danger' as const, text: `${providerName[out[0]] ?? out[0]} keys used up${until}` };
+      return { variant: 'danger', text: `${providerName[out[0]] ?? out[0]} keys used up${until}` };
     }
     const low = entries.find(([, value]) => value.limited > 0 && value.total - value.limited <= 1);
-    if (low) return { variant: 'warning' as const, text: `${providerName[low[0]] ?? low[0]} keys low · ${low[1].total - low[1].limited} of ${low[1].total} left` };
+    if (low) return { variant: 'warning', text: `${providerName[low[0]] ?? low[0]} keys low · ${low[1].total - low[1].limited} of ${low[1].total} left` };
     return null;
   })();
+  // Only problems reach the top bar; everything working stays quiet.
+  const notices: Notice[] = [];
+  if (runtime && !vision.connected) notices.push({ variant: 'danger', text: aiLabel });
+  else {
+    if (core?.state === 'offline' || core?.state === 'reauth-required' || core?.state === 'stale') {
+      notices.push({ variant: core.state === 'stale' ? 'warning' : 'danger', text: coreLabel,
+        title: core.lastCheckedAt ? `Last checked ${new Date(core.lastCheckedAt).toLocaleTimeString()}` : undefined });
+    }
+    if (ai?.state === 'request-failed' || ai?.state === 'not-configured') notices.push({ variant: 'danger', text: aiLabel });
+  }
+  if (keyNotice) notices.push({ ...keyNotice, title: 'Your AI keys hit their provider limits. Vision switches to keys that still work.' });
+  if (state?.gesture) notices.push({ variant: state.gesture.includes('Muted') ? 'danger' : 'info', text: state.gesture });
+
   const panelCopy = {
     browser: { title: 'Look it up on the web', detail: '' },
     food: { title: 'Food and water', detail: '' },
@@ -162,94 +173,94 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
     offline: 'Waiting for Vision', paused: 'Take a moment', speaking: 'Fairy is speaking',
     thinking: 'Vision is thinking', listening: 'I’m listening', idle: 'Here, with you',
   }[eyeMode];
+  const stateLabel = eyeMode === 'offline' ? 'Vision offline' : recovery ? 'Recovery chat'
+    : asleep ? 'Sleeping · say "wake up"' : state?.awayState === 'asking' ? 'Are you still there?'
+      : isPaused ? 'Paused' : 'Focus mode';
   const activeGlow = EXPRESSIONS[expression]?.palette?.glow ?? theme.glow;
+  const meter = Math.round(Math.min(1, Math.max(0, audioLevel)) * 6);
+
+  const captionLine = caption.speaker
+    ? <p className={`crt-caption-line ${caption.speaker}`}><span className="crt-speaker">{caption.speaker === 'fairy' ? 'Fairy' : 'You'}</span>
+      <span className="crt-words">{caption.text}{caption.typing && <i className="crt-cursor" aria-hidden="true"/>}</span></p>
+    : eyeMode === 'thinking' ? <p className="crt-caption-line quiet"><span className="crt-words">thinking<i className="crt-dots" aria-hidden="true"/></span></p>
+      : eyeMode === 'paused' ? <p className="crt-caption-line quiet"><span className="crt-words">Paused. Still counting quietly, no roasts.</span></p>
+        : state?.awayState === 'asking' ? <p className="crt-caption-line fairy"><span className="crt-speaker">Fairy</span><span className="crt-words">Are you still there?</span></p>
+          : null;
 
   return <main className={`fairy-app ${runtime && showPanel ? 'has-chat' : ''}`} style={{ '--fairy-glow': activeGlow } as React.CSSProperties}>
-    <div className="ambient-grid" aria-hidden="true"/>
     <header className="topbar">
-      <a className="brand" href="./" aria-label="Fairy home"><span className="brand-mark"><Aperture size={25} strokeWidth={1.25}/></span><span>FAIRY<span className="brand-subtitle">ASCEND VISION</span></span></a>
+      <div className="brand"><span className="brand-mark" aria-hidden="true"><i/></span><span>Fairy</span><span className="brand-subtitle">Ascend Vision</span></div>
       <div className="top-status">
-        <StatusBadge variant={coreVariant} text={coreLabel} title={core?.lastCheckedAt ? `Last checked ${new Date(core.lastCheckedAt).toLocaleTimeString()}` : 'Core status has not been checked'} />
-        <StatusBadge variant={aiVariant} text={aiLabel} pulse={false} title={ai?.lastSuccessAt ? `Last real model response ${new Date(ai.lastSuccessAt).toLocaleString()}${ai.model ? ` · ${ai.model}` : ''}` : 'AI status is based on provider configuration and actual responses, not Core or microphone status.'} />
-        {keyNotice && <StatusBadge variant={keyNotice.variant} text={keyNotice.text} pulse={false} title="Your AI keys hit their provider limits. Vision switches to keys that still work." />}
-        {state?.gesture && (
-          <StatusBadge
-            variant={state.gesture.includes('Muted') ? 'danger' : 'info'}
-            text={state.gesture}
-          />
-        )}
-        <span className={`status-dot ${eyeMode === 'paused' || eyeMode === 'offline' ? 'dim' : ''}`}/>
-        <span>{eyeMode === 'offline' ? 'Vision offline' : recovery ? 'Recovery chat' : state?.awayState === 'sleeping' ? 'Sleeping · say "wake up"' : state?.awayState === 'asking' ? 'Are you still there?' : isPaused ? 'Paused' : 'Focus mode'}</span>
-        <span className="top-divider"/>
-        <span className="version">COMPANION / 01</span>
+        {notices.map(notice => <span key={notice.text} className={`notice ${notice.variant}`} title={notice.title}>{notice.text}</span>)}
+        <span className="state-label"><span className={`status-dot ${eyeMode === 'paused' || eyeMode === 'offline' || asleep ? 'dim' : ''}`}/>{stateLabel}</span>
       </div>
     </header>
 
     <section className="presence" aria-labelledby="presence-title">
       {recovery && <p role="status" className="control-hint">{state?.runtimeNotice}</p>}
-      <div className="session-label"><span className="tiny-cross">+</span> Your space to focus <span className="tiny-cross">+</span></div>
-      <div className="eye-stage" data-eye-mode={eyeMode} onPointerMove={event => {
-        const box = event.currentTarget.getBoundingClientRect();
-        setOffset({ x: (event.clientX - box.left) / box.width * 2 - 1, y: (event.clientY - box.top) / box.height * 2 - 1 });
-      }} onPointerLeave={() => setOffset({ x: 0, y: 0 })}>
-        <div className="eye-orbit" aria-hidden="true"><i/><i/><i/><i/></div>
-        <span className="eye-coordinate left" aria-hidden="true">F / 01</span>
-        <FairyEye className="eye-visual" pupilOffset={faceTarget ?? offset} baseColor={theme.base} glowColor={theme.glow} coreColor={theme.core}
-          expression={expression} motionMode={eyeMode} audioReactive={audioReactive} speaking={eyeMode === 'speaking'} faceTracking={Boolean(faceTarget)}
-          dilation={0} enableVoiceControl={!runtime && microphone} voiceSensitivity={sensitivity}
-          audioLevel={runtime ? (eyeMode === 'listening' ? (state?.audioLevel ?? 0) * sensitivity / 1.5 : 0) : undefined}
-          onVoiceDetected={setDetected} onAudioError={setError} reducedMotion={reducedMotion}/>
-        <span className="eye-coordinate right" aria-hidden="true">VISION</span>
-        <div className="eye-baseline" aria-hidden="true"/>
+      <div className="crt" data-signal={signal ?? 'on'}>
+        <div className="crt-screen">
+          <div className="crt-hud top">
+            <span className="hud-mode"><i className={`led ${signal || isPaused ? '' : 'on'}`}/>{isPaused ? 'Paused' : 'Focus'}</span>
+            <time>{formatTime(currentSeconds)}</time>
+            <span className="hud-fill"/>
+            <span className="camera-status"><i className={`led ${cameraActive ? 'on' : ''}`}/>{cameraActive ? 'Camera active' : 'Camera unavailable'}</span>
+            <span className="mic-status"><span className="meter" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <i key={index} className={voiceActive && index < meter ? 'lit' : ''}/>)}</span>{voiceActive ? 'Voice link active' : 'Mic off'}</span>
+          </div>
+          <div className="eye-stage" data-eye-mode={eyeMode} onPointerMove={event => {
+            const box = event.currentTarget.getBoundingClientRect();
+            setOffset({ x: (event.clientX - box.left) / box.width * 2 - 1, y: (event.clientY - box.top) / box.height * 2 - 1 });
+          }} onPointerLeave={() => setOffset({ x: 0, y: 0 })}>
+            <FairyEye className="eye-visual" pupilOffset={faceTarget ?? offset} baseColor={theme.base} glowColor={theme.glow} coreColor={theme.core}
+              expression={expression} motionMode={eyeMode} audioReactive={audioReactive} speaking={eyeMode === 'speaking'} faceTracking={Boolean(faceTarget)}
+              dilation={0} enableVoiceControl={!runtime && microphone} voiceSensitivity={sensitivity}
+              audioLevel={runtime ? (eyeMode === 'listening' ? (state?.audioLevel ?? 0) * sensitivity / 1.5 : 0) : undefined}
+              onVoiceDetected={setDetected} onAudioError={setError} reducedMotion={reducedMotion}/>
+          </div>
+          <div className="crt-caption" aria-live="polite">
+            <h1 id="presence-title" className="sr-only">{subtitle}.</h1>
+            {captionLine}
+          </div>
+          <div className="crt-hud bottom">
+            <span data-testid="tracking-source">{faceTarget ? 'Face tracking' : 'Pointer tracking'}</span>
+            <span className="hud-fill"/>
+            <span>{showCamera ? 'Preview visible' : 'Preview hidden'}</span>
+          </div>
+          <div className="crt-glass" aria-hidden="true"/>
+          <CrtSignal reason={signal} reducedMotion={reducedMotion}/>
+        </div>
+        <div className="crt-chin" aria-hidden="true"><span>FAIRY·01</span><span className="hud-fill"/><i className={`power-led ${signal ?? 'on'}`}/></div>
       </div>
-      <div className="presence-copy">
-        <div className="listening-label"><Radio size={12}/><span>{voiceActive ? 'Voice link active' : 'Quiet presence'}</span></div>
-        <h1 id="presence-title">{subtitle}<span>.</span></h1>
-        <p>{eyeMode === 'paused' ? 'Breathe. Your space will be here when you’re ready.' : eyeMode === 'offline' ? 'Vision is reconnecting to your local session.' : 'Settle into your work. I’ll keep an eye on the little things.'}</p>
-      </div>
-      <div className="session-readout"><span>Session time</span><time>{formatTime(currentSeconds)}</time><span className="readout-line"/><span data-testid="tracking-source">{faceTarget ? 'Face tracking' : 'Pointer tracking'}</span></div>
     </section>
 
     <div className="bottom-area">
-      {/* Dynamic Island HUD Capsule */}
-      <div style={{ marginBottom: '14px' }}>
-        <DynamicIsland
-          audioLevel={runtime ? (eyeMode === 'listening' ? (state?.audioLevel ?? 0) : 0) : (eyeMode === 'listening' ? 0.35 : 0)}
-          voiceEnabled={voiceActive}
-          muted={!voiceActive}
-          speaking={eyeMode === 'speaking'}
-          lastHeard={state?.lastHeard}
-          onToggleMic={toggleVoice}
-        />
-      </div>
-
       <div className="controls" aria-label="Companion controls">
-        <Button variant={voiceActive ? 'default' : 'outline'} onClick={toggleVoice} aria-label={runtime ? (voiceActive ? 'Pause microphone' : 'Resume microphone') : (microphone ? 'Stop microphone' : 'Enable microphone')} aria-pressed={voiceActive} disabled={recovery || busy || (runtime && !vision.connected)}>
-          {voiceActive ? <Mic size={16}/> : <MicOff size={16}/>}<span>{runtime ? (voiceActive ? 'Pause mic' : 'Resume mic') : (microphone ? 'Stop mic' : 'Enable mic')}</span>
+        <Button variant="ghost" className="key" onClick={toggleVoice} aria-label={runtime ? (voiceActive ? 'Pause microphone' : 'Resume microphone') : (microphone ? 'Stop microphone' : 'Enable microphone')} aria-pressed={voiceActive} disabled={recovery || busy || (runtime && !vision.connected)}>
+          {voiceActive ? <Mic size={17}/> : <MicOff size={17}/>}<span>Mic</span>
         </Button>
-        {runtime && <Button variant="outline" onClick={() => void command('toggle-speech')} aria-label={speechMuted ? 'Unmute speech output' : 'Mute speech output'} aria-pressed={!speechMuted} disabled={recovery || busy || !vision.connected}>{speechMuted ? <VolumeX size={16}/> : <Volume2 size={16}/>}<span>{speechMuted ? 'Unmute speech' : 'Mute speech'}</span></Button>}
-        {runtime && <Button variant="outline" onClick={() => togglePanel('chat')} aria-expanded={showPanel} aria-label="Open chat with Vision"><MessageSquare size={16}/><span>Chat</span></Button>}
-        {runtime && <Button variant="ghost" size="icon" onClick={() => void command('stop-cancel')} aria-label="Stop speech or current browser tasks and pending actions" disabled={recovery || busy || !vision.connected}><CircleStop size={16}/></Button>}
-        <Button variant="outline" disabled={recovery} onClick={() => setShowCamera(value => !value)} aria-pressed={showCamera}>{showCamera ? <VideoOff size={16}/> : <Video size={16}/>}<span>{showCamera ? 'Hide camera' : 'Show camera'}</span></Button>
-        {runtime && <Button variant="ghost" size="icon" disabled={recovery || busy || !vision.connected} aria-label={isPaused ? 'Resume focus' : 'Pause focus'} title={isPaused ? 'Paused: still counting quietly, no roasts' : 'Pause roasts'} onClick={() => void command('toggle-focus')}>{isPaused ? <Play size={16}/> : <Pause size={16}/>}</Button>}
-        {!runtime && <Button variant="ghost" size="icon" aria-label={paused ? 'Resume focus preview' : 'Pause focus preview'} onClick={() => setPaused(value => !value)}>{paused ? <Play size={16}/> : <Pause size={16}/>}</Button>}
+        {runtime && <Button variant="ghost" className="key" onClick={() => void command('toggle-speech')} aria-label={speechMuted ? 'Unmute speech output' : 'Mute speech output'} aria-pressed={!speechMuted} disabled={recovery || busy || !vision.connected}>{speechMuted ? <VolumeX size={17}/> : <Volume2 size={17}/>}<span>Voice</span></Button>}
+        {runtime && <Button variant="ghost" className="key" onClick={() => togglePanel('chat')} aria-expanded={showPanel} aria-label="Open chat with Vision"><MessageSquare size={17}/><span>Chat</span></Button>}
+        <Button variant="ghost" className="key" disabled={recovery} onClick={() => setShowCamera(value => !value)} aria-pressed={showCamera} aria-label={showCamera ? 'Hide camera' : 'Show camera'}>{showCamera ? <VideoOff size={17}/> : <Video size={17}/>}<span>Cam</span></Button>
+        <span className="key-gap" aria-hidden="true"/>
+        {runtime && <Button variant="ghost" className="key" disabled={recovery || busy || !vision.connected} aria-label={isPaused ? 'Resume focus' : 'Pause focus'} title={isPaused ? 'Paused: still counting quietly, no roasts' : 'Pause roasts'} onClick={() => void command('toggle-focus')}>{isPaused ? <Play size={17}/> : <Pause size={17}/>}<span>{isPaused ? 'Resume' : 'Pause'}</span></Button>}
+        {!runtime && <Button variant="ghost" className="key" aria-label={paused ? 'Resume focus preview' : 'Pause focus preview'} onClick={() => setPaused(value => !value)}>{paused ? <Play size={17}/> : <Pause size={17}/>}<span>{paused ? 'Resume' : 'Pause'}</span></Button>}
+        {runtime && <Button variant="ghost" className="key danger" onClick={() => void command('stop-cancel')} aria-label="Stop speech or current browser tasks and pending actions" disabled={recovery || busy || !vision.connected}><CircleStop size={17}/><span>Stop</span></Button>}
         <div className="settings-anchor" ref={settingsRef}>
-          <Button variant="ghost" size="icon" aria-label="Eye appearance" aria-expanded={showSettings} onClick={() => setShowSettings(value => !value)}><Sparkles size={16}/></Button>
-          {showSettings && <div className="settings-panel" aria-label="Eye appearance settings" style={{ maxHeight: 'min(70svh, 440px)', overflowY: 'auto' }}><div className="settings-heading">Make it your own<Button variant="ghost" size="icon" onClick={() => setShowSettings(false)} aria-label="Close appearance settings"><X size={14}/></Button></div>
-            <span className="settings-label">LIGHT SPECTRUM</span><div className="theme-options">{themes.map((item, index) => <button key={item.name} aria-label={`${item.name} theme`} aria-pressed={index === themeIndex} onClick={() => setThemeIndex(index)}><i style={{ background: item.glow }}/><span>{item.name}</span></button>)}</div>
-            <Button variant="ghost" aria-label="Audio reactivity" aria-pressed={audioReactive} onClick={() => setAudioReactive(value => !value)}><AudioLines size={16}/> Audio reactivity</Button>
+          <Button variant="ghost" className="key" aria-label="Eye appearance" aria-expanded={showSettings} onClick={() => setShowSettings(value => !value)}><SlidersHorizontal size={17}/><span>Tune</span></Button>
+          {showSettings && <div className="settings-panel" aria-label="Eye appearance settings"><div className="settings-heading">Tune the eye<Button variant="ghost" size="icon" onClick={() => setShowSettings(false)} aria-label="Close appearance settings"><X size={14}/></Button></div>
+            <span className="settings-label">Colour</span><div className="theme-options">{themes.map((item, index) => <button key={item.name} aria-label={`${item.name} theme`} aria-pressed={index === themeIndex} onClick={() => setThemeIndex(index)}><i style={{ background: item.glow }}/><span>{item.name}</span></button>)}</div>
+            <Button variant="ghost" className="settings-toggle" aria-label="Audio reactivity" aria-pressed={audioReactive} onClick={() => setAudioReactive(value => !value)}><AudioLines size={16}/> Audio reactivity</Button>
             <label className="sensitivity-label" htmlFor="sensitivity">Voice sensitivity <span>{sensitivity.toFixed(1)}×</span></label><input id="sensitivity" type="range" min="0.5" max="3" step="0.1" value={sensitivity} onChange={event => setSensitivity(Number(event.target.value))}/>
             <label className="motion-option"><input type="checkbox" checked={reducedMotion} onChange={event => setReducedMotion(event.target.checked)}/> Reduce eye motion</label>
           </div>}
         </div>
       </div>
-      <p className="control-hint"><Headphones size={12}/>{runtime ? 'Your existing Vision listener stays connected.' : 'Enable your microphone and speak to see Fairy respond.'}</p>
       {(error || camera.error) && <p role="alert" className="media-error">{error || `Camera: ${camera.error}`}</p>}
     </div>
 
     {showPanel && runtime && <aside className="fairy-chat-panel" aria-label={panelCopy.title}>
       <header className="fairy-chat-heading">
-        <div><span className="chat-kicker">Local session · {selectedPanel}</span><h2>{panelCopy.title}</h2></div>
+        <div><span className="chat-kicker">{selectedPanel}</span><h2>{panelCopy.title}</h2></div>
         <Button variant="ghost" size="icon" aria-label="Close chat panel" onClick={() => setShowPanel(false)}><X size={17}/></Button>
       </header>
       <nav className="fairy-panel-nav" aria-label="Vision panels">
@@ -275,7 +286,7 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
       </form>
       </>}
       <p className="fairy-chat-core-time">{aiLabel}{ai?.lastSuccessAt ? ` · last successful response ${new Date(ai.lastSuccessAt).toLocaleTimeString()}` : ''}</p>
-      {core?.lastCheckedAt && <p className="fairy-chat-core-time">{coreLabel} · checked {new Date(core.lastCheckedAt).toLocaleTimeString()}</p>}
+      <p className="fairy-chat-core-time">{coreLabel}{core?.lastCheckedAt ? ` · checked ${new Date(core.lastCheckedAt).toLocaleTimeString()}` : ''}</p>
     </aside>}
 
     {showCamera && (
@@ -287,14 +298,5 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
         onClose={() => setShowCamera(false)}
       />
     )}
-
-    <footer className="footer">
-      <span><ShieldCheck size={13}/> On-device presence</span>
-      <span className="camera-status">
-        <span className={`status-dot ${cameraActive ? '' : 'dim'}`}/>{cameraActive ? 'Camera active' : 'Camera unavailable'}
-        <span className="footer-dot">·</span>{showCamera ? 'Preview visible' : 'Preview hidden'}
-      </span>
-      <span className="footer-right">A little more focus <ArrowUpRight size={12}/></span>
-    </footer>
   </main>;
 }

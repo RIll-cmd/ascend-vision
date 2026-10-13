@@ -43,8 +43,8 @@ test('runtime mode, transcript, mic, speech and Core status stay independent', a
   await expect(stage).toHaveAttribute('data-eye-mode', 'idle');
   await expect(page.getByRole('heading', { name: 'Here, with you.' })).toBeVisible();
   await expect(eye).toHaveAttribute('data-expression', 'open');
-  await expect(page.getByText('User said hello')).toBeVisible();
-  await expect(page.getByText('Core offline', { exact: true })).toBeVisible();
+  await expect(page.locator('.crt-caption')).toContainText('User said hello');
+  await expect(page.locator('.top-status').getByText('Core offline', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Pause microphone' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByRole('button', { name: 'Mute speech output' })).toHaveAttribute('aria-pressed', 'true');
 
@@ -65,7 +65,7 @@ test('runtime mode, transcript, mic, speech and Core status stay independent', a
   connected = false;
   await expect(stage).toHaveAttribute('data-eye-mode', 'offline');
   await expect(page.getByRole('heading', { name: 'Waiting for Vision.' })).toBeVisible();
-  await expect(page.getByText('Core offline', { exact: true })).toBeVisible();
+  await expect(page.locator('.fairy-chat-core-time').getByText('Core offline', { exact: true })).toBeVisible();
 });
 
 test('expression follows the detected emotion automatically', async ({ page }) => {
