@@ -331,6 +331,47 @@ test('top label shows when Vision is asking or asleep', async ({ page }) => {
   await expect(page.locator('.top-status')).toContainText('Sleeping');
 });
 
+test('food tab shows the plan, fixes a number and adds water', async ({ page }) => {
+  await page.route('**/api/fairy/state', route => route.fulfill({ json: {
+    mode: 'focus', cameraReady: false, audioLevel: 0, voiceEnabled: false, muted: false, speaking: false, elapsedSeconds: 0,
+  } }));
+  let food: any = { ready: true, eaten: 550, target: 1770, glassMl: 250, waterMl: 750, waterTargetMl: 3000,
+    meals: [{ name: 'breakfast', at: '08:00' }, { name: 'lunch', at: '14:00' }],
+    entries: [{ id: 4, at: '2026-10-13T09:00:00', description: 'chicken adobo, rice', kcal: 550, source: 'ai' }] };
+  const calls: any[] = [];
+  await page.route('**/api/fairy/food', route => route.fulfill({ json: food }));
+  await page.route('**/api/fairy/food/4', route => { calls.push([route.request().method(), route.request().postDataJSON()]); food = { ...food, eaten: 500, entries: [{ ...food.entries[0], kcal: 500, source: 'owner' }] }; return route.fulfill({ json: { updated: true } }); });
+  await page.route('**/api/fairy/water', route => { calls.push(['WATER', route.request().postDataJSON()]); food = { ...food, waterMl: 1000 }; return route.fulfill({ json: { added: 250 } }); });
+  await page.goto('/?runtime=1');
+  await page.getByRole('button', { name: 'Open chat with Vision' }).click();
+  await page.getByRole('button', { name: /^\d\s*food$/ }).click();
+  const panel = page.getByLabel('Food and water', { exact: true }).last();
+  await expect(panel).toContainText('550 kcal');
+  await expect(panel).toContainText('1,220 kcal');
+  await expect(panel).toContainText('3 / 12 glasses');
+  await expect(panel).toContainText('breakfast 8:00 AM · lunch 2:00 PM');
+  await expect(panel).toContainText('(estimate)');
+  await page.getByRole('button', { name: 'Fix calories for chicken adobo, rice' }).click();
+  await page.getByLabel('Calories for chicken adobo, rice').fill('500');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(panel).toContainText('1,270 kcal');
+  await page.getByRole('button', { name: '+1 glass of water' }).click();
+  await expect(panel).toContainText('4 / 12 glasses');
+  expect(calls).toEqual([['PATCH', { kcal: 500 }], ['WATER', { ml: 250 }]]);
+});
+
+test('food tab explains setup when there is no plan', async ({ page }) => {
+  await page.route('**/api/fairy/state', route => route.fulfill({ json: {
+    mode: 'focus', cameraReady: false, audioLevel: 0, voiceEnabled: false, muted: false, speaking: false, elapsedSeconds: 0,
+  } }));
+  await page.route('**/api/fairy/food', route => route.fulfill({ json: { ready: false, eaten: 0, target: null, entries: [],
+    waterMl: 0, waterTargetMl: null, glassMl: 250, meals: [] } }));
+  await page.goto('/?runtime=1');
+  await page.getByRole('button', { name: 'Open chat with Vision' }).click();
+  await page.getByRole('button', { name: /^\d\s*food$/ }).click();
+  await expect(page.getByText('set up my food plan')).toBeVisible();
+});
+
 test('face detection runs with hidden preview and attention moves inside the stationary orb', async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).hasTestFace = true;

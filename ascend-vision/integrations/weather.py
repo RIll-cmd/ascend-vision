@@ -149,6 +149,12 @@ class WeatherCoach:
             self._cache = (self._clock(), result)
         return result
 
+    def hot_today(self) -> bool:
+        """From the cached forecast only, so it never waits on the network."""
+        with self._lock:
+            cached = self._cache
+        return bool(cached) and any(item.feels_max >= HOT_FEELS for item in cached[1])
+
     def _briefed_today(self) -> bool:
         return self._briefed_date == self._now().date().isoformat()
 

@@ -14,6 +14,7 @@ import { useLocalChat } from '@/hooks/use-local-chat';
 import { StatsPanel } from '@/components/stats-panel';
 import { MemoryPanel } from '@/components/memory-panel';
 import { BrowserPanel } from '@/components/browser-panel';
+import { FoodPanel } from '@/components/food-panel';
 
 const themes = [
   { name: 'Celestial', base: '#172660', glow: '#2937d7', core: '#f0f0f6' },
@@ -41,7 +42,7 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
   const [themeIndex, setThemeIndex] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [showPanel, setShowPanel] = useState(runtime);
-  const [panelOverride, setPanelOverride] = useState<'chat' | 'stats' | 'memory' | 'browser' | 'automation' | 'missions' | 'habits'>('chat');
+  const [panelOverride, setPanelOverride] = useState<'chat' | 'stats' | 'memory' | 'browser' | 'food' | 'automation' | 'missions' | 'habits'>('chat');
   const [draft, setDraft] = useState('');
   const [sensitivity, setSensitivity] = useState(1.5);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
@@ -148,6 +149,7 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
   })();
   const panelCopy = {
     browser: { title: 'Look it up on the web', detail: '' },
+    food: { title: 'Food and water', detail: '' },
     stats: { title: 'Your numbers', detail: '' },
     memory: { title: 'What Vision remembers', detail: '' },
     chat: { title: 'Talk to Vision', detail: 'Type here whenever the microphone is unavailable. Laptop chat can use the current local context.' },
@@ -251,13 +253,14 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
         <Button variant="ghost" size="icon" aria-label="Close chat panel" onClick={() => setShowPanel(false)}><X size={17}/></Button>
       </header>
       <nav className="fairy-panel-nav" aria-label="Vision panels">
-        {(['chat', ...(state?.webUse?.enabled ? ['browser'] as const : []), 'stats', 'memory'] as const).map((panel, index) => <button key={panel} type="button" aria-pressed={panel === selectedPanel} onClick={() => togglePanel(panel)}><span>{index + 1}</span>{panel}</button>)}
+        {(['chat', ...(state?.webUse?.enabled ? ['browser'] as const : []), 'food', 'stats', 'memory'] as const).map((panel, index) => <button key={panel} type="button" aria-pressed={panel === selectedPanel} onClick={() => togglePanel(panel)}><span>{index + 1}</span>{panel}</button>)}
       </nav>
-      {selectedPanel !== 'chat' && selectedPanel !== 'stats' && selectedPanel !== 'memory' && selectedPanel !== 'browser' && <section className="fairy-panel-note"><p>{panelCopy.detail}</p><Button variant="outline" onClick={() => { setDraft(selectedPanel === 'missions' ? 'What are my current Ascend missions?' : selectedPanel === 'habits' ? 'Can you help me review my habits?' : 'Help me with a browser task.'); setPanelOverride('chat'); }}>Ask in chat</Button></section>}
+      {selectedPanel !== 'chat' && selectedPanel !== 'stats' && selectedPanel !== 'memory' && selectedPanel !== 'browser' && selectedPanel !== 'food' && <section className="fairy-panel-note"><p>{panelCopy.detail}</p><Button variant="outline" onClick={() => { setDraft(selectedPanel === 'missions' ? 'What are my current Ascend missions?' : selectedPanel === 'habits' ? 'Can you help me review my habits?' : 'Help me with a browser task.'); setPanelOverride('chat'); }}>Ask in chat</Button></section>}
       {selectedPanel === 'browser' && <BrowserPanel enabled={Boolean(state?.webUse?.enabled)}/>}
+      {selectedPanel === 'food' && <FoodPanel/>}
       {selectedPanel === 'stats' && <StatsPanel/>}
       {selectedPanel === 'memory' && <MemoryPanel/>}
-      {selectedPanel !== 'stats' && selectedPanel !== 'memory' && selectedPanel !== 'browser' && <>
+      {selectedPanel !== 'stats' && selectedPanel !== 'memory' && selectedPanel !== 'browser' && selectedPanel !== 'food' && <>
       <div className="fairy-chat-events" aria-live="polite" aria-relevant="additions text">
         {chat.events.filter(event => event.kind !== 'status').map(event => <article key={event.cursor} className={`fairy-chat-message ${event.kind}`}>
           <span>{event.kind === 'user' ? (event.source === 'voice' ? 'YOU · VOICE' : 'YOU') : `VISION · ${event.reply_source === 'model' ? `AI${event.provider ? ` / ${event.provider}` : ''}` : event.reply_source === 'tool' ? 'LOCAL TOOL' : event.reply_source === 'offline' ? 'OFFLINE RESPONSE' : 'SOURCE UNKNOWN'}`}</span><p>{event.text}</p>

@@ -721,9 +721,24 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 afternoon_hour=github_config.afternoon_hour, evening_hour=github_config.evening_hour,
             )
 
+        nutrition_coach = None
+        try:
+            from assistant.nutrition import NutritionStore
+            from assistant.nutrition_coach import NutritionCoach, make_estimator
+            from llm_router import LLMRouter
+            nutrition_store = NutritionStore(Path(config.storage.database).parent / 'nutrition.db')
+            nutrition_coach = NutritionCoach(
+                nutrition_store, announce=announce_local, estimate=make_estimator(LLMRouter(config.llm)),
+                hot_day=weather_coach.hot_today if weather_coach is not None else (lambda: False),
+            )
+            if focus_ui_bridge is not None:
+                focus_ui_bridge.bind_nutrition(nutrition_store, nutrition_coach)
+        except Exception as exc:
+            LOG.warning('Food and water coach unavailable (%s)', type(exc).__name__)
+
         def local_intercept(text):
-            # Away/sleep first (it blocks everything while asleep), then weather and GitHub answers.
-            for handler in (away_mode, weather_coach, github_coach):
+            # Away/sleep first (it blocks everything while asleep), then weather, GitHub and food answers.
+            for handler in (away_mode, weather_coach, github_coach, nutrition_coach):
                 if handler is not None:
                     answer = handler.intercept(text)
                     if answer:
@@ -1585,8 +1600,14 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     break
             if time.perf_counter() >= next_report:
                 report()
+                owner_available = away_mode is None or away_mode.state == 'active'
                 if github_coach is not None:
-                    github_coach.maybe_remind(away_mode is None or away_mode.state == 'active')
+                    github_coach.maybe_remind(owner_available)
+                if nutrition_coach is not None:
+                    try:
+                        nutrition_coach.maybe_remind(owner_available)
+                    except Exception as exc:
+                        LOG.debug('Food reminder skipped (%s)', type(exc).__name__)
                 try:
                     for notice in key_low_notifier.messages(ai_key_summary()):
                         feedback.speak_announcement(notice)

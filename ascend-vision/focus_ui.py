@@ -66,6 +66,7 @@ class FocusUI:
         self._browser_config = None
         self._key_status = None
         self._away_state = None
+        self._nutrition = None
         self._key_cache = (0.0, None)
         self._server = None
         self._thread = None
@@ -290,9 +291,65 @@ class FocusUI:
                 return jsonify(enabled=self._memory.enabled())
             return memory_action(apply)
 
+        def food_unavailable():
+            return jsonify(error='The food diary is not available right now.'), 503
+
+        @app.get('/api/fairy/food')
+        def food_today():
+            if self._nutrition is None:
+                return food_unavailable()
+            from assistant.nutrition import GLASS_ML, calorie_target, meal_plan, water_target_ml
+            store, coach = self._nutrition
+            today = datetime.now().date()
+            profile = store.profile()
+            entries = store.foods(today)
+            body = {'ready': profile is not None, 'eaten': sum(item['kcal'] for item in entries),
+                    'entries': entries, 'waterMl': store.water_ml(today), 'glassMl': GLASS_ML,
+                    'target': None, 'waterTargetMl': None, 'meals': []}
+            if profile is not None:
+                try:
+                    hot = bool(coach.hot_day())
+                except Exception:
+                    hot = False
+                body.update(target=calorie_target(profile), waterTargetMl=water_target_ml(profile, hot_day=hot),
+                            meals=[{'name': name, 'at': when.strftime('%H:%M')}
+                                   for name, when in meal_plan(profile, today)])
+            return jsonify(body)
+
+        @app.patch('/api/fairy/food/<int:entry_id>')
+        def food_fix(entry_id):
+            if self._nutrition is None:
+                return food_unavailable()
+            payload = request.get_json(silent=True)
+            if (not isinstance(payload, dict) or set(payload) != {'kcal'} or type(payload['kcal']) is not int
+                    or not 0 <= payload['kcal'] <= 5000):
+                return jsonify(error='Enter calories between 0 and 5000.'), 400
+            return jsonify(updated=self._nutrition[0].update_food(entry_id, payload['kcal']))
+
+        @app.delete('/api/fairy/food/<int:entry_id>')
+        def food_delete(entry_id):
+            if self._nutrition is None:
+                return food_unavailable()
+            return jsonify(deleted=self._nutrition[0].delete_food(entry_id))
+
+        @app.post('/api/fairy/water')
+        def water_add():
+            if self._nutrition is None:
+                return food_unavailable()
+            payload = request.get_json(silent=True)
+            if (not isinstance(payload, dict) or set(payload) != {'ml'} or type(payload['ml']) is not int
+                    or not 50 <= payload['ml'] <= 2000):
+                return jsonify(error='Enter between 50 and 2000 ml.'), 400
+            self._nutrition[0].add_water(payload['ml'], datetime.now())
+            return jsonify(added=payload['ml'])
+
         register_browser_routes(app, lambda: self._browser_client, _LiveBrowserConfig(self),
                                 session_key=FAIRY_BROWSER_SESSION)
         return app
+
+    def bind_nutrition(self, store, coach):
+        """The Food tab reads and edits the local food and water diary."""
+        self._nutrition = (store, coach)
 
     def bind_away(self, state_provider):
         """'active', 'asking' or 'sleeping', shown as a label in the window."""
