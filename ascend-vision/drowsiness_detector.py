@@ -7,6 +7,7 @@ blinks from sustained eye closure (microsleep/drowsiness).
 from dataclasses import dataclass, replace
 from datetime import datetime
 import math
+import statistics
 
 from config import DrowsinessConfig
 
@@ -115,6 +116,23 @@ class DrowsinessMachine:
         self.baseline_ear: float = 0.0
         self.calibrated = (getattr(config, 'calibration_frames', 30) <= 0)
         self.effective_threshold: float = config.ear_threshold
+        self.suspended = False      # True during guided eye calibration
+
+    def apply_calibration(self, threshold: float, baseline: float) -> None:
+        """Use a measured or saved calibration instead of the automatic startup one."""
+        self.effective_threshold = float(max(0.10, min(0.35, threshold)))
+        self.baseline_ear = float(baseline)
+        self.calibrated = True
+        self._ear_samples = []
+        self.consecutive_frames = 0
+
+    def reset_calibration(self) -> None:
+        """Go back to the automatic startup calibration."""
+        self.calibrated = (getattr(self.config, 'calibration_frames', 30) <= 0)
+        self.effective_threshold = self.config.ear_threshold
+        self.baseline_ear = 0.0
+        self._ear_samples = []
+        self.consecutive_frames = 0
 
     def _end(self, now: float | None, wall: datetime | None, reason: str) -> DrowsinessEvent | None:
         ended = None
@@ -174,13 +192,24 @@ class DrowsinessMachine:
 
         _, _, avg_ear = calculate_face_ear(face_landmarks)
 
+        if self.suspended:
+            # Guided calibration asks the owner to close their eyes; that is not drowsiness.
+            ended = self._end(now, captured_at, 'calibration')
+            self.consecutive_frames = 0
+            return DrowsinessUpdate(
+                state='calibrating', consecutive_frames=0, ear=avg_ear, blink_count=self.blink_count,
+                active=None, started=None, ended=ended, cooldown_remaining=cooldown_remaining,
+                calibrated=self.calibrated, calibration_progress=calib_progress,
+                baseline_ear=self.baseline_ear, effective_threshold=self.effective_threshold)
+
         # Handle calibration phase
         if not self.calibrated and calib_target > 0:
             if math.isfinite(avg_ear) and avg_ear > 0.05:
                 self._ear_samples.append(avg_ear)
             calib_progress = min(1.0, len(self._ear_samples) / calib_target)
             if len(self._ear_samples) >= calib_target:
-                self.baseline_ear = float(sum(self._ear_samples) / len(self._ear_samples))
+                # The median ignores blinks; an average is pulled down by them and causes false alarms.
+                self.baseline_ear = float(statistics.median(self._ear_samples))
                 ratio = getattr(self.config, 'adaptive_threshold_ratio', 0.70)
                 # Bound between 0.15 and 0.35 to guard against outliers
                 self.effective_threshold = float(max(0.15, min(0.35, self.baseline_ear * ratio)))

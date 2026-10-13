@@ -31,7 +31,7 @@ from detector import PhoneDetector, download_model
 from hands import HandTracker, download_hand_model
 from face_mesh import FaceMeshTracker, download_face_model
 from expression_tracker import ExpressionTracker
-from drowsiness_detector import DrowsinessMachine, LEFT_EYE_LANDMARKS, RIGHT_EYE_LANDMARKS
+from drowsiness_detector import DrowsinessMachine, LEFT_EYE_LANDMARKS, RIGHT_EYE_LANDMARKS, calculate_face_ear
 from yawn_detector import YawnMachine, MOUTH_LANDMARKS
 from posture_detector import PostureMachine
 from posture import classify_phone_orientation
@@ -736,9 +736,21 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         except Exception as exc:
             LOG.warning('Food and water coach unavailable (%s)', type(exc).__name__)
 
+        eye_calibrator = None
+        if face_tracker_available:
+            try:
+                from assistant.eye_calibration import EyeCalibrationStore, EyeCalibrator
+                eye_calibrator = EyeCalibrator(
+                    EyeCalibrationStore(Path(config.storage.database).parent / 'eye_calibration.json'),
+                    drowsiness_machine, announce=announce_local)
+                if eye_calibrator.apply_saved():
+                    LOG.info('Using the saved eye calibration.')
+            except Exception as exc:
+                LOG.warning('Eye calibration unavailable (%s)', type(exc).__name__)
+
         def local_intercept(text):
-            # Away/sleep first (it blocks everything while asleep), then weather, GitHub and food answers.
-            for handler in (away_mode, weather_coach, github_coach, nutrition_coach):
+            # Away/sleep first (it blocks everything while asleep), then eyes, weather, GitHub and food.
+            for handler in (away_mode, eye_calibrator, weather_coach, github_coach, nutrition_coach):
                 if handler is not None:
                     answer = handler.intercept(text)
                     if answer:
@@ -1144,6 +1156,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 face_frames += bool(face_landmarks)
                 if away_mode is not None:
                     away_mode.observe(bool(face_landmarks))
+                if eye_calibrator is not None and eye_calibrator.active:
+                    eye_calibrator.observe(calculate_face_ear(face_landmarks)[2] if face_landmarks else None)
                 if weather_coach is not None and (away_mode is None or not away_mode.sleeping):
                     weather_coach.maybe_brief(bool(face_landmarks) or not face_tracker_available)
                 if context_collector is not None:
