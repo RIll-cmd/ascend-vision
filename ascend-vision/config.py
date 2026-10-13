@@ -492,6 +492,25 @@ class WeatherConfig:
 
 
 @dataclass(frozen=True)
+class GitHubCoachConfig:
+    """Compare today's GitHub contributions with recent days; remind in the afternoon and evening."""
+    enabled: bool = True
+    username: str = ''
+    afternoon_hour: int = 15
+    evening_hour: int = 20
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('github.enabled must be a YAML boolean')
+        if not isinstance(self.username, str) or len(self.username) > 39:
+            raise ValueError('github.username must be a GitHub username')
+        number('github.afternoon_hour', self.afternoon_hour, 0, 23, integer=True)
+        number('github.evening_hour', self.evening_hour, 0, 23, integer=True)
+        if self.evening_hour <= self.afternoon_hour:
+            raise ValueError('github.evening_hour must be later than github.afternoon_hour')
+
+
+@dataclass(frozen=True)
 class AwayModeConfig:
     """Ask 'Are you still there?' after an absence during focus, then sleep until the owner returns."""
     enabled: bool = True
@@ -720,6 +739,7 @@ class Config:
     distraction_watch: DistractionWatchConfig = field(default_factory=DistractionWatchConfig)
     away_mode: AwayModeConfig = field(default_factory=AwayModeConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
+    github: GitHubCoachConfig = field(default_factory=GitHubCoachConfig)
     phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
     browser_automation: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
 
@@ -744,7 +764,7 @@ def load_config(path: Path) -> Config:
                 'llm': LLMConfig, 'ascend': AscendConfig,
                  'screen_audit': ScreenAuditConfig, 'phone_chat': PhoneChatConfig,
                  'distraction_watch': DistractionWatchConfig, 'away_mode': AwayModeConfig,
-                 'weather': WeatherConfig,
+                 'weather': WeatherConfig, 'github': GitHubCoachConfig,
                  'browser_automation': BrowserAutomationConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')

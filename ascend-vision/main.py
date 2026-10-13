@@ -712,9 +712,18 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 state_path=Path(config.storage.database).parent / 'weather_state.json',
             )
 
+        github_coach = None
+        github_config = getattr(config, 'github', None)
+        if github_config is not None and github_config.enabled and github_config.username:
+            from integrations.github_coach import GitHubCoach
+            github_coach = GitHubCoach(
+                github_config.username, announce=announce_local,
+                afternoon_hour=github_config.afternoon_hour, evening_hour=github_config.evening_hour,
+            )
+
         def local_intercept(text):
-            # Away/sleep first (it blocks everything while asleep), then the weather follow-up.
-            for handler in (away_mode, weather_coach):
+            # Away/sleep first (it blocks everything while asleep), then weather and GitHub answers.
+            for handler in (away_mode, weather_coach, github_coach):
                 if handler is not None:
                     answer = handler.intercept(text)
                     if answer:
@@ -1576,6 +1585,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     break
             if time.perf_counter() >= next_report:
                 report()
+                if github_coach is not None:
+                    github_coach.maybe_remind(away_mode is None or away_mode.state == 'active')
                 try:
                     for notice in key_low_notifier.messages(ai_key_summary()):
                         feedback.speak_announcement(notice)

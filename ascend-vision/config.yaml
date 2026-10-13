@@ -165,6 +165,11 @@ away_mode:
 weather:
   enabled: true # Morning briefing and "going out?" advice from Open-Meteo (free, no key). Only coordinates leave this computer.
   places: [] # Your places, e.g. [{name: Home, latitude: 14.6, longitude: 121.0}]. Setup.bat can fill this in.
+github:
+  enabled: true # Compare today's GitHub contributions with your last 7 days; no token, no AI.
+  username: '' # Your GitHub username. Private work counts if your profile includes private contributions.
+  afternoon_hour: 15 # "You're N behind your average" if behind.
+  evening_hour: 20 # "One push keeps your streak alive" if nothing yet today.
 phone_chat:
   enabled: false # Enable only after all ASCEND_PHONE_* values are provisioned.
   voice_upload_enabled: false # Explicit opt-in; recordings are sent to Google Gemini for transcription.
