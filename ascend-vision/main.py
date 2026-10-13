@@ -674,34 +674,52 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         from integrations.chat_ipc import ChatIpcQueue
         from assistant.local_conversation import LocalConversation
 
+        def announce_local(text):
+            # Said out loud and shown in chat; no AI is involved.
+            feedback.speak_announcement(text)
+            if chat_queue is not None and local_conversation is not None:
+                try:
+                    chat_queue.publish_event(
+                        local_conversation.runtime_session_id, turn_id=secrets.token_hex(8),
+                        source='vision', kind='assistant', text=text, reply_source='tool',
+                    )
+                except Exception as exc:
+                    LOG.debug('Vision notice not shown in chat (%s)', type(exc).__name__)
+
         away_mode = None
         away_mode_config = getattr(config, 'away_mode', None)
         if away_mode_config is not None and away_mode_config.enabled and face_tracker_available:
             from assistant.away_mode import AwayMode
 
-            def announce_away(text):
-                # Said out loud and shown in chat; no AI is involved.
-                feedback.speak_announcement(text)
-                if chat_queue is not None and local_conversation is not None:
-                    try:
-                        chat_queue.publish_event(
-                            local_conversation.runtime_session_id, turn_id=secrets.token_hex(8),
-                            source='vision', kind='assistant', text=text, reply_source='tool',
-                        )
-                    except Exception as exc:
-                        LOG.debug('Away notice not shown in chat (%s)', type(exc).__name__)
-
             away_mode = AwayMode(
                 is_focus=lambda: manager.mode == 'focus' and not manager.quit_requested,
                 pause=lambda: manager.request('background'),
                 resume=lambda: manager.request('focus'),
-                announce=announce_away,
+                announce=announce_local,
                 away_after=away_mode_config.away_after_seconds,
                 answer_window=away_mode_config.answer_seconds,
                 wake_after=away_mode_config.wake_after_seconds,
             )
             if focus_ui_bridge is not None:
                 focus_ui_bridge.bind_away(lambda: away_mode.state)
+
+        weather_coach = None
+        weather_config = getattr(config, 'weather', None)
+        if weather_config is not None and weather_config.enabled and weather_config.places:
+            from integrations.weather import Place, WeatherCoach
+            weather_coach = WeatherCoach(
+                [Place(**place) for place in weather_config.places], announce=announce_local,
+                state_path=Path(config.storage.database).parent / 'weather_state.json',
+            )
+
+        def local_intercept(text):
+            # Away/sleep first (it blocks everything while asleep), then the weather follow-up.
+            for handler in (away_mode, weather_coach):
+                if handler is not None:
+                    answer = handler.intercept(text)
+                    if answer:
+                        return answer
+            return None
 
         try:
             chat_queue = ChatIpcQueue(Path(config.storage.database).parent / 'chat_ipc.db')
@@ -714,7 +732,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     "local", "voice", str(getattr(manager, "session_id", "default")),
                 ),
                 max_words=config.voice_commands.max_reply_words,
-                interceptor=away_mode.intercept if away_mode is not None else None,
+                interceptor=local_intercept,
             )
             local_conversation.start()
             resources.callback(local_conversation.close)
@@ -1102,6 +1120,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 face_frames += bool(face_landmarks)
                 if away_mode is not None:
                     away_mode.observe(bool(face_landmarks))
+                if weather_coach is not None and (away_mode is None or not away_mode.sleeping):
+                    weather_coach.maybe_brief(bool(face_landmarks) or not face_tracker_available)
                 if context_collector is not None:
                     from integrations.desk_presence import face_center_in_region, is_camera_frame_usable
                     desk_region = context_runtime.desk_region

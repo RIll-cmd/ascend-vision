@@ -468,6 +468,30 @@ class ScreenAuditConfig:
 
 
 @dataclass(frozen=True)
+class WeatherConfig:
+    """Daily weather briefing from Open-Meteo (free, no key) for the owner's places."""
+    enabled: bool = True
+    places: tuple[dict, ...] = ()
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('weather.enabled must be a YAML boolean')
+        if not isinstance(self.places, (list, tuple)) or len(self.places) > 5:
+            raise ValueError('weather.places must be a list of at most 5 places')
+        cleaned = []
+        for place in self.places:
+            if (not isinstance(place, dict) or set(place) != {'name', 'latitude', 'longitude'}
+                    or not isinstance(place['name'], str) or not place['name'].strip()
+                    or len(place['name']) > 40):
+                raise ValueError('each weather place needs only a short name, latitude and longitude')
+            number('weather.places.latitude', place['latitude'], -90.0, 90.0)
+            number('weather.places.longitude', place['longitude'], -180.0, 180.0)
+            cleaned.append({'name': place['name'].strip(), 'latitude': float(place['latitude']),
+                            'longitude': float(place['longitude'])})
+        object.__setattr__(self, 'places', tuple(cleaned))
+
+
+@dataclass(frozen=True)
 class AwayModeConfig:
     """Ask 'Are you still there?' after an absence during focus, then sleep until the owner returns."""
     enabled: bool = True
@@ -695,6 +719,7 @@ class Config:
     screen_audit: ScreenAuditConfig = field(default_factory=ScreenAuditConfig)
     distraction_watch: DistractionWatchConfig = field(default_factory=DistractionWatchConfig)
     away_mode: AwayModeConfig = field(default_factory=AwayModeConfig)
+    weather: WeatherConfig = field(default_factory=WeatherConfig)
     phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
     browser_automation: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
 
@@ -719,6 +744,7 @@ def load_config(path: Path) -> Config:
                 'llm': LLMConfig, 'ascend': AscendConfig,
                  'screen_audit': ScreenAuditConfig, 'phone_chat': PhoneChatConfig,
                  'distraction_watch': DistractionWatchConfig, 'away_mode': AwayModeConfig,
+                 'weather': WeatherConfig,
                  'browser_automation': BrowserAutomationConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')

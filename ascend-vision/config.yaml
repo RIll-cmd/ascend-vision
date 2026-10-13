@@ -162,6 +162,9 @@ away_mode:
   away_after_seconds: 300 # Ask after this long without a face.
   answer_seconds: 120 # Sleep if there is no answer within this time.
   wake_after_seconds: 3 # Wake when a face is back for this long, or say "wake up".
+weather:
+  enabled: true # Morning briefing and "going out?" advice from Open-Meteo (free, no key). Only coordinates leave this computer.
+  places: [] # Your places, e.g. [{name: Home, latitude: 14.6, longitude: 121.0}]. Setup.bat can fill this in.
 phone_chat:
   enabled: false # Enable only after all ASCEND_PHONE_* values are provisioned.
   voice_upload_enabled: false # Explicit opt-in; recordings are sent to Google Gemini for transcription.
