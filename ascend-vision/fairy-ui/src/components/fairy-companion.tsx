@@ -177,7 +177,7 @@ export function FairyCompanion({ runtime = false }: { runtime?: boolean }) {
           />
         )}
         <span className={`status-dot ${eyeMode === 'paused' || eyeMode === 'offline' ? 'dim' : ''}`}/>
-        <span>{eyeMode === 'offline' ? 'Vision offline' : recovery ? 'Recovery chat' : isPaused ? 'Paused' : 'Focus mode'}</span>
+        <span>{eyeMode === 'offline' ? 'Vision offline' : recovery ? 'Recovery chat' : state?.awayState === 'sleeping' ? 'Sleeping · say "wake up"' : state?.awayState === 'asking' ? 'Are you still there?' : isPaused ? 'Paused' : 'Focus mode'}</span>
         <span className="top-divider"/>
         <span className="version">COMPANION / 01</span>
       </div>

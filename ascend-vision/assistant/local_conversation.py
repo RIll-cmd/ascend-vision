@@ -14,7 +14,7 @@ class LocalConversation:
 
     def __init__(self, queue, assistant_service, context_builder: Callable[[str], object],
                  *, session_key: tuple[str, str, str] | Callable[[], tuple[str, str, str]],
-                 max_words: int = 25):
+                 max_words: int = 25, interceptor: Callable[[str], str | None] | None = None):
         if not callable(getattr(queue, "publish_event", None)):
             raise TypeError("queue must publish conversation events")
         if not callable(getattr(assistant_service, "respond", None)):
@@ -30,6 +30,7 @@ class LocalConversation:
         self._context_builder = context_builder
         self._session_key = session_key
         self._max_words = max_words
+        self._interceptor = interceptor
         self._runtime_session_id = uuid4().hex
         self._state_lock = RLock()
         self._turn_lock = RLock()
@@ -103,6 +104,19 @@ class LocalConversation:
                 self._runtime_session_id, turn_id=turn_id, source=source,
                 kind="status", text="", status="thinking",
             )
+            quick = None
+            if self._interceptor is not None:
+                try:
+                    quick = self._interceptor(text.strip())
+                except Exception:
+                    quick = None
+            if quick:
+                # Answered locally (for example while Vision is asleep); no AI call is made.
+                self._queue.publish_event(
+                    self._runtime_session_id, turn_id=turn_id, source=source,
+                    kind="assistant", text=quick, status="reply", reply_source="tool",
+                )
+                return quick
             try:
                 reply = self._assistant_service.respond(
                     text.strip(), self._context_builder(text.strip()),

@@ -65,6 +65,7 @@ class FocusUI:
         self._browser_client = None
         self._browser_config = None
         self._key_status = None
+        self._away_state = None
         self._key_cache = (0.0, None)
         self._server = None
         self._thread = None
@@ -114,6 +115,11 @@ class FocusUI:
                 snapshot = dict(self._state)
             if keys is not None:
                 snapshot['aiKeys'] = keys
+            if self._away_state is not None:
+                try:
+                    snapshot['awayState'] = self._away_state()
+                except Exception:
+                    pass
             return jsonify(snapshot)
 
         @app.get('/api/fairy/health')
@@ -287,6 +293,10 @@ class FocusUI:
         register_browser_routes(app, lambda: self._browser_client, _LiveBrowserConfig(self),
                                 session_key=FAIRY_BROWSER_SESSION)
         return app
+
+    def bind_away(self, state_provider):
+        """'active', 'asking' or 'sleeping', shown as a label in the window."""
+        self._away_state = state_provider
 
     def bind_key_status(self, summary_provider):
         """A callable returning per-provider key counts; read at most every few seconds."""

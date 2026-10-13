@@ -674,6 +674,35 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         from integrations.chat_ipc import ChatIpcQueue
         from assistant.local_conversation import LocalConversation
 
+        away_mode = None
+        away_mode_config = getattr(config, 'away_mode', None)
+        if away_mode_config is not None and away_mode_config.enabled and face_tracker_available:
+            from assistant.away_mode import AwayMode
+
+            def announce_away(text):
+                # Said out loud and shown in chat; no AI is involved.
+                feedback.speak_announcement(text)
+                if chat_queue is not None and local_conversation is not None:
+                    try:
+                        chat_queue.publish_event(
+                            local_conversation.runtime_session_id, turn_id=secrets.token_hex(8),
+                            source='vision', kind='assistant', text=text, reply_source='tool',
+                        )
+                    except Exception as exc:
+                        LOG.debug('Away notice not shown in chat (%s)', type(exc).__name__)
+
+            away_mode = AwayMode(
+                is_focus=lambda: manager.mode == 'focus' and not manager.quit_requested,
+                pause=lambda: manager.request('background'),
+                resume=lambda: manager.request('focus'),
+                announce=announce_away,
+                away_after=away_mode_config.away_after_seconds,
+                answer_window=away_mode_config.answer_seconds,
+                wake_after=away_mode_config.wake_after_seconds,
+            )
+            if focus_ui_bridge is not None:
+                focus_ui_bridge.bind_away(lambda: away_mode.state)
+
         try:
             chat_queue = ChatIpcQueue(Path(config.storage.database).parent / 'chat_ipc.db')
             set_ai_status_publisher = getattr(assistant_service, 'set_ai_status_publisher', None)
@@ -685,6 +714,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     "local", "voice", str(getattr(manager, "session_id", "default")),
                 ),
                 max_words=config.voice_commands.max_reply_words,
+                interceptor=away_mode.intercept if away_mode is not None else None,
             )
             local_conversation.start()
             resources.callback(local_conversation.close)
@@ -1070,6 +1100,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 face_landmarks = face_landmarks_list[0] if face_landmarks_list else []
                 face_blendshapes = face_blendshapes_list[0] if face_blendshapes_list else {}
                 face_frames += bool(face_landmarks)
+                if away_mode is not None:
+                    away_mode.observe(bool(face_landmarks))
                 if context_collector is not None:
                     from integrations.desk_presence import face_center_in_region, is_camera_frame_usable
                     desk_region = context_runtime.desk_region

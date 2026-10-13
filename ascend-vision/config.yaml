@@ -157,6 +157,11 @@ distraction_watch:
   repeat_seconds: 300 # Then nudge again this often while you stay.
   sites: [YouTube, Instagram, TikTok, Facebook, X, Twitter, Reddit, Netflix, Twitch] # Matched against the tab title.
 
+away_mode:
+  enabled: true # During focus, ask "Are you still there?" when no face is seen, then sleep to save AI use.
+  away_after_seconds: 300 # Ask after this long without a face.
+  answer_seconds: 120 # Sleep if there is no answer within this time.
+  wake_after_seconds: 3 # Wake when a face is back for this long, or say "wake up".
 phone_chat:
   enabled: false # Enable only after all ASCEND_PHONE_* values are provisioned.
   voice_upload_enabled: false # Explicit opt-in; recordings are sent to Google Gemini for transcription.

@@ -468,6 +468,22 @@ class ScreenAuditConfig:
 
 
 @dataclass(frozen=True)
+class AwayModeConfig:
+    """Ask 'Are you still there?' after an absence during focus, then sleep until the owner returns."""
+    enabled: bool = True
+    away_after_seconds: float = 300.0
+    answer_seconds: float = 120.0
+    wake_after_seconds: float = 3.0
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('away_mode.enabled must be a YAML boolean')
+        number('away_mode.away_after_seconds', self.away_after_seconds, 30.0, 86_400.0)
+        number('away_mode.answer_seconds', self.answer_seconds, 10.0, 3_600.0)
+        number('away_mode.wake_after_seconds', self.wake_after_seconds, 0.5, 60.0)
+
+
+@dataclass(frozen=True)
 class DistractionWatchConfig:
     """During focus, nudge when a listed site is the front browser tab for a while."""
     enabled: bool = True
@@ -678,6 +694,7 @@ class Config:
     ascend: AscendConfig = field(default_factory=AscendConfig)
     screen_audit: ScreenAuditConfig = field(default_factory=ScreenAuditConfig)
     distraction_watch: DistractionWatchConfig = field(default_factory=DistractionWatchConfig)
+    away_mode: AwayModeConfig = field(default_factory=AwayModeConfig)
     phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
     browser_automation: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
 
@@ -701,7 +718,7 @@ def load_config(path: Path) -> Config:
                 'dashboard': DashboardConfig, 'voice_commands': VoiceCommandConfig,
                 'llm': LLMConfig, 'ascend': AscendConfig,
                  'screen_audit': ScreenAuditConfig, 'phone_chat': PhoneChatConfig,
-                 'distraction_watch': DistractionWatchConfig,
+                 'distraction_watch': DistractionWatchConfig, 'away_mode': AwayModeConfig,
                  'browser_automation': BrowserAutomationConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')

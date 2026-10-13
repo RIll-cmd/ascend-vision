@@ -317,6 +317,20 @@ test('key badge warns when keys run low or out, and stays hidden otherwise', asy
   await expect(page.locator('.top-status')).toContainText('Gemini keys used up until');
 });
 
+test('top label shows when Vision is asking or asleep', async ({ page }) => {
+  let awayState = 'active';
+  let mode = 'focus';
+  await page.route('**/api/fairy/state', route => route.fulfill({ json: {
+    mode, cameraReady: false, audioLevel: 0, voiceEnabled: false, muted: false, speaking: false, elapsedSeconds: 0, awayState,
+  } }));
+  await page.goto('/?runtime=1');
+  await expect(page.locator('.top-status')).toContainText('Focus mode');
+  awayState = 'asking';
+  await expect(page.locator('.top-status')).toContainText('Are you still there?');
+  awayState = 'sleeping'; mode = 'background';
+  await expect(page.locator('.top-status')).toContainText('Sleeping');
+});
+
 test('face detection runs with hidden preview and attention moves inside the stationary orb', async ({ page }) => {
   await page.addInitScript(() => {
     (window as any).hasTestFace = true;
