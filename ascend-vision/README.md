@@ -41,6 +41,8 @@ Everything has a default. Edit `config.yaml` only if you need to:
 | Turn roasts off | `feedback.enabled: false` |
 | Hide the tray icon | `sessions.tray: false` |
 | Turn on desk/context awareness (off by default) | `companion_context.enabled: true` |
+| Run as a light assistant: voice, chat and agent announcements without the camera (about 620 MB instead of 1.1 GB) | `runtime.mode: assistant` (or start with `--assistant`) |
+| Stop Vision from announcing Ascend Hub's agent room | `agent_room.enabled: false` |
 
 Advanced and experimental features (phone chat, Discord, browser automation,
 proactive check-ins, Core link) are off by default and are described below.
