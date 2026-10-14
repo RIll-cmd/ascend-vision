@@ -76,3 +76,12 @@ def test_agent_room_config_only_talks_to_this_computer():
             AgentRoomConfig(base_url=bad)
     with pytest.raises(ValueError):
         AgentRoomConfig(poll_seconds=0.1)
+
+
+def test_no_session_reads_as_empty_so_the_dialog_can_end(hub):
+    saved = FakeHub.session
+    FakeHub.session = None
+    try:
+        assert RoomClient(hub).current() == {}
+    finally:
+        FakeHub.session = saved

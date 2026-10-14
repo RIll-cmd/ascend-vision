@@ -20,11 +20,11 @@ class RoomClient:
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def current(self) -> dict | None:
-        """The current room session, or None when Hub or the room is unreachable."""
+        """The current room session, {} when there is none, or None when Hub or the room is unreachable."""
         try:
             with self._opener.open(f'{self.base_url}/api/room/sessions/current', timeout=self.timeout_seconds) as response:
                 session = json.loads(response.read().decode('utf-8')).get('session')
-            return session if isinstance(session, dict) else None
+            return session if isinstance(session, dict) else {}
         except (OSError, ValueError, AttributeError):
             return None
 

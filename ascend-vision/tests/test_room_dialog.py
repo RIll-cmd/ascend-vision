@@ -107,3 +107,47 @@ def test_long_summaries_are_cut_for_speech():
     long_gate = {**PLAN_GATE, 'attention': {**PLAN_GATE['attention'], 'summary': 'Task. ' * 200}}
     line = RoomDialog().observe(long_gate)[0]
     assert len(line) < 520 and 'and more' in line
+
+
+def test_natural_replies_are_understood_and_negations_never_count():
+    dialog = RoomDialog()
+    dialog.observe(PLAN_GATE)
+    assert dialog.handle("I don't approve that") is None
+    assert dialog.handle('I approve').text == 'Approve the plan? Say yes to confirm.'
+    assert dialog.handle('Yes, send it.').action == RoomAction('gate', 'plan', 'approve')
+    other = RoomDialog()
+    other.observe(PLAN_GATE)
+    other.handle('change')
+    assert other.handle('Option number two.').text == 'Send this change: Give the tests to Claude? Say yes to confirm.'
+    assert other.handle('No, cancel that.').text == 'Okay, nothing was sent. Say approve, or change.'
+    other.handle('change')
+    assert other.handle('the first one').text == 'Send this change: Merge both tasks into one? Say yes to confirm.'
+
+
+def test_repeat_and_options_can_be_asked_for_any_time():
+    dialog = RoomDialog()
+    first = dialog.observe(PLAN_GATE)[0]
+    assert dialog.handle('repeat that').text == first
+    assert dialog.handle('what are the options').text.startswith('Option 1: Merge both tasks into one.')
+
+
+def test_an_unreachable_hub_keeps_the_dialog_but_no_session_ends_it():
+    dialog = RoomDialog()
+    dialog.observe(PLAN_GATE)
+    assert dialog.observe(None) == []
+    assert dialog.observe(PLAN_GATE) == []
+    assert dialog.handle('approve') is not None
+    dialog.observe({})
+    assert dialog.handle('approve') is None
+
+
+def test_a_gate_left_waiting_is_mentioned_again_once():
+    now = [0.0]
+    dialog = RoomDialog(clock=lambda: now[0], remind_after=600)
+    dialog.observe(PLAN_GATE)
+    now[0] = 599
+    assert dialog.observe(PLAN_GATE) == []
+    now[0] = 601
+    assert dialog.observe(PLAN_GATE) == ['Reminder: the agents are still waiting for you to review the plan. Say approve, or change.']
+    now[0] = 5000
+    assert dialog.observe(PLAN_GATE) == []

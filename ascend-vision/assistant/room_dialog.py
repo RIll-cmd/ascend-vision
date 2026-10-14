@@ -9,19 +9,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 import threading
+import time
 
 SPEECH_LIMIT = 400
 NUMBERS = {'one': 1, 'two': 2, 'three': 3, 'four': 4, '1': 1, '2': 2, '3': 3, '4': 4,
            'first': 1, 'second': 2, 'third': 3, 'fourth': 4}
-YES = {'yes', 'yeah', 'yep', 'confirm', 'do it', 'send it', 'sure', 'ok', 'okay', 'yes please'}
-NO = {'no', 'nope', 'cancel', 'never mind', 'nevermind', 'dont', 'do not', 'no thanks'}
+YES_START = {'yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'confirm', 'confirmed'}
+YES = {'do it', 'send it', 'go ahead and send it'}
+NO_START = {'no', 'nope', 'cancel', 'nevermind'}
+NO = {'never mind', 'dont', 'do not', 'forget it'}
+NEGATION = {'no', 'not', 'dont', 'never', 'cant', 'wont'}
+FILLERS = {'option', 'number', 'choice', 'the', 'please', 'go', 'with', 'pick', 'take', 'lets', 'use', 'i', 'want'}
 VERBS = {'approve': ('approve', 'approved', 'looks good', 'go ahead', 'sounds good'),
          'accept': ('accept', 'accepted'),
          'reject': ('reject', 'rejected', 'decline'),
          'retry': ('retry', 'try again'),
          'stop': ('stop', 'end it')}
 CHANGE = re.compile(r'^(?:please\s+)?(?:change|revise|edit)\b(?:\s+(?:it|the\s+(?:plan|roles)))?(?:\s+(?:to|so that|so))?\s*(?P<rest>.*)$')
-OPTION = re.compile(r'^(?:option|number|choice)?\s*(?P<n>one|two|three|four|first|second|third|fourth|[1-4])(?:\s+(?:option|one|please))?$')
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,26 @@ def _words(text: str) -> str:
     return ' '.join(re.sub(r"[^a-z0-9' ]+", ' ', text.casefold()).replace("'", '').split())
 
 
+def _yes(said: str) -> bool:
+    words = said.split()
+    return said in YES or (words[0] in YES_START and not NEGATION & set(words[1:]))
+
+
+def _no(said: str) -> bool:
+    return said in NO or said.split()[0] in NO_START or said.startswith('never mind')
+
+
+def _option_number(said: str) -> int | None:
+    """'2', 'option two', 'option number two', 'the first one': a lone number among filler words."""
+    words = said.split()
+    numbers = [w for w in words if w in NUMBERS]
+    if len(numbers) > 1 and 'one' in numbers:
+        numbers.remove('one')
+    if len(numbers) != 1 or any(w not in NUMBERS and w not in FILLERS and w != 'one' for w in words):
+        return None
+    return NUMBERS[numbers[0]]
+
+
 def _cut(text: str) -> str:
     text = ' '.join(str(text).split())
     if len(text) <= SPEECH_LIMIT:
@@ -51,7 +75,11 @@ def _cut(text: str) -> str:
 
 
 class RoomDialog:
-    def __init__(self):
+    def __init__(self, clock=time.monotonic, remind_after: float = 600.0):
+        self._clock, self._remind_after = clock, remind_after
+        self._since = 0.0
+        self._reminded = False
+        self._last_line = ''
         self._lock = threading.Lock()
         self._attention = None
         self._key = None
@@ -60,6 +88,9 @@ class RoomDialog:
         self._pending: RoomAction | None = None
 
     def observe(self, session: dict | None) -> list[str]:
+        """``None`` means Hub is unreachable (keep the dialog); ``{}`` means no session (end it)."""
+        if session is None:
+            return []
         with self._lock:
             lines = []
             stage = session.get('stage') if session else None
@@ -71,8 +102,14 @@ class RoomDialog:
             if key != self._key:
                 self._key, self._attention, self._pending = key, attention, None
                 self._step = 'ask' if attention else 'idle'
+                self._since, self._reminded = self._clock(), False
                 if attention:
-                    lines.append(self._announcement(attention))
+                    self._last_line = self._announcement(attention)
+                    lines.append(self._last_line)
+            elif (attention and self._step == 'ask' and not self._reminded
+                  and self._clock() - self._since >= self._remind_after):
+                self._reminded = True
+                lines.append(f'Reminder: the agents are still waiting for you {self._waiting_for()}. {self._prompt()}')
             return lines
 
     def handle(self, text: str) -> RoomReply | None:
@@ -82,6 +119,11 @@ class RoomDialog:
             said = _words(text)
             if not said:
                 return None
+            if any(w in said.split() for w in ('repeat',)) or 'say that again' in said or 'say it again' in said:
+                return RoomReply(self._last_line)
+            if 'options' in said.split() and 'revise' in self._attention.get('decisions', []) and self._step != 'confirm':
+                self._step = 'choose'
+                return RoomReply(self._options_text())
             if self._step == 'confirm':
                 return self._confirm(said)
             if self._step == 'choose':
@@ -102,6 +144,13 @@ class RoomDialog:
             return f'Codex, Claude and Antigravity are done. {summary} {self._prompt()}'
         return f"The agents need you to review the {attention.get('gate')}. {summary} {self._prompt()}"
 
+    def _waiting_for(self) -> str:
+        if self._attention.get('kind') == 'pause':
+            return 'to resume the agent room'
+        if self._attention.get('gate') == 'result':
+            return 'to accept or reject the result'
+        return f"to review the {self._attention.get('gate')}"
+
     def _prompt(self) -> str:
         words = ['change' if d == 'revise' else d for d in self._attention.get('decisions', [])]
         return f"Say {', or '.join(words)}."
@@ -116,8 +165,10 @@ class RoomDialog:
 
     def _ask(self, said: str, text: str) -> RoomReply | None:
         decisions = self._attention.get('decisions', [])
-        if said in NO:
+        if _no(said) and len(said.split()) <= 3:
             return RoomReply(f'Okay, nothing was sent. {self._prompt()}')
+        if NEGATION & set(said.split()):
+            return None
         change = CHANGE.match(said)
         if change and 'revise' in decisions:
             rest = change.group('rest').strip()
@@ -126,7 +177,7 @@ class RoomDialog:
             self._step = 'choose'
             return RoomReply(self._options_text())
         for decision in decisions:
-            if any(said == phrase or said.startswith(phrase + ' ') for phrase in VERBS.get(decision, ())):
+            if len(said.split()) <= 5 and any(f' {phrase} ' in f' {said} ' for phrase in VERBS.get(decision, ())):
                 self._pending = self._action(decision)
                 self._step = 'confirm'
                 return RoomReply(f'{decision.capitalize()} {self._subject()}? Say yes to confirm.')
@@ -140,13 +191,12 @@ class RoomDialog:
         return f'{listed} Say an option number, or say what to change.'
 
     def _choose(self, said: str, text: str) -> RoomReply:
-        if said in NO:
+        if _no(said) and len(said.split()) <= 3:
             self._step = 'ask'
             return RoomReply(f'Okay, nothing was sent. {self._prompt()}')
         options = self._attention.get('options') or []
-        picked = OPTION.match(said)
-        if picked:
-            n = NUMBERS[picked.group('n')]
+        n = _option_number(said)
+        if n is not None:
             if n > len(options):
                 return RoomReply(f'There are only {len(options)} options. Say an option number, or say what to change.')
             return self._propose(options[n - 1])
@@ -158,11 +208,11 @@ class RoomDialog:
         return RoomReply(f'Send this change: {note}? Say yes to confirm.')
 
     def _confirm(self, said: str) -> RoomReply:
-        if said in YES:
+        if _yes(said):
             action, self._pending = self._pending, None
             self._step = 'sending'
             return RoomReply('Sending.', action)
-        if said in NO:
+        if _no(said):
             self._pending = None
             self._step = 'ask'
             return RoomReply(f'Okay, nothing was sent. {self._prompt()}')

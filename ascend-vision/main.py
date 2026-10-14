@@ -862,11 +862,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             if room_dialog is not None:
                 reply = room_dialog.handle(text)
                 if reply is not None:
-                    feedback.speak_announcement(reply.text)
+                    announce_local(reply.text)
                     if reply.action is not None:
                         ok, message = room_client.send(reply.action)
                         room_dialog.sent(ok)
-                        feedback.speak_announcement(message)
+                        announce_local(message)
                     return
             if parse_status_intent(text) is not None:
                 route_chat(text)
