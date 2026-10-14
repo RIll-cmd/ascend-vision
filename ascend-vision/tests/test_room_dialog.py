@@ -151,3 +151,13 @@ def test_a_gate_left_waiting_is_mentioned_again_once():
     assert dialog.observe(PLAN_GATE) == ['Reminder: the agents are still waiting for you to review the plan. Say approve, or change.']
     now[0] = 5000
     assert dialog.observe(PLAN_GATE) == []
+
+
+def test_repo_results_can_be_merged_by_voice():
+    repo_gate = {'id': 's2', 'mode': 'build', 'stage': 'gate-result',
+                 'attention': {'kind': 'gate', 'gate': 'result', 'summary': 'The work is on branch room/fix-1. Checks passed. Fixed login.',
+                               'options': [], 'decisions': ['merge', 'accept', 'reject']}}
+    dialog = RoomDialog()
+    assert dialog.observe(repo_gate)[0].endswith('Say merge, accept, or reject.')
+    assert dialog.handle('merge it').text == 'Merge the result? Say yes to confirm.'
+    assert dialog.handle('yes').action == RoomAction('gate', 'result', 'merge')

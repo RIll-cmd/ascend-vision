@@ -21,6 +21,7 @@ NO = {'never mind', 'dont', 'do not', 'forget it'}
 NEGATION = {'no', 'not', 'dont', 'never', 'cant', 'wont'}
 FILLERS = {'option', 'number', 'choice', 'the', 'please', 'go', 'with', 'pick', 'take', 'lets', 'use', 'i', 'want'}
 VERBS = {'approve': ('approve', 'approved', 'looks good', 'go ahead', 'sounds good'),
+         'merge': ('merge', 'merge it', 'ship it'),
          'accept': ('accept', 'accepted'),
          'reject': ('reject', 'rejected', 'decline'),
          'retry': ('retry', 'try again'),
@@ -153,7 +154,8 @@ class RoomDialog:
 
     def _prompt(self) -> str:
         words = ['change' if d == 'revise' else d for d in self._attention.get('decisions', [])]
-        return f"Say {', or '.join(words)}."
+        listed = ', or '.join(words) if len(words) < 3 else f"{', '.join(words[:-1])}, or {words[-1]}"
+        return f'Say {listed}.'
 
     def _subject(self) -> str:
         return 'the agent room' if self._attention.get('kind') == 'pause' else f"the {self._attention.get('gate')}"
