@@ -714,6 +714,17 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 state_path=Path(config.storage.database).parent / 'weather_state.json',
             )
 
+        room_dialog = room_client = None
+        agent_room_config = getattr(config, 'agent_room', None)
+        if agent_room_config is not None and agent_room_config.enabled:
+            from assistant.room_dialog import RoomDialog
+            from integrations.agent_room import RoomClient, RoomWatcher
+            room_dialog = RoomDialog()
+            room_client = RoomClient(agent_room_config.base_url)
+            room_watcher = RoomWatcher(room_client, room_dialog, announce_local, agent_room_config.poll_seconds)
+            resources.callback(room_watcher.close)
+            room_watcher.start()
+
         github_coach = None
         github_config = getattr(config, 'github', None)
         if github_config is not None and github_config.enabled and github_config.username:
@@ -847,6 +858,16 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 feedback.speak_announcement("Voice alerts unmuted.")
 
         def on_unmatched_speech(text: str):
+            # A waiting agent room gate gets first look, so "approve" or "option two" reaches it.
+            if room_dialog is not None:
+                reply = room_dialog.handle(text)
+                if reply is not None:
+                    feedback.speak_announcement(reply.text)
+                    if reply.action is not None:
+                        ok, message = room_client.send(reply.action)
+                        room_dialog.sent(ok)
+                        feedback.speak_announcement(message)
+                    return
             if parse_status_intent(text) is not None:
                 route_chat(text)
                 return

@@ -468,6 +468,24 @@ class ScreenAuditConfig:
 
 
 @dataclass(frozen=True)
+class AgentRoomConfig:
+    """Announce Ascend Hub's agent room and answer its gates by voice; Hub must be on this computer."""
+    enabled: bool = True
+    base_url: str = 'http://127.0.0.1:5173'
+    poll_seconds: float = 3.0
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('agent_room.enabled must be a YAML boolean')
+        from urllib.parse import urlsplit
+        url = urlsplit(str(self.base_url))
+        # Hub refuses non-loopback hosts for the room API; never send voice decisions anywhere else.
+        if url.scheme != 'http' or url.hostname not in ('127.0.0.1', 'localhost') or url.path not in ('', '/'):
+            raise ValueError('agent_room.base_url must be http://127.0.0.1:<port> or http://localhost:<port>')
+        number('agent_room.poll_seconds', self.poll_seconds, 1.0, 60.0)
+
+
+@dataclass(frozen=True)
 class WeatherConfig:
     """Daily weather briefing from Open-Meteo (free, no key) for the owner's places."""
     enabled: bool = True
@@ -739,6 +757,7 @@ class Config:
     distraction_watch: DistractionWatchConfig = field(default_factory=DistractionWatchConfig)
     away_mode: AwayModeConfig = field(default_factory=AwayModeConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
+    agent_room: AgentRoomConfig = field(default_factory=AgentRoomConfig)
     github: GitHubCoachConfig = field(default_factory=GitHubCoachConfig)
     phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
     browser_automation: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
@@ -764,7 +783,7 @@ def load_config(path: Path) -> Config:
                 'llm': LLMConfig, 'ascend': AscendConfig,
                  'screen_audit': ScreenAuditConfig, 'phone_chat': PhoneChatConfig,
                  'distraction_watch': DistractionWatchConfig, 'away_mode': AwayModeConfig,
-                 'weather': WeatherConfig, 'github': GitHubCoachConfig,
+                 'weather': WeatherConfig, 'github': GitHubCoachConfig, 'agent_room': AgentRoomConfig,
                  'browser_automation': BrowserAutomationConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')
