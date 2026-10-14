@@ -12,6 +12,7 @@ import signal
 import sqlite3
 import threading
 
+import runtime_env  # noqa: F401  (thread policy must precede native libraries)
 from assistant.runtime_health import RuntimeHealth
 from focus_ui import FocusUI
 

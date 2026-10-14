@@ -18,6 +18,17 @@ from speech import SpeechOutcome
 
 LOG = logging.getLogger(__name__)
 
+
+def kokoro_session_options():
+    """Four ONNX Runtime threads that sleep between runs (as fast as the default per sentence, without spinning)."""
+    import onnxruntime as ort
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 4
+    options.inter_op_num_threads = 1
+    options.add_session_config_entry('session.intra_op.allow_spinning', '0')
+    options.add_session_config_entry('session.inter_op.allow_spinning', '0')
+    return options
+
 KOKORO_MODEL_URL = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx'
 KOKORO_VOICES_URL = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin'
 
@@ -152,7 +163,9 @@ class KokoroSpeaker:
                 ensure_kokoro_assets(self.model_path, self.voices_path)
                 from kokoro_onnx import Kokoro
                 LOG.info('Initializing Kokoro-ONNX with model=%s, voices=%s...', self.model_path.name, self.voices_path.name)
-                self._kokoro = Kokoro(str(self.model_path), str(self.voices_path))
+                import onnxruntime as ort
+                session = ort.InferenceSession(str(self.model_path), sess_options=kokoro_session_options(), providers=['CPUExecutionProvider'])
+                self._kokoro = Kokoro.from_session(session, str(self.voices_path))
                 LOG.info('Kokoro-ONNX initialized successfully.')
             return self._kokoro
 

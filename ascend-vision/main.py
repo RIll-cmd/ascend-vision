@@ -14,6 +14,8 @@ import threading
 import time
 from contextlib import ExitStack
 
+import runtime_env  # noqa: F401  (thread policy must precede OpenCV and torch)
+
 if __name__ == '__main__':
     print('ASCEND_STAGE=native_imports', flush=True)
 

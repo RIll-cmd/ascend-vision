@@ -201,3 +201,12 @@ def test_speaker_synthesize_with_blended_voice():
         assert isinstance(call_kwargs['voice'], np.ndarray)
         assert call_kwargs['voice'].shape == (510, 1, 256)
 
+
+
+def test_kokoro_session_uses_four_quiet_threads():
+    from tts_engine import kokoro_session_options
+    options = kokoro_session_options()
+    assert options.intra_op_num_threads == 4
+    assert options.inter_op_num_threads == 1
+    assert options.get_session_config_entry('session.intra_op.allow_spinning') == '0'
+    assert options.get_session_config_entry('session.inter_op.allow_spinning') == '0'
