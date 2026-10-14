@@ -65,10 +65,14 @@ class RuntimeConfig:
     preview: bool = False
     stats_interval_seconds: float = 5.
     target_fps: float = 15.
+    # watch: camera coaching with YOLO and MediaPipe; assistant: voice, chat and agents only, without camera AI.
+    mode: str = 'watch'
 
     def __post_init__(self):
         if type(self.preview) is not bool:
             raise ValueError('runtime.preview must be a YAML boolean')
+        if self.mode not in ('watch', 'assistant'):
+            raise ValueError("runtime.mode must be 'watch' or 'assistant'")
         number('runtime.stats_interval_seconds', self.stats_interval_seconds, .1)
         number('runtime.target_fps', self.target_fps, .1)
 

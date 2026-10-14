@@ -72,9 +72,17 @@ VISION_VERSION = '1.0.0'
 
 
 def run(config: Config, *, duration=None, detector=None, capture=None, hand_tracker=None,
-        face_tracker=None, voice_listener=None, fairy_ui=False, assistant_service=None):
+        face_tracker=None, voice_listener=None, fairy_ui=False, assistant_service=None, assistant=None):
     if duration is not None:
         number('duration', duration, .01)
+    assistant = config.runtime.mode == 'assistant' if assistant is None else assistant
+    if assistant:
+        # No camera and no camera AI: torch, Ultralytics and MediaPipe never load.
+        from assistant_mode import IdleCapture, NoCameraModel, NoTracker
+        detector = detector or NoCameraModel()
+        capture = capture or IdleCapture()
+        hand_tracker = hand_tracker or NoTracker()
+        face_tracker = face_tracker or NoTracker()
 
     if detector is None:
         print('ASCEND_STAGE=model_initialization', flush=True)
@@ -112,7 +120,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
     last_activity_sample = None
     chat_queue = None
     local_conversation = None
-    face_tracker_available = face_tracker is not None
+    face_tracker_available = face_tracker is not None and getattr(face_tracker, 'available', True)
     resources = ExitStack()
     focus_ui_bridge = None
     fairy_url = None
@@ -120,6 +128,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         print('ASCEND_STAGE=fairy_host', flush=True)
         from focus_ui import FocusUI
         focus_ui_bridge = FocusUI()
+        focus_ui_bridge.camera_enabled = not assistant
         resources.callback(focus_ui_bridge.close)
         fairy_url = focus_ui_bridge.start(open_browser=not config.runtime.preview)
 
@@ -1687,6 +1696,8 @@ def main(argv=None):
     parser.add_argument('--init-db', action='store_true', help='initialize SQLite schema and exit without camera access')
     parser.add_argument('--focus', action='store_true', help='accepted for older launchers; Vision always starts in focus')
     parser.add_argument('--tray', action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument('--assistant', action=argparse.BooleanOptionalAction, default=None,
+                        help='voice, chat and agents without the camera or camera AI (overrides runtime.mode)')
     parser.add_argument('--feedback', action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument('--fairy-ui', action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument('--test-speech', nargs='?', const='Phone Watch speech is ready.', type=str, default=None, help='speak an offline diagnostic line (optionally provide custom text), without camera/API/database')
@@ -1901,7 +1912,7 @@ def main(argv=None):
             LOG.info('Local hand model ready: %s', download_hand_model(config.hands.model))
             LOG.info('Local face model ready: %s', download_face_model(config.face.model))
             return 0
-        run(config, duration=args.duration, fairy_ui=fairy_ui_requested)
+        run(config, duration=args.duration, fairy_ui=fairy_ui_requested, assistant=args.assistant)
         return 0
     except KeyboardInterrupt:
         LOG.info('Startup interrupted')

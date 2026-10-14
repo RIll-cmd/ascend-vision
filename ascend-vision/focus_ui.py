@@ -443,13 +443,17 @@ class FocusUI:
         with self._lock:
             return bool(self._state['speakReplies'])
 
+    # Assistant mode runs without a camera; the window and the launcher then show it as off.
+    camera_enabled = True
+
     def publish(self, image, **state):
         """Called from the vision loop. No encoding/network I/O on that thread."""
-        self.health.update(camera='ready')
+        self.health.update(camera='ready' if self.camera_enabled else 'disabled')
         with self._lock:
-            self._state.update(state, cameraReady=True)
+            self._state.update(state, cameraReady=self.camera_enabled)
             # Only retain an extra image while a preview client is requesting frames.
-            self._frame = image.copy() if time.monotonic() < self._preview_until else None
+            keep = self.camera_enabled and image is not None and time.monotonic() < self._preview_until
+            self._frame = image.copy() if keep else None
 
     def publish_face(self, landmarks, width, height):
         """Normalized mirrored face position only; no landmarks/images leave this method."""
