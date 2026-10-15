@@ -697,6 +697,10 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 except Exception as exc:
                     LOG.debug('Vision notice not shown in chat (%s)', type(exc).__name__)
 
+        from assistant.announcement_pacer import AnnouncementPacer
+        # Notices Vision says on its own wait their turn; replies and conversations use announce_local directly.
+        announce_paced = AnnouncementPacer(announce_local)
+
         away_mode = None
         away_mode_config = getattr(config, 'away_mode', None)
         if away_mode_config is not None and away_mode_config.enabled and face_tracker_available:
@@ -719,7 +723,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         if weather_config is not None and weather_config.enabled and weather_config.places:
             from integrations.weather import Place, WeatherCoach
             weather_coach = WeatherCoach(
-                [Place(**place) for place in weather_config.places], announce=announce_local,
+                [Place(**place) for place in weather_config.places], announce=announce_paced,
                 state_path=Path(config.storage.database).parent / 'weather_state.json',
             )
 
@@ -730,7 +734,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             from integrations.agent_room import RoomClient, RoomWatcher
             room_dialog = RoomDialog()
             room_client = RoomClient(agent_room_config.base_url)
-            room_watcher = RoomWatcher(room_client, room_dialog, announce_local, agent_room_config.poll_seconds)
+            room_watcher = RoomWatcher(room_client, room_dialog, announce_paced, agent_room_config.poll_seconds)
             resources.callback(room_watcher.close)
             room_watcher.start()
 
@@ -739,7 +743,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         if github_config is not None and github_config.enabled and github_config.username:
             from integrations.github_coach import GitHubCoach
             github_coach = GitHubCoach(
-                github_config.username, announce=announce_local,
+                github_config.username, announce=announce_paced,
                 afternoon_hour=github_config.afternoon_hour, evening_hour=github_config.evening_hour,
             )
 
@@ -750,7 +754,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             from llm_router import LLMRouter
             nutrition_store = NutritionStore(Path(config.storage.database).parent / 'nutrition.db')
             nutrition_coach = NutritionCoach(
-                nutrition_store, announce=announce_local, estimate=make_estimator(LLMRouter(config.llm)),
+                nutrition_store, announce=announce_paced, estimate=make_estimator(LLMRouter(config.llm)),
                 hot_day=weather_coach.hot_today if weather_coach is not None else (lambda: False),
             )
             if focus_ui_bridge is not None:
@@ -1647,6 +1651,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             if time.perf_counter() >= next_report:
                 report()
                 owner_available = away_mode is None or away_mode.state == 'active'
+                announce_paced.pump()
                 if github_coach is not None:
                     github_coach.maybe_remind(owner_available)
                 if nutrition_coach is not None:
@@ -1656,7 +1661,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         LOG.debug('Food reminder skipped (%s)', type(exc).__name__)
                 try:
                     for notice in key_low_notifier.messages(ai_key_summary()):
-                        feedback.speak_announcement(notice)
+                        announce_paced(notice)
                 except Exception as exc:
                     LOG.debug('AI key check skipped (%s)', type(exc).__name__)
                 next_report = time.perf_counter() + config.runtime.stats_interval_seconds
