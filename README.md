@@ -6,3 +6,4 @@ Face emotion tracking
 Hand gestures
 Added own browser
 Phone use detector
+Finger Counter
