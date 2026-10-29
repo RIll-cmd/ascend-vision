@@ -56,3 +56,15 @@ def test_a_failing_speaker_does_not_block_the_next_notice():
     clock.now += 10
     pace.pump()
     assert said == ['next']
+
+
+def test_on_said_runs_when_the_notice_is_actually_spoken():
+    from assistant.announcement_pacer import AnnouncementPacer
+    now, said, spoken = [0.0], [], []
+    pacer = AnnouncementPacer(said.append, gap_seconds=45, clock=lambda: now[0])
+    pacer('first')
+    pacer('second', on_said=lambda: spoken.append(now[0]))
+    assert said == ['first'] and spoken == []
+    now[0] = 45
+    pacer.pump()
+    assert said == ['first', 'second'] and spoken == [45]

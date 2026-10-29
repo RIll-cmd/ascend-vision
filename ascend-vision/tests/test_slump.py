@@ -207,7 +207,13 @@ def seed(store, *, high=None, low=None):
 def coach_for(path, clock, **kwargs):
     store = SlumpStore(path / 'slump.db')
     said = []
-    return store, said, SlumpCoach(store, announce=said.append, clock=clock, **kwargs)
+
+    def announce(text, on_said=None):  # speaks at once, like an empty pacer queue
+        said.append(text)
+        if on_said:
+            on_said()
+
+    return store, said, SlumpCoach(store, announce=announce, clock=clock, **kwargs)
 
 
 def test_check_in_waits_for_daytime_and_thirty_active_minutes(tmp_path):
@@ -368,14 +374,14 @@ def test_unprompted_lines_hold_no_numbers(tmp_path):
     store, said, coach = coach_for(tmp_path, clock, notify=pushed.append)
     seed(store, high={'commits': 4, 'active_minutes': 300, 'late_minutes': 0, 'focus_minutes': 90,
                       'room_sessions': 2, 'distraction_minutes': 5},
-         low={'commits': 0, 'active_minutes': 60, 'late_minutes': 90, 'focus_minutes': 0,
+         low={'commits': 0, 'active_minutes': 140, 'late_minutes': 90, 'focus_minutes': 0,
               'room_sessions': 0, 'distraction_minutes': 120})
     for day in range(4):
         clock.at(day, 10)
         coach.tick(True)
     store.save_ladder(Ladder())
     seed(store, high={'commits': 4, 'room_sessions': 2, 'active_minutes': 300},
-         low={'commits': 4, 'room_sessions': 0, 'active_minutes': 60})
+         low={'commits': 4, 'room_sessions': 0, 'active_minutes': 60, 'late_minutes': 0})
     clock.at(4, 10)
     coach.tick(True)
     coach.intercept('yes')
@@ -411,3 +417,73 @@ def test_a_failing_backfill_source_is_skipped(tmp_path):
     coach.tick(True)
     coach.backfill_thread.join(5)
     assert store.days(TODAY - timedelta(days=5)) == {}
+
+
+def test_not_now_resets_the_ladder_so_no_push_follows_the_pause(tmp_path):
+    pushed = []
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path, clock, notify=pushed.append)
+    seed(store)
+    coach.tick(True)
+    clock.at(1, 10)
+    coach.tick(True)
+    assert coach.intercept('not now') == "Okay. I'll leave it for a few days."
+    for day in range(2, 5):
+        clock.at(day, 10)
+        coach.tick(True)
+    assert pushed == []
+    assert len(said) == 3 and said[2].endswith('Want a small plan for today?')
+
+
+def test_the_offer_window_opens_when_the_line_is_spoken(tmp_path):
+    clock = Clock().at(0, 10)
+    store = SlumpStore(tmp_path / 'slump.db')
+    queued = []
+    coach = SlumpCoach(store, announce=lambda text, on_said=None: queued.append(on_said), clock=clock)
+    seed(store)
+    coach.tick(True)
+    assert coach.intercept('yes') is None
+    clock.later(110)
+    queued[0]()
+    clock.later(100)
+    assert 'one small commit on anything' in coach.intercept('yes')
+
+
+def test_no_check_in_while_the_owner_is_away_from_the_keyboard(tmp_path):
+    activity = ['input_idle']
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path, clock, sample=lambda: activity[0])
+    seed(store)
+    coach.tick(True)
+    assert said == []
+    activity[0] = 'input_active'
+    clock.later(60)
+    coach.tick(True)
+    assert len(said) == 1
+
+
+def test_late_night_minutes_do_not_count_toward_the_daytime_thirty(tmp_path):
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path, clock)
+    seed(store)
+    store.put(TODAY, 'active_minutes', 60)
+    store.put(TODAY, 'late_minutes', 40)
+    coach.tick(True)
+    assert said == []
+    store.put(TODAY, 'active_minutes', 70)
+    coach.tick(True)
+    assert len(said) == 1
+
+
+def test_natural_answers_to_the_offer_count_as_yes(tmp_path):
+    for answer in ('sounds good', 'okay sounds good', "yes let's try it", "let's do it", 'Vision, yes'):
+        clock = Clock().at(0, 10)
+        store, said, coach = coach_for(tmp_path / answer.replace(' ', '_').replace("'", '').replace(',', ''), clock)
+        seed(store)
+        coach.tick(True)
+        assert coach.intercept(answer), answer
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path / 'negated', clock)
+    seed(store)
+    coach.tick(True)
+    assert coach.intercept("yes but not today") != "Here's one small step for today: one small commit on anything. Sound good?"

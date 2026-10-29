@@ -282,7 +282,10 @@ ACCEPTED = {'one small commit on anything': 'Good. One small commit, whenever yo
             FOCUS_STEP: "Good. I'll check in after twenty-five minutes.",
             'one small task for the Agent Room': 'Good. Queue one small task in the Agent Room when you are ready.'}
 SPEAK_FROM, SPEAK_UNTIL, MIN_ACTIVE = 8, 21, 30
-_YES = re.compile(r'(?:(?:hey|ok|okay) )?(?:vision )?(?:yes|yeah|yep|sure|okay|ok)(?: please| sure)?')
+# A yes starts the answer ("sounds good", "yes let's try it"); any negation later turns it down.
+_YES = re.compile(r"(?:(?:hey|ok|okay) )?(?:vision )?(?:yes|yeah|yep|sure|okay|ok|alright|sounds good|"
+                  r"let's do it|let's try it|go ahead)\b")
+_NEGATION = re.compile(r"\b(?:no|not|don't|never|later|nope)\b")
 _NOT_NOW = re.compile(r'(?:(?:hey|ok|okay) )?(?:vision )?(?:not now|no|nope|no thanks|not today)')
 
 
@@ -321,6 +324,7 @@ class SlumpCoach:
         self.clock = clock
         self.offer_window = offer_window
         self._last_sample = self._last_backfill = None
+        self._activity: str | None = None
         self.backfill_thread: threading.Thread | None = None
         self._offer: tuple[str, datetime] | None = None  # ('check_in' | 'plan', when)
         self._step = FOCUS_STEP
@@ -330,7 +334,8 @@ class SlumpCoach:
         now = self.clock()
         if self.sample and (self._last_sample is None or (now - self._last_sample).total_seconds() >= 60):
             self._last_sample = now
-            sample_minute(self.store, self.sample(), now)
+            self._activity = self.sample()
+            sample_minute(self.store, self._activity, now)
         if self.backfill_sources and (self._last_backfill is None
                                       or (now - self._last_backfill).total_seconds() >= 3600):
             self._last_backfill = now
@@ -358,7 +363,12 @@ class SlumpCoach:
         ladder = self.store.ladder()
         if ladder.last_day == today or not SPEAK_FROM <= now.hour < SPEAK_UNTIL:
             return
-        if self.store.days(today).get('active_minutes', {}).get(today, 0) < MIN_ACTIVE:
+        if self.sample is not None and self._activity != 'input_active':
+            return  # never speak to an empty room
+        minutes = self.store.days(today)
+        daytime = (minutes.get('active_minutes', {}).get(today, 0)
+                   - minutes.get('late_minutes', {}).get(today, 0))
+        if daytime < MIN_ACTIVE:
             return
         result = self._assessment(today)
         ladder.last_day = today
@@ -376,18 +386,23 @@ class SlumpCoach:
         self._step = choose_step(result.fired)
         if ladder.step == 0:
             ladder.step = 1
-            self._offer = ('check_in', now)
             self.announce(f'Lately I have noticed {_join([CHANGES[m] for m in result.fired])} than usual. '
-                          'Want a small plan for today?')
+                          'Want a small plan for today?', on_said=self._open_offer('check_in'))
         elif ladder.step == 1:
             ladder.step = 2
-            self._offer = ('plan', now)
-            self.announce(f"Here's one small step for today, if you'd like it: {self._step}. Want to try it?")
+            self.announce(f"Here's one small step for today, if you'd like it: {self._step}. Want to try it?",
+                          on_said=self._open_offer('plan'))
         elif ladder.step == 2 and ladder.slump_days >= 3 and not ladder.accepted:
             ladder.step = 3
             if self.notify:
                 self.notify(NUDGE_TEXT)
         self.store.save_ladder(ladder)
+
+    def _open_offer(self, kind: str):
+        """The answer window starts when the line is spoken, not when it is queued behind other notices."""
+        def opened() -> None:
+            self._offer = (kind, self.clock())
+        return opened
 
     def intercept(self, text: str) -> str | None:
         words = _words(text)
@@ -399,11 +414,11 @@ class SlumpCoach:
             return None
         if _NOT_NOW.fullmatch(words):
             self._offer = None
-            ladder = self.store.ladder()
-            ladder.paused_until = now.date() + timedelta(days=3)
-            self.store.save_ladder(ladder)
+            # A fresh ladder: after the pause the owner hears a check-in again, never a phone push first.
+            self.store.save_ladder(Ladder(last_day=self.store.ladder().last_day,
+                                          paused_until=now.date() + timedelta(days=3)))
             return "Okay. I'll leave it for a few days."
-        if not _YES.fullmatch(words):
+        if not _YES.match(words) or _NEGATION.search(words):
             return None
         ladder = self.store.ladder()
         if offer[0] == 'check_in':
