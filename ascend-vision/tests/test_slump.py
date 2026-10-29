@@ -1,6 +1,7 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
-from assistant.slump import Ladder, SlumpStore, assess
+from assistant.slump import (Ladder, SlumpStore, assess, backfill, focus_days, room_session_days,
+                             sample_minute)
 
 TODAY = date(2026, 10, 29)
 
@@ -83,3 +84,93 @@ def test_store_keeps_the_ladder(tmp_path):
     ladder = Ladder(step=2, last_day=TODAY, slump_days=2, paused_until=TODAY + timedelta(days=3), accepted=True)
     store.save_ladder(ladder)
     assert SlumpStore(tmp_path / 'slump.db').ladder() == ladder
+
+
+def _focus_db(path, rows):
+    import sqlite3
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE sessions (id INTEGER PRIMARY KEY, start_time TEXT NOT NULL, end_time TEXT, mode TEXT NOT NULL)")
+        db.executemany('INSERT INTO sessions (start_time, end_time, mode) VALUES (?, ?, ?)', rows)
+    db.close()
+
+
+def _local(day, hour, minute=0):
+    return datetime(day.year, day.month, day.day, hour, minute).astimezone()
+
+
+def test_minutes_count_active_time_and_late_time(tmp_path):
+    store = SlumpStore(tmp_path / 'slump.db')
+    sample_minute(store, 'input_active', datetime(2026, 10, 29, 2, 10))
+    sample_minute(store, 'input_active', datetime(2026, 10, 29, 14, 0))
+    sample_minute(store, 'input_idle', datetime(2026, 10, 29, 3, 0))
+    sample_minute(store, 'input_idle', datetime(2026, 10, 30, 10, 0))
+    assert store.days(TODAY) == {
+        'active_minutes': {TODAY: 2, TODAY + timedelta(days=1): 0},
+        'late_minutes': {TODAY: 1, TODAY + timedelta(days=1): 0},
+    }
+
+
+def test_backfill_puts_github_and_room_days(tmp_path):
+    store = SlumpStore(tmp_path / 'slump.db')
+    yesterday = TODAY - timedelta(days=1)
+    calendar = {yesterday: 3, TODAY - timedelta(days=2): 0}
+    room = {yesterday: 2}
+    backfill(store, today=TODAY, calendar=calendar, room_sessions=room)
+    days = store.days(TODAY - timedelta(days=10))
+    assert days['commits'] == calendar
+    assert days['room_sessions'] == room
+
+
+def test_an_unreachable_source_leaves_stored_days_alone(tmp_path):
+    store = SlumpStore(tmp_path / 'slump.db')
+    yesterday = TODAY - timedelta(days=1)
+    store.put(yesterday, 'commits', 5)
+    store.put(yesterday, 'room_sessions', 2)
+    backfill(store, today=TODAY, calendar=None, room_sessions=None,
+             focus_db=tmp_path / 'missing.db', distraction_db=tmp_path / 'missing2.db')
+    assert store.days(yesterday) == {'commits': {yesterday: 5}, 'room_sessions': {yesterday: 2}}
+
+
+def test_focus_minutes_sum_focus_sessions_per_local_day(tmp_path):
+    path = tmp_path / 'phone_watch.db'
+    yesterday = TODAY - timedelta(days=1)
+    start = _local(yesterday, 9)
+    _focus_db(path, [
+        (start.isoformat(), (start + timedelta(minutes=25)).isoformat(), 'focus'),
+        ((start + timedelta(hours=2)).isoformat(), (start + timedelta(hours=2, minutes=50)).isoformat(), 'focus'),
+        ((start + timedelta(hours=4)).isoformat(), (start + timedelta(hours=6)).isoformat(), 'background'),
+        ((start + timedelta(hours=7)).isoformat(), None, 'focus'),
+    ])
+    assert focus_days(path) == {yesterday: 75}
+    assert focus_days(tmp_path / 'missing.db') == {}
+
+
+def test_distraction_days_fill_quiet_days_with_zero(tmp_path):
+    import sqlite3
+    path = tmp_path / 'distractions.db'
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE distraction_time (day TEXT NOT NULL, site TEXT NOT NULL, seconds REAL NOT NULL)')
+        db.executemany('INSERT INTO distraction_time VALUES (?, ?, ?)', [
+            ((TODAY - timedelta(days=3)).isoformat(), 'youtube.com', 600),
+            ((TODAY - timedelta(days=3)).isoformat(), 'reddit.com', 300),
+        ])
+    db.close()
+    store = SlumpStore(tmp_path / 'slump.db')
+    backfill(store, today=TODAY, distraction_db=path)
+    assert store.days(TODAY - timedelta(days=5))['distraction_minutes'] == {
+        TODAY - timedelta(days=3): 15, TODAY - timedelta(days=2): 0, TODAY - timedelta(days=1): 0}
+
+
+def test_room_session_days_use_local_dates_and_fill_quiet_days():
+    yesterday = TODAY - timedelta(days=1)
+    late = _local(yesterday, 23, 30)
+    payload = {'sessions': [
+        {'createdAt': late.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')},
+        {'createdAt': _local(TODAY - timedelta(days=3), 10).astimezone(timezone.utc).isoformat()},
+        {'createdAt': 'garbage'},
+        {},
+    ]}
+    assert room_session_days(payload, today=TODAY) == {
+        TODAY - timedelta(days=3): 1, TODAY - timedelta(days=2): 0, yesterday: 1}
+    assert room_session_days({'sessions': []}, today=TODAY) == {}
+    assert room_session_days({'nope': 1}, today=TODAY) == {}

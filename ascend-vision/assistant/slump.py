@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from contextlib import closing
 from dataclasses import asdict, dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
 import sqlite3
 from statistics import mean, median
+import urllib.request
 
 METRICS = ('commits', 'room_sessions', 'active_minutes', 'late_minutes', 'focus_minutes',
            'distraction_minutes')
@@ -136,6 +137,115 @@ class SlumpStore:
         with self._connect() as db:
             db.execute('INSERT INTO ladder (id, json) VALUES (1, ?) '
                        'ON CONFLICT (id) DO UPDATE SET json = excluded.json', (_ladder_json(ladder),))
+
+
+def sample_minute(store: SlumpStore, sample: str, now: datetime) -> None:
+    """One minute of desktop activity. Idle minutes still write 0, so a day Vision ran is real data."""
+    active = 1 if sample == 'input_active' else 0
+    store.add(now.date(), 'active_minutes', active)
+    store.add(now.date(), 'late_minutes', active if now.hour < 5 else 0)
+
+
+def _local_date(stamp: str) -> date | None:
+    try:
+        moment = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+    except (AttributeError, ValueError):
+        return None
+    return (moment.astimezone() if moment.tzinfo else moment).date()
+
+
+def _fill_quiet_days(counts: dict[date, float], today: date) -> dict[date, float]:
+    """Zero for each day from the first recorded day to yesterday that has no record."""
+    if not counts:
+        return {}
+    day, filled = min(counts), dict(counts)
+    while day < today:
+        filled.setdefault(day, 0)
+        day += timedelta(days=1)
+    return filled
+
+
+def room_session_days(payload: dict, *, today: date) -> dict[date, int]:
+    sessions = payload.get('sessions') if isinstance(payload, dict) else None
+    counts: dict[date, int] = {}
+    for session in sessions if isinstance(sessions, list) else []:
+        day = _local_date(session.get('createdAt')) if isinstance(session, dict) else None
+        if day is not None:
+            counts[day] = counts.get(day, 0) + 1
+    return _fill_quiet_days(counts, today)
+
+
+def read_room_sessions(base_url: str) -> dict | None:
+    """Hub's session list, or None when Hub or the room is unreachable."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"{base_url.rstrip('/')}/api/room/sessions", timeout=3.0) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+        return payload if isinstance(payload, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _read_only(path) -> sqlite3.Connection | None:
+    path = Path(path)
+    if not path.is_file():
+        return None
+    return sqlite3.connect(f'{path.resolve().as_uri()}?mode=ro', uri=True, timeout=5)
+
+
+def focus_days(path) -> dict[date, float]:
+    """Minutes of finished focus sessions, keyed by the local date they started."""
+    connection = _read_only(path)
+    if connection is None:
+        return {}
+    with closing(connection):
+        try:
+            rows = connection.execute(
+                "SELECT start_time, end_time FROM sessions WHERE mode = 'focus' AND end_time IS NOT NULL").fetchall()
+        except sqlite3.Error:
+            return {}
+    minutes: dict[date, float] = {}
+    for start, end in rows:
+        try:
+            began = datetime.fromisoformat(start)
+            length = (datetime.fromisoformat(end) - began).total_seconds() / 60
+        except (TypeError, ValueError):
+            continue
+        day = (began.astimezone() if began.tzinfo else began).date()
+        minutes[day] = minutes.get(day, 0) + max(0.0, length)
+    return minutes
+
+
+def distraction_days(path, *, today: date) -> dict[date, float]:
+    connection = _read_only(path)
+    if connection is None:
+        return {}
+    with closing(connection):
+        try:
+            rows = connection.execute('SELECT day, SUM(seconds) FROM distraction_time GROUP BY day').fetchall()
+        except sqlite3.Error:
+            return {}
+    minutes: dict[date, float] = {}
+    for day, seconds in rows:
+        try:
+            minutes[date.fromisoformat(day)] = (seconds or 0) / 60
+        except (TypeError, ValueError):
+            continue
+    return _fill_quiet_days(minutes, today)
+
+
+def backfill(store: SlumpStore, *, today: date, calendar: dict[date, int] | None = None,
+             room_sessions: dict[date, int] | None = None, focus_db=None, distraction_db=None) -> None:
+    """Put each source's days. A source that is None (unreachable) or missing leaves stored days alone."""
+    oldest = today - timedelta(days=KEEP_DAYS)
+    sources = (('commits', calendar), ('room_sessions', room_sessions),
+               ('focus_minutes', focus_days(focus_db) if focus_db else None),
+               ('distraction_minutes', distraction_days(distraction_db, today=today) if distraction_db else None))
+    for metric, days in sources:
+        for day, value in (days or {}).items():
+            if oldest <= day <= today:
+                store.put(day, metric, value)
+    store.prune(today)
 
 
 class _Connection:
