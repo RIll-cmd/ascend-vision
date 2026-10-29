@@ -1,7 +1,8 @@
 from datetime import date, datetime, timedelta, timezone
+import re
 
-from assistant.slump import (Ladder, SlumpStore, assess, backfill, focus_days, room_session_days,
-                             sample_minute)
+from assistant.slump import (NUDGE_TEXT, Ladder, SlumpCoach, SlumpStore, assess, backfill, focus_days,
+                             room_session_days, sample_minute)
 
 TODAY = date(2026, 10, 29)
 
@@ -174,3 +175,213 @@ def test_room_session_days_use_local_dates_and_fill_quiet_days():
         TODAY - timedelta(days=3): 1, TODAY - timedelta(days=2): 0, yesterday: 1}
     assert room_session_days({'sessions': []}, today=TODAY) == {}
     assert room_session_days({'nope': 1}, today=TODAY) == {}
+
+
+class Clock:
+    def __init__(self):
+        self.moment = None
+
+    def __call__(self):
+        return self.moment
+
+    def at(self, day_offset, hour, minute=0):
+        day = TODAY + timedelta(days=day_offset)
+        self.moment = datetime(day.year, day.month, day.day, hour, minute)
+        return self
+
+    def later(self, seconds):
+        self.moment += timedelta(seconds=seconds)
+        return self
+
+
+def seed(store, *, high=None, low=None):
+    """A usual stretch before TODAY-3, then a low stretch from TODAY-3 to TODAY+5 with an hour at the PC."""
+    high = high or {'commits': 4, 'active_minutes': 300}
+    low = low or {'commits': 1, 'active_minutes': 60}
+    for offset in range(-20, 6):
+        values = high if offset < -3 else {**low, 'active_minutes': max(60, low.get('active_minutes', 60))}
+        for metric, value in values.items():
+            store.put(TODAY + timedelta(days=offset), metric, value)
+
+
+def coach_for(path, clock, **kwargs):
+    store = SlumpStore(path / 'slump.db')
+    said = []
+    return store, said, SlumpCoach(store, announce=said.append, clock=clock, **kwargs)
+
+
+def test_check_in_waits_for_daytime_and_thirty_active_minutes(tmp_path):
+    clock = Clock().at(0, 7, 30)
+    store, said, coach = coach_for(tmp_path, clock)
+    seed(store, high={'commits': 4, 'room_sessions': 2, 'active_minutes': 300},
+         low={'commits': 1, 'room_sessions': 0})
+    store.put(TODAY, 'active_minutes', 20)
+    coach.tick(True)
+    clock.at(0, 9)
+    coach.tick(True)
+    assert said == []
+    store.put(TODAY, 'active_minutes', 30)
+    coach.tick(False)
+    assert said == []
+    coach.tick(True)
+    assert len(said) == 1 and said[0].endswith('Want a small plan for today?')
+    assert 'fewer commits' in said[0] and 'fewer Agent Room sessions' in said[0]
+    clock.at(1, 21, 5)
+    coach.tick(True)
+    assert len(said) == 1
+
+
+def test_at_most_one_unprompted_line_per_day(tmp_path):
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path, clock)
+    seed(store)
+    for _ in range(5):
+        coach.tick(True)
+        clock.later(3600)
+    assert len(said) == 1
+
+
+def test_yes_to_the_check_in_offers_one_small_step_from_what_dropped(tmp_path):
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path, clock)
+    seed(store)
+    coach.tick(True)
+    assert 'one small commit on anything' in coach.intercept('Yes please')
+    assert coach.intercept('sure').startswith('Good.')
+    assert store.ladder().accepted
+
+
+def test_a_focus_plan_checks_in_after_twenty_five_minutes(tmp_path):
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path, clock)
+    seed(store, high={'room_sessions': 2, 'active_minutes': 300}, low={'room_sessions': 0, 'active_minutes': 60})
+    coach.tick(True)
+    assert 'focus block' in coach.intercept('yes')
+    assert coach.intercept('okay') == "Good. I'll check in after twenty-five minutes."
+    clock.later(24 * 60)
+    coach.tick(True)
+    assert len(said) == 1
+    clock.later(60)
+    coach.tick(True)
+    assert said[-1] == "That's twenty-five minutes. Nice work."
+
+
+def test_the_next_slump_day_offers_the_step_without_asking(tmp_path):
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path, clock)
+    seed(store)
+    coach.tick(True)
+    clock.at(1, 10)
+    coach.tick(True)
+    assert len(said) == 2 and 'one small commit on anything' in said[1]
+    assert coach.intercept('yes').startswith('Good.')
+
+
+def test_the_third_slump_day_without_acceptance_sends_one_phone_nudge(tmp_path):
+    pushed = []
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path, clock, notify=pushed.append)
+    seed(store)
+    for day in range(5):
+        clock.at(day, 10)
+        coach.tick(True)
+    assert pushed == ['Ascend: a small plan is waiting for you on the PC.'] == [NUDGE_TEXT]
+    assert len(said) == 2
+
+
+def test_no_nudge_when_phone_nudge_is_off_or_a_plan_was_accepted(tmp_path):
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path / 'off', clock, notify=None)
+    seed(store)
+    for day in range(4):
+        clock.at(day, 10)
+        coach.tick(True)
+    assert len(said) == 2
+
+    pushed = []
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path / 'accepted', clock, notify=pushed.append)
+    seed(store)
+    coach.tick(True)
+    coach.intercept('yes')
+    coach.intercept('yes')
+    for day in range(1, 4):
+        clock.at(day, 10)
+        coach.tick(True)
+    assert pushed == [] and len(said) == 1
+
+
+def test_two_calm_days_reset_the_ladder(tmp_path):
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path, clock)
+    seed(store)
+    coach.tick(True)
+    assert store.ladder().step == 1
+    for offset in range(-3, 6):
+        store.put(TODAY + timedelta(days=offset), 'commits', 4)
+    clock.at(1, 10)
+    coach.tick(True)
+    assert store.ladder().step == 1
+    clock.at(2, 10)
+    coach.tick(True)
+    assert store.ladder().step == 0 and len(said) == 1
+
+
+def test_not_now_pauses_three_days(tmp_path):
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path, clock)
+    seed(store)
+    coach.tick(True)
+    assert coach.intercept('Not now.') == "Okay. I'll leave it for a few days."
+    for day in (1, 2):
+        clock.at(day, 10)
+        coach.tick(True)
+    assert len(said) == 1
+    clock.at(3, 10)
+    coach.tick(True)
+    assert len(said) == 2
+
+
+def test_a_late_yes_is_not_taken(tmp_path):
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path, clock)
+    seed(store)
+    coach.tick(True)
+    clock.later(121)
+    assert coach.intercept('yes') is None
+    assert coach.intercept('not now') is None
+    assert coach.intercept('what is the weather') is None
+
+
+def test_how_am_i_doing_answers_any_time(tmp_path):
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path, clock)
+    assert coach.intercept('Vision, how am I doing?') == "I'm still learning your normal week."
+    seed(store)
+    answer = coach.intercept('how am i doing lately')
+    assert 'commits' in answer and '4' in answer and '1' in answer
+
+
+def test_unprompted_lines_hold_no_numbers(tmp_path):
+    clock = Clock().at(0, 10)
+    pushed = []
+    store, said, coach = coach_for(tmp_path, clock, notify=pushed.append)
+    seed(store, high={'commits': 4, 'active_minutes': 300, 'late_minutes': 0, 'focus_minutes': 90,
+                      'room_sessions': 2, 'distraction_minutes': 5},
+         low={'commits': 0, 'active_minutes': 60, 'late_minutes': 90, 'focus_minutes': 0,
+              'room_sessions': 0, 'distraction_minutes': 120})
+    for day in range(4):
+        clock.at(day, 10)
+        coach.tick(True)
+    store.save_ladder(Ladder())
+    seed(store, high={'commits': 4, 'room_sessions': 2, 'active_minutes': 300},
+         low={'commits': 4, 'room_sessions': 0, 'active_minutes': 60})
+    clock.at(4, 10)
+    coach.tick(True)
+    coach.intercept('yes')
+    coach.intercept('yes')
+    clock.later(25 * 60)
+    coach.tick(True)
+    assert len(said) >= 4 and pushed
+    for line in said + pushed:
+        assert not re.search(r'\d', line), line

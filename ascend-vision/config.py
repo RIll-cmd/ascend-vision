@@ -493,6 +493,18 @@ class AgentRoomConfig:
 
 
 @dataclass(frozen=True)
+class SlumpConfig:
+    """Notice a slump against the owner's own baseline and offer a gentle check-in."""
+    enabled: bool = True
+    phone_nudge: bool = True  # One generic ntfy push through the Agent Room on the third slump day.
+
+    def __post_init__(self):
+        for name in ('enabled', 'phone_nudge'):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f'slump.{name} must be a YAML boolean')
+
+
+@dataclass(frozen=True)
 class WeatherConfig:
     """Daily weather briefing from Open-Meteo (free, no key) for the owner's places."""
     enabled: bool = True
@@ -768,6 +780,7 @@ class Config:
     away_mode: AwayModeConfig = field(default_factory=AwayModeConfig)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     agent_room: AgentRoomConfig = field(default_factory=AgentRoomConfig)
+    slump: SlumpConfig = field(default_factory=SlumpConfig)
     github: GitHubCoachConfig = field(default_factory=GitHubCoachConfig)
     phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
     browser_automation: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
@@ -794,7 +807,7 @@ def load_config(path: Path) -> Config:
                  'screen_audit': ScreenAuditConfig, 'phone_chat': PhoneChatConfig,
                  'distraction_watch': DistractionWatchConfig, 'away_mode': AwayModeConfig,
                  'weather': WeatherConfig, 'github': GitHubCoachConfig, 'agent_room': AgentRoomConfig,
-                 'browser_automation': BrowserAutomationConfig}
+                 'slump': SlumpConfig, 'browser_automation': BrowserAutomationConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')
     values = {}

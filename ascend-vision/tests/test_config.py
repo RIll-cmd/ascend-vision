@@ -257,3 +257,14 @@ def test_agent_room_wake_word_and_phone_voice_transcriber_are_validated():
     assert PhoneChatConfig().voice_transcriber == 'whisper'
     with pytest.raises(ValueError, match='phone_chat.voice_transcriber'):
         PhoneChatConfig(voice_transcriber='cloud')
+
+
+def test_slump_config_defaults_and_validation():
+    from config import Config, SlumpConfig
+
+    assert SlumpConfig() == SlumpConfig(enabled=True, phone_nudge=True)
+    assert Config().slump == SlumpConfig()
+    with pytest.raises(ValueError, match='slump.enabled'):
+        SlumpConfig(enabled='no')
+    with pytest.raises(ValueError, match='slump.phone_nudge'):
+        SlumpConfig(phone_nudge=1)

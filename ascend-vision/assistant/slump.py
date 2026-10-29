@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 import json
 from pathlib import Path
+import re
 import sqlite3
 from statistics import mean, median
 import urllib.request
@@ -263,3 +264,154 @@ class _Connection:
                 self.connection.commit()
             else:
                 self.connection.rollback()
+
+
+NUDGE_TEXT = 'Ascend: a small plan is waiting for you on the PC.'
+FOCUS_STEP = 'one twenty-five minute focus block'
+CHANGES = {'commits': 'fewer commits', 'room_sessions': 'fewer Agent Room sessions',
+           'active_minutes': 'shorter days at the PC', 'late_minutes': 'later nights',
+           'focus_minutes': 'less focus time', 'distraction_minutes': 'more time on distracting sites'}
+NAMES = {'commits': 'commits', 'room_sessions': 'Agent Room sessions', 'active_minutes': 'minutes at the PC',
+         'late_minutes': 'minutes up after midnight', 'focus_minutes': 'focus minutes',
+         'distraction_minutes': 'minutes on distracting sites'}
+ACCEPTED = {'one small commit on anything': 'Good. One small commit, whenever you are ready.',
+            FOCUS_STEP: "Good. I'll check in after twenty-five minutes.",
+            'one small task for the Agent Room': 'Good. Queue one small task in the Agent Room when you are ready.'}
+SPEAK_FROM, SPEAK_UNTIL, MIN_ACTIVE = 8, 21, 30
+_YES = re.compile(r'(?:(?:hey|ok|okay) )?(?:vision )?(?:yes|yeah|yep|sure|okay|ok)(?: please| sure)?')
+_NOT_NOW = re.compile(r'(?:(?:hey|ok|okay) )?(?:vision )?(?:not now|no|nope|no thanks|not today)')
+
+
+def _words(text: str) -> str:
+    return ' '.join(re.sub(r"[^a-z' ]", ' ', text.lower()).split())
+
+
+def _join(parts: list[str]) -> str:
+    return parts[0] if len(parts) == 1 else f"{', '.join(parts[:-1])} and {parts[-1]}"
+
+
+def _number(value: float) -> str:
+    return f'{value:.0f}' if value >= 10 or value == round(value) else f'{value:.1f}'
+
+
+def choose_step(fired: tuple[str, ...]) -> str:
+    if 'commits' in fired:
+        return 'one small commit on anything'
+    if 'focus_minutes' in fired or 'active_minutes' in fired:
+        return FOCUS_STEP
+    if 'room_sessions' in fired:
+        return 'one small task for the Agent Room'
+    return FOCUS_STEP
+
+
+class SlumpCoach:
+    """Samples activity, backfills signals hourly, and walks the check-in ladder at most once a day."""
+
+    def __init__(self, store: SlumpStore, *, announce, sample=None, backfill_sources=None, notify=None,
+                 clock=datetime.now, offer_window: float = 120.0):
+        self.store = store
+        self.announce = announce
+        self.sample = sample
+        self.backfill_sources = backfill_sources
+        self.notify = notify
+        self.clock = clock
+        self.offer_window = offer_window
+        self._last_sample = self._last_backfill = None
+        self._offer: tuple[str, datetime] | None = None  # ('check_in' | 'plan', when)
+        self._step = FOCUS_STEP
+        self._focus_due: datetime | None = None
+
+    def tick(self, owner_available: bool) -> None:
+        now = self.clock()
+        if self.sample and (self._last_sample is None or (now - self._last_sample).total_seconds() >= 60):
+            self._last_sample = now
+            sample_minute(self.store, self.sample(), now)
+        if self.backfill_sources and (self._last_backfill is None
+                                      or (now - self._last_backfill).total_seconds() >= 3600):
+            self._last_backfill = now
+            backfill(self.store, today=now.date(), **self.backfill_sources())
+        if self._focus_due and now >= self._focus_due:
+            self._focus_due = None
+            self.announce("That's twenty-five minutes. Nice work.")
+        if owner_available:
+            self._climb(now)
+
+    def _assessment(self, today: date) -> Assessment:
+        return assess(self.store.days(today - timedelta(days=RECENT_DAYS + BASELINE_DAYS)), today)
+
+    def _climb(self, now: datetime) -> None:
+        today = now.date()
+        ladder = self.store.ladder()
+        if ladder.last_day == today or not SPEAK_FROM <= now.hour < SPEAK_UNTIL:
+            return
+        if self.store.days(today).get('active_minutes', {}).get(today, 0) < MIN_ACTIVE:
+            return
+        result = self._assessment(today)
+        ladder.last_day = today
+        if not result.slump:
+            ladder.calm_days += 1
+            if ladder.calm_days >= 2:
+                ladder = Ladder(last_day=today, paused_until=ladder.paused_until)
+            self.store.save_ladder(ladder)
+            return
+        ladder.calm_days = 0
+        if ladder.paused_until and today < ladder.paused_until:
+            self.store.save_ladder(ladder)
+            return
+        ladder.slump_days += 1
+        self._step = choose_step(result.fired)
+        if ladder.step == 0:
+            ladder.step = 1
+            self._offer = ('check_in', now)
+            self.announce(f'Lately I have noticed {_join([CHANGES[m] for m in result.fired])} than usual. '
+                          'Want a small plan for today?')
+        elif ladder.step == 1:
+            ladder.step = 2
+            self._offer = ('plan', now)
+            self.announce(f"Here's one small step for today, if you'd like it: {self._step}. Want to try it?")
+        elif ladder.step == 2 and ladder.slump_days >= 3 and not ladder.accepted:
+            ladder.step = 3
+            if self.notify:
+                self.notify(NUDGE_TEXT)
+        self.store.save_ladder(ladder)
+
+    def intercept(self, text: str) -> str | None:
+        words = _words(text)
+        if re.search(r'\bhow am i doing\b', words):
+            return self._summary()
+        now = self.clock()
+        offer = self._offer
+        if not offer or (now - offer[1]).total_seconds() > self.offer_window:
+            return None
+        if _NOT_NOW.fullmatch(words):
+            self._offer = None
+            ladder = self.store.ladder()
+            ladder.paused_until = now.date() + timedelta(days=3)
+            self.store.save_ladder(ladder)
+            return "Okay. I'll leave it for a few days."
+        if not _YES.fullmatch(words):
+            return None
+        ladder = self.store.ladder()
+        if offer[0] == 'check_in':
+            ladder.step = max(ladder.step, 2)
+            self.store.save_ladder(ladder)
+            self._offer = ('plan', now)
+            return f"Here's one small step for today: {self._step}. Sound good?"
+        self._offer = None
+        ladder.accepted = True
+        self.store.save_ladder(ladder)
+        if self._step == FOCUS_STEP:
+            self._focus_due = now + timedelta(minutes=25)
+        return ACCEPTED[self._step]
+
+    def _summary(self) -> str:
+        result = self._assessment(self.clock().date())
+        if result.learning:
+            return "I'm still learning your normal week."
+        if not result.signals:
+            return "I don't have enough recent days to compare yet."
+        parts = [f'{NAMES[metric]} {_number(recent)} a day, usually {_number(baseline)}'
+                 for metric, (recent, baseline) in result.signals.items()]
+        verdict = (f"You've had {_join([CHANGES[m] for m in result.fired])} than usual."
+                   if result.fired else "You're close to your usual.")
+        return f"Over the last few days: {'; '.join(parts)}. {verdict}"
