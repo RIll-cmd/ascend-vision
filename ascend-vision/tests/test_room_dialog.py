@@ -161,3 +161,39 @@ def test_repo_results_can_be_merged_by_voice():
     assert dialog.observe(repo_gate)[0].endswith('Say merge, accept, or reject.')
     assert dialog.handle('merge it').text == 'Merge the result? Say yes to confirm.'
     assert dialog.handle('yes').action == RoomAction('gate', 'result', 'merge')
+
+
+def test_with_a_wake_word_stray_speech_is_ignored_and_the_window_stays_open_for_the_reply():
+    now = [0.0]
+    dialog = RoomDialog(clock=lambda: now[0], wake_word='vision')
+    assert dialog.observe(PLAN_GATE)[0].endswith('Say Vision, then approve, or change.')
+    assert dialog.handle('approve') is None
+    assert dialog.handle('Hey Vision, approve.').text == 'Approve the plan? Say yes to confirm.'
+    now[0] = 10.0
+    assert dialog.handle('yes').action == RoomAction('gate', 'plan', 'approve')
+
+
+def test_the_wake_word_alone_listens_and_the_window_closes_after_silence():
+    now = [0.0]
+    dialog = RoomDialog(clock=lambda: now[0], wake_word='vision', wake_window=20.0)
+    dialog.observe(PLAN_GATE)
+    assert dialog.handle('Vision.').text == "I'm listening."
+    now[0] = 30.0
+    assert dialog.handle('approve') is None
+    assert dialog.handle('vision change the plan to add a readme task').text == 'Send this change: add a readme task? Say yes to confirm.'
+
+
+def test_phone_answers_need_no_wake_word_but_cannot_merge_or_reject():
+    dialog = RoomDialog(wake_word='vision')
+    dialog.observe(RESULT_GATE)
+    assert dialog.handle('reject', remote=True).text == 'Reject is only taken at the computer, not from the phone.'
+    assert dialog.handle('accept', remote=True).text == 'Accept the result? Say yes to confirm.'
+    assert dialog.handle('yes', remote=True).action == RoomAction('gate', 'result', 'accept')
+
+
+def test_a_merge_asked_at_the_computer_is_not_confirmed_from_the_phone():
+    dialog = RoomDialog()
+    dialog.observe({**RESULT_GATE, 'attention': {**RESULT_GATE['attention'], 'decisions': ['merge', 'accept', 'reject']}})
+    assert dialog.handle('merge').text == 'Merge the result? Say yes to confirm.'
+    reply = dialog.handle('yes', remote=True)
+    assert reply.action is None and reply.text.startswith('That is only taken at the computer')

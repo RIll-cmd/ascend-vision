@@ -482,20 +482,38 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             resources.callback(notification_worker.stop)
             notification_worker.start()
             LOG.info('Companion notification worker started; dispatching generic push alerts outbound-only')
+        room_dialog = room_client = None  # Set up with the agent room below; phone answers read them late.
+
+        def answer_room(text, remote=False):
+            """Lines to say when a waiting agent room gate takes ``text``, else None."""
+            if room_dialog is None:
+                return None
+            reply = room_dialog.handle(text, remote=remote)
+            if reply is None:
+                return None
+            if reply.action is None:
+                return [reply.text]
+            ok, message = room_client.send(reply.action)
+            room_dialog.sent(ok)
+            return [reply.text, message]
+
         phone_chat_config = getattr(config, 'phone_chat', None)
         if phone_chat_config is not None and phone_chat_config.enabled:
             from assistant.phone_handler import PhoneMessageHandler
-            from integrations.phone_worker import GeminiAudioTranscriber, build_phone_worker
+            from integrations.phone_worker import GeminiAudioTranscriber, WhisperAudioTranscriber, build_phone_worker
 
             phone_owner_id = os.getenv(phone_chat_config.owner_id_env, '').strip()
             audio_transcriber = None
-            if phone_chat_config.voice_upload_enabled:
+            if phone_chat_config.voice_upload_enabled and phone_chat_config.voice_transcriber == 'gemini':
                 audio_transcriber = GeminiAudioTranscriber(
                     api_key=os.getenv(config.llm.gemini_api_key_env, '').strip().split(',')[0].strip(),
                     model=config.llm.gemini_model,
                 )
-            phone_handler = PhoneMessageHandler(assistant_service, owner_id=phone_owner_id,
-                                                audio_transcriber=audio_transcriber)
+            elif phone_chat_config.voice_upload_enabled:
+                audio_transcriber = WhisperAudioTranscriber(config.voice_commands)
+            phone_handler = PhoneMessageHandler(
+                assistant_service, owner_id=phone_owner_id, audio_transcriber=audio_transcriber,
+                room_answer=lambda text: ' '.join(answer_room(text, remote=True) or ()) or None)
             phone_worker = build_phone_worker(phone_chat_config, phone_handler)
             if phone_worker is None:
                 raise RuntimeError('Enabled phone chat did not create its worker')
@@ -727,12 +745,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 state_path=Path(config.storage.database).parent / 'weather_state.json',
             )
 
-        room_dialog = room_client = None
         agent_room_config = getattr(config, 'agent_room', None)
         if agent_room_config is not None and agent_room_config.enabled:
             from assistant.room_dialog import RoomDialog
             from integrations.agent_room import RoomClient, RoomWatcher
-            room_dialog = RoomDialog()
+            room_dialog = RoomDialog(wake_word=agent_room_config.wake_word)
             room_client = RoomClient(agent_room_config.base_url)
             room_watcher = RoomWatcher(room_client, room_dialog, announce_paced, agent_room_config.poll_seconds)
             resources.callback(room_watcher.close)
@@ -872,15 +889,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
 
         def on_unmatched_speech(text: str):
             # A waiting agent room gate gets first look, so "approve" or "option two" reaches it.
-            if room_dialog is not None:
-                reply = room_dialog.handle(text)
-                if reply is not None:
-                    announce_local(reply.text)
-                    if reply.action is not None:
-                        ok, message = room_client.send(reply.action)
-                        room_dialog.sent(ok)
-                        announce_local(message)
-                    return
+            lines = answer_room(text)
+            if lines is not None:
+                for line in lines:
+                    announce_local(line)
+                return
             if parse_status_intent(text) is not None:
                 route_chat(text)
                 return

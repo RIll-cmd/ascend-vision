@@ -27,6 +27,8 @@ VERBS = {'approve': ('approve', 'approved', 'looks good', 'go ahead', 'sounds go
          'retry': ('retry', 'try again'),
          'stop': ('stop', 'end it')}
 CHANGE = re.compile(r'^(?:please\s+)?(?:change|revise|edit)\b(?:\s+(?:it|the\s+(?:plan|roles)))?(?:\s+(?:to|so that|so))?\s*(?P<rest>.*)$')
+# Hub's own phone answers never merge or reject either; those stay at the computer.
+REMOTE_BLOCKED = {'merge', 'reject'}
 
 
 @dataclass(frozen=True)
@@ -76,8 +78,17 @@ def _cut(text: str) -> str:
 
 
 class RoomDialog:
-    def __init__(self, clock=time.monotonic, remind_after: float = 600.0):
+    def __init__(self, clock=time.monotonic, remind_after: float = 600.0, wake_word: str = '',
+                 wake_window: float = 20.0):
         self._clock, self._remind_after = clock, remind_after
+        # With a wake word, spoken answers count only after it; each answer keeps the window open.
+        self._wake = _words(wake_word)
+        self._wake_pattern = re.compile(
+            r"^\W*(?:(?:hey|hi|ok|okay)\W+)?" + r"\W+".join(map(re.escape, self._wake.split())) + r"\b\W*",
+            re.IGNORECASE) if self._wake else None
+        self._wake_window = wake_window
+        self._woken_at = float('-inf')
+        self._remote = False
         self._since = 0.0
         self._reminded = False
         self._last_line = ''
@@ -113,10 +124,21 @@ class RoomDialog:
                 lines.append(f'Reminder: the agents are still waiting for you {self._waiting_for()}. {self._prompt()}')
             return lines
 
-    def handle(self, text: str) -> RoomReply | None:
+    def handle(self, text: str, *, remote: bool = False) -> RoomReply | None:
+        """``remote`` is a typed or recorded phone message: no wake word, and no merge or reject."""
         with self._lock:
             if self._step in ('idle', 'sending', 'done') or not self._attention:
                 return None
+            self._remote = remote
+            if self._wake_pattern is not None and not remote:
+                woke = self._wake_pattern.match(text)
+                if woke:
+                    text = text[woke.end():]
+                elif self._clock() - self._woken_at > self._wake_window:
+                    return None
+                self._woken_at = self._clock()
+                if woke and not _words(text):
+                    return RoomReply("I'm listening.")
             said = _words(text)
             if not said:
                 return None
@@ -155,7 +177,7 @@ class RoomDialog:
     def _prompt(self) -> str:
         words = ['change' if d == 'revise' else d for d in self._attention.get('decisions', [])]
         listed = ', or '.join(words) if len(words) < 3 else f"{', '.join(words[:-1])}, or {words[-1]}"
-        return f'Say {listed}.'
+        return f'Say {self._wake.title()}, then {listed}.' if self._wake else f'Say {listed}.'
 
     def _subject(self) -> str:
         return 'the agent room' if self._attention.get('kind') == 'pause' else f"the {self._attention.get('gate')}"
@@ -180,6 +202,8 @@ class RoomDialog:
             return RoomReply(self._options_text())
         for decision in decisions:
             if len(said.split()) <= 5 and any(f' {phrase} ' in f' {said} ' for phrase in VERBS.get(decision, ())):
+                if self._remote and decision in REMOTE_BLOCKED:
+                    return RoomReply(f'{decision.capitalize()} is only taken at the computer, not from the phone.')
                 self._pending = self._action(decision)
                 self._step = 'confirm'
                 return RoomReply(f'{decision.capitalize()} {self._subject()}? Say yes to confirm.')
@@ -210,6 +234,9 @@ class RoomDialog:
         return RoomReply(f'Send this change: {note}? Say yes to confirm.')
 
     def _confirm(self, said: str) -> RoomReply:
+        if _yes(said) and self._remote and self._pending.decision in REMOTE_BLOCKED:
+            self._pending, self._step = None, 'ask'
+            return RoomReply(f'That is only taken at the computer, not from the phone. Nothing was sent. {self._prompt()}')
         if _yes(said):
             action, self._pending = self._pending, None
             self._step = 'sending'

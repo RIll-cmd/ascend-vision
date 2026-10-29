@@ -172,7 +172,7 @@ github:
   evening_hour: 20 # "One push keeps your streak alive" if nothing yet today.
 phone_chat:
   enabled: false # Enable only after all ASCEND_PHONE_* values are provisioned.
-  voice_upload_enabled: false # Explicit opt-in; recordings are sent to Google Gemini for transcription.
+  voice_upload_enabled: false # Explicit opt-in; faster-whisper transcribes recordings on this computer (voice_transcriber: gemini sends them to Google).
   poll_interval_seconds: 2.0
   lease_renew_interval_seconds: 20.0
   request_timeout_seconds: 15.0

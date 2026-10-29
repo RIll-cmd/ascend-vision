@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import dataclass
+import io
 from datetime import datetime, timezone
 import logging
 import os
@@ -307,6 +308,50 @@ def build_phone_worker(config, handler, *, environ=None, transport=None):
         lease_renew_interval_seconds=config.lease_renew_interval_seconds,
         shutdown_timeout_seconds=config.shutdown_timeout_seconds,
     )
+
+
+def _decode_audio(audio_data: bytes):
+    """16 kHz mono float32 samples. faster-whisper 1.2.1's own decoder fails on PyAV 19 (``metadata_errors``)."""
+    import av
+    import numpy as np
+
+    resampler = av.AudioResampler(format="s16", layout="mono", rate=16_000)
+    chunks = []
+    with av.open(io.BytesIO(audio_data), mode="r") as container:
+        for frame in container.decode(audio=0):
+            chunks.extend(f.to_ndarray() for f in resampler.resample(frame))
+        chunks.extend(f.to_ndarray() for f in resampler.resample(None))
+    if not chunks:
+        raise ValueError("audio payload has no sound")
+    return np.concatenate(chunks, axis=1).reshape(-1).astype(np.float32) / 32768.0
+
+
+class WhisperAudioTranscriber:
+    """Local faster-whisper transcription; the recording never leaves this computer.
+
+    It loads its own copy of the voice-command model on the first voice note, not at start-up.
+    """
+
+    def __init__(self, voice_config, *, model=None):
+        self._config, self._model = voice_config, model
+        self._lock = threading.Lock()
+
+    def transcribe(self, audio_data: bytes, mime_type: str) -> str:
+        if not isinstance(audio_data, bytes) or not audio_data or len(audio_data) > _MAX_AUDIO_BYTES:
+            raise ValueError("audio payload is invalid")
+        if mime_type not in _AUDIO_TYPES:
+            raise ValueError("audio format is unsupported")
+        with self._lock:
+            if self._model is None:
+                from faster_whisper import WhisperModel
+                c = self._config
+                self._model = WhisperModel(c.model_size, device=c.device, compute_type=c.compute_type,
+                                           cpu_threads=c.cpu_threads)
+            segments, _ = self._model.transcribe(_decode_audio(audio_data), language="en", beam_size=5)
+            transcript = " ".join(segment.text.strip() for segment in segments).strip()
+        if not transcript:
+            raise ValueError("Whisper transcription was empty")
+        return transcript[:4_001]
 
 
 class GeminiAudioTranscriber:

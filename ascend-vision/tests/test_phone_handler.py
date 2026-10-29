@@ -76,3 +76,15 @@ def test_phone_handler_blocks_memory_administration_without_calling_assistant(te
 
     assert "dashboard" in reply.text.lower()
     assert assistant.calls == []
+
+
+def test_a_waiting_agent_room_gate_takes_the_message_before_the_assistant():
+    assistant = RecordingAssistant()
+    asked = []
+    handler = PhoneMessageHandler(assistant, owner_id="owner-a",
+                                  room_answer=lambda text: asked.append(text) or ("Approve the plan? Say yes to confirm." if text == "approve" else None))
+
+    assert handler.handle("owner-a", "phone_pwa", "session-1", " approve ").text == "Approve the plan? Say yes to confirm."
+    assert handler.handle("owner-a", "phone_pwa", "session-1", "hello").text == "The assistant's typed reply."
+    assert asked == ["approve", "hello"]
+    assert [call[0] for call in assistant.calls] == ["hello"]

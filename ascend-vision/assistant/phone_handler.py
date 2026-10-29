@@ -26,7 +26,7 @@ class PhoneMessageHandler:
 
     def __init__(self, assistant_service: AssistantService, *, owner_id: str,
                  max_words: int = 25, allowed_channels: frozenset[str] = frozenset({"phone_pwa"}),
-                 audio_transcriber=None):
+                 audio_transcriber=None, room_answer=None):
         if not callable(getattr(assistant_service, "respond", None)):
             raise TypeError("assistant_service must provide respond")
         if not callable(getattr(assistant_service, "clear_session", None)):
@@ -42,6 +42,8 @@ class PhoneMessageHandler:
         self._max_words = max_words
         self._allowed_channels = allowed_channels
         self._audio_transcriber = audio_transcriber
+        # text -> spoken-style reply when an agent room gate takes the message, else None.
+        self._room_answer = room_answer
 
     def handle(self, owner_id: str, channel: PhoneChannel, session_id: str,
                text: str, *, remote_context: dict | None = None) -> AssistantReply:
@@ -51,6 +53,10 @@ class PhoneMessageHandler:
         normalized = text.strip()
         if _MEMORY_ADMIN.search(normalized):
             return AssistantReply(_MEMORY_ADMIN_REPLY, "offline")
+        if self._room_answer is not None:
+            answer = self._room_answer(normalized)
+            if answer:
+                return AssistantReply(answer, "offline")
         options = {}
         if remote_context is not None:
             if channel != "discord_dm":
@@ -69,7 +75,7 @@ class PhoneMessageHandler:
             raise RuntimeError("Phone audio transcription is not enabled")
         transcript = self._audio_transcriber.transcribe(audio_data, mime_type or "")
         if not isinstance(transcript, str) or not transcript.strip() or len(transcript) > 4_000:
-            raise ValueError("Gemini returned an empty or oversized transcript")
+            raise ValueError("The transcript was empty or oversized")
         return self.handle(owner_id, channel, session_id, transcript)
 
     def clear_session(self, owner_id: str, channel: PhoneChannel, session_id: str) -> None:

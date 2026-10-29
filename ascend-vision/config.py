@@ -477,10 +477,13 @@ class AgentRoomConfig:
     enabled: bool = True
     base_url: str = 'http://127.0.0.1:5173'
     poll_seconds: float = 3.0
+    wake_word: str = 'vision'  # Spoken gate answers count only after it; '' answers without one.
 
     def __post_init__(self):
         if type(self.enabled) is not bool:
             raise ValueError('agent_room.enabled must be a YAML boolean')
+        if not isinstance(self.wake_word, str) or not re.fullmatch(r"(?:[A-Za-z']+(?: [A-Za-z']+){0,2})?", self.wake_word.strip()):
+            raise ValueError('agent_room.wake_word must be up to three words of letters, or empty')
         from urllib.parse import urlsplit
         url = urlsplit(str(self.base_url))
         # Hub refuses non-loopback hosts for the room API; never send voice decisions anywhere else.
@@ -573,6 +576,7 @@ class PhoneChatConfig:
     """Opt-in outbound phone worker; credentials and URL are environment-only."""
     enabled: bool = False
     voice_upload_enabled: bool = False
+    voice_transcriber: str = 'whisper'  # 'whisper' stays on this computer; 'gemini' sends the recording to Google.
     core_url_env: str = 'ASCEND_PHONE_CORE_URL'
     worker_token_env: str = 'ASCEND_PHONE_WORKER_TOKEN'
     owner_id_env: str = 'ASCEND_PHONE_OWNER_ID'
@@ -588,6 +592,8 @@ class PhoneChatConfig:
             raise ValueError('phone_chat.voice_upload_enabled must be a YAML boolean')
         if self.voice_upload_enabled and not self.enabled:
             raise ValueError('phone_chat.voice_upload_enabled requires phone_chat.enabled')
+        if self.voice_transcriber not in ('whisper', 'gemini'):
+            raise ValueError('phone_chat.voice_transcriber must be whisper or gemini')
         for name in ('core_url_env', 'worker_token_env', 'owner_id_env'):
             if not isinstance(getattr(self, name), str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', getattr(self, name)):
                 raise ValueError(f'phone_chat.{name} must name an environment variable')

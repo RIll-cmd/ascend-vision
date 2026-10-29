@@ -43,6 +43,13 @@ Everything has a default. Edit `config.yaml` only if you need to:
 | Turn on desk/context awareness (off by default) | `companion_context.enabled: true` |
 | Run as a light assistant: voice, chat and agent announcements without the camera (about 620 MB instead of 1.1 GB) | `runtime.mode: assistant` (or start with `--assistant`) |
 | Stop Vision from announcing Ascend Hub's agent room | `agent_room.enabled: false` |
+| Answer agent room gates by voice without saying "Vision" first, or use another wake word | `agent_room.wake_word: ''` (or e.g. `'hey fairy'`) |
+| Send phone voice notes to Gemini instead of transcribing them on this computer | `phone_chat.voice_transcriber: gemini` |
+
+While a gate waits, say the wake word, then the answer ("Vision, approve"); the
+follow-up "yes" needs no wake word for 20 seconds. Phone messages and voice notes
+(`phone_chat.voice_upload_enabled`) can answer gates too, but merge and reject are
+only taken at the computer.
 
 Advanced and experimental features (phone chat, Discord, browser automation,
 proactive check-ins, Core link) are off by default and are described below.

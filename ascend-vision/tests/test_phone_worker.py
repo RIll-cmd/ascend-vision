@@ -274,3 +274,31 @@ def test_worker_start_stop_closes_the_outbound_client():
 
     assert client.closed.is_set()
     assert client.calls[0] == ("claim",)
+
+
+def test_whisper_audio_transcriber_transcribes_locally_from_memory():
+    import io
+    import wave
+    from types import SimpleNamespace
+    from integrations.phone_worker import WhisperAudioTranscriber
+
+    recording = io.BytesIO()
+    with wave.open(recording, "wb") as wav:  # One second of 8 kHz silence, as a phone might send.
+        wav.setnchannels(1), wav.setsampwidth(2), wav.setframerate(8_000)
+        wav.writeframes(b"\0\0" * 8_000)
+
+    class FakeModel:
+        def transcribe(self, audio, **options):
+            self.audio, self.options = audio, options
+            return [SimpleNamespace(text=" approve "), SimpleNamespace(text="the plan ")], None
+
+    model = FakeModel()
+    transcriber = WhisperAudioTranscriber(None, model=model)
+    assert transcriber.transcribe(recording.getvalue(), "audio/wav") == "approve the plan"
+    assert model.audio.dtype.name == "float32" and abs(len(model.audio) - 16_000) < 100
+    assert model.options["language"] == "en"
+    with pytest.raises(ValueError, match="unsupported"):
+        transcriber.transcribe(b"audio", "video/mp4")
+    model.transcribe = lambda audio, **options: ([], None)
+    with pytest.raises(ValueError, match="empty"):
+        transcriber.transcribe(recording.getvalue(), "audio/wav")

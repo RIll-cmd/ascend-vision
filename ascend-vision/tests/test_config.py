@@ -244,3 +244,16 @@ def test_browser_remote_scope_is_normalized_and_restricted():
         BrowserAutomationConfig(remote_scopes=[
             {'scope_id': 'account', 'origin': 'https://example.org', 'actions': []},
         ])
+
+
+def test_agent_room_wake_word_and_phone_voice_transcriber_are_validated():
+    from config import AgentRoomConfig, PhoneChatConfig
+
+    assert AgentRoomConfig().wake_word == 'vision'
+    assert AgentRoomConfig(wake_word='').wake_word == ''
+    assert AgentRoomConfig(wake_word='hey fairy').wake_word == 'hey fairy'
+    with pytest.raises(ValueError, match='agent_room.wake_word'):
+        AgentRoomConfig(wake_word='one two three four')
+    assert PhoneChatConfig().voice_transcriber == 'whisper'
+    with pytest.raises(ValueError, match='phone_chat.voice_transcriber'):
+        PhoneChatConfig(voice_transcriber='cloud')
