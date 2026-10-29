@@ -10,11 +10,15 @@ from contextlib import closing
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 import json
+import logging
 from pathlib import Path
 import re
 import sqlite3
 from statistics import mean, median
+import threading
 import urllib.request
+
+LOG = logging.getLogger(__name__)
 
 METRICS = ('commits', 'room_sessions', 'active_minutes', 'late_minutes', 'focus_minutes',
            'distraction_minutes')
@@ -317,6 +321,7 @@ class SlumpCoach:
         self.clock = clock
         self.offer_window = offer_window
         self._last_sample = self._last_backfill = None
+        self.backfill_thread: threading.Thread | None = None
         self._offer: tuple[str, datetime] | None = None  # ('check_in' | 'plan', when)
         self._step = FOCUS_STEP
         self._focus_due: datetime | None = None
@@ -329,12 +334,21 @@ class SlumpCoach:
         if self.backfill_sources and (self._last_backfill is None
                                       or (now - self._last_backfill).total_seconds() >= 3600):
             self._last_backfill = now
-            backfill(self.store, today=now.date(), **self.backfill_sources())
+            # The sources read the network; the caller's frame loop must never wait on them.
+            self.backfill_thread = threading.Thread(target=self._backfill, args=(now.date(),),
+                                                    name='slump-backfill', daemon=True)
+            self.backfill_thread.start()
         if self._focus_due and now >= self._focus_due:
             self._focus_due = None
             self.announce("That's twenty-five minutes. Nice work.")
         if owner_available:
             self._climb(now)
+
+    def _backfill(self, today: date) -> None:
+        try:
+            backfill(self.store, today=today, **self.backfill_sources())
+        except Exception as exc:
+            LOG.debug('Slump backfill skipped (%s)', type(exc).__name__)
 
     def _assessment(self, today: date) -> Assessment:
         return assess(self.store.days(today - timedelta(days=RECENT_DAYS + BASELINE_DAYS)), today)

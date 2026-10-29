@@ -385,3 +385,29 @@ def test_unprompted_lines_hold_no_numbers(tmp_path):
     assert len(said) >= 4 and pushed
     for line in said + pushed:
         assert not re.search(r'\d', line), line
+
+
+def test_tick_never_waits_for_a_slow_backfill(tmp_path):
+    import threading
+    release, done = threading.Event(), threading.Event()
+
+    def sources():
+        release.wait(5)
+        return {'calendar': {TODAY - timedelta(days=1): 3}}
+
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path, clock, backfill_sources=sources)
+    coach.tick(True)
+    coach.tick(True)
+    assert 'commits' not in store.days(TODAY - timedelta(days=5))
+    release.set()
+    coach.backfill_thread.join(5)
+    assert store.days(TODAY - timedelta(days=5))['commits'] == {TODAY - timedelta(days=1): 3}
+
+
+def test_a_failing_backfill_source_is_skipped(tmp_path):
+    clock = Clock().at(0, 10)
+    store, said, coach = coach_for(tmp_path, clock, backfill_sources=lambda: 1 / 0)
+    coach.tick(True)
+    coach.backfill_thread.join(5)
+    assert store.days(TODAY - timedelta(days=5)) == {}

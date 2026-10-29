@@ -45,11 +45,22 @@ Everything has a default. Edit `config.yaml` only if you need to:
 | Stop Vision from announcing Ascend Hub's agent room | `agent_room.enabled: false` |
 | Answer agent room gates by voice without saying "Vision" first, or use another wake word | `agent_room.wake_word: ''` (or e.g. `'hey fairy'`) |
 | Send phone voice notes to Gemini instead of transcribing them on this computer | `phone_chat.voice_transcriber: gemini` |
+| Stop slump check-ins | `slump.enabled: false` |
+| Keep slump check-ins but never push the phone | `slump.phone_nudge: false` |
 
 While a gate waits, say the wake word, then the answer ("Vision, approve"); the
 follow-up "yes" needs no wake word for 20 seconds. Phone messages and voice notes
 (`phone_chat.voice_upload_enabled`) can answer gates too, but merge and reject are
 only taken at the computer.
+
+Vision keeps a small daily record in `data/slump.db` for 90 days: your GitHub
+contributions, Agent Room sessions started, minutes active at the PC (and how many
+after midnight), focus-mode minutes and minutes on distracting sites. It compares the
+last three days with your own usual from the two weeks before. When two of them slip,
+it says so once, kindly, during the day, and offers one small step; on the third such
+day it can send one plain phone push through the Agent Room. Say "Vision, how am I
+doing?" any time, or "not now" to pause it for three days. Nothing new leaves the
+computer.
 
 Advanced and experimental features (phone chat, Discord, browser automation,
 proactive check-ins, Core link) are off by default and are described below.
