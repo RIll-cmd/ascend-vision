@@ -104,11 +104,15 @@ say (and when the screen changes), then writes `data/howto/<date>-<title>/guide.
 with numbered steps and those screenshots. Only the words you said go to the AI to tidy
 the steps (`show_me.ai_cleanup`); screenshots stay on this computer, so mind what is on
 screen. "cancel recording" throws it away; recording stops by itself after 30 minutes.
-It also saves a silent screen video (`recording.mp4`, 2 frames a second). When the title
-names one of your repos ("watch me deploy ascend hub"), the guide and screenshots are
-also copied to that repo's `docs/howto/<title>/` (not committed), and with the Agent
-Room on, a line pointing to it is added to that repo's Room project memory, so agents
-see it.
+It also saves a screen video of the monitor you work on (`recording.mp4`, H.264 at 2
+frames a second, with your narration as sound, so it plays in a browser or on GitHub)
+and, afterwards, a Whisper transcript with timestamps (`transcript.md`, made on this
+computer). When the title names one of your repos ("watch me deploy ascend hub"), or
+when you say "save it to ascend hub" within ten minutes, the guide and screenshots are
+copied to that repo's `docs/howto/<title>/` and, with the Agent Room on, a line pointing
+to it goes into that repo's Room project memory. Say "commit the guide" to commit just
+that folder (anything else you staged stays as it was), so Room agents get the file
+too. If Vision quits mid-recording, the draft guide and the video are kept.
 
 Once a week, during the day, Vision brings back one thing you left: a branch with
 unmerged commits untouched for two weeks, an extra worktree nobody committed to for two

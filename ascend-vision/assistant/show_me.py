@@ -10,6 +10,7 @@ from datetime import datetime
 import logging
 from pathlib import Path
 import re
+import os
 import shutil
 import threading
 
@@ -33,6 +34,10 @@ _START_PHRASE = re.compile(r"(?:watch me|show me once|record (?:a )?how[- ]?to|r
                            r"(?:(?:how to|how i)\s+)?", re.I)
 _STOP = re.compile(r"\b(?:done|stop|finish|end)(?:ed|ped)? (?:the )?recording\b")
 _CANCEL = re.compile(r"\bcancel (?:the )?recording\b")
+_SAVE = re.compile(rf"{_LEAD}(?:save|put|copy|add) (?:it|that|this|the guide|the how ?to) (?:in|into|to) (?:the )?"
+                   r"(?P<repo>[a-z0-9 ]+?)(?: repo| repository| project)?(?: docs)?(?: please)?")
+_COMMIT = re.compile(rf"{_LEAD}commit (?:the |that |this )?(?:guide|how ?to|it)(?: please)?")
+AFTER_SECONDS = 600  # "save it to ..." and "commit the guide" work for ten minutes after a guide
 SHORT_COMMAND = 6  # words; a longer line with "stop recording" in it is narration
 MAX_AI_CHARS = 12000  # a longer transcript is written line by line rather than cut
 WRITE_PROMPT = (
@@ -90,12 +95,14 @@ def make_writer(router):
 
 
 def render_guide(title: str, summary: str, steps: list[dict], checklist: list[str], shots: dict[int, list[str]],
-                 start_shots: list[str] = (), video: str | None = None) -> str:
+                 start_shots: list[str] = (), video: str | None = None, transcript: str | None = None) -> str:
     parts = [f'# {_one_line(_sentence(title), 120)}', '']
     if summary:
         parts += [_one_line(summary, 300), '']
     if video:
         parts += [f'Screen recording: [{video}]({video})', '']
+    if transcript:
+        parts += [f'Transcript: [{transcript}]({transcript})', '']
     for shot in start_shots:
         parts += [f'![Start]({shot})', '']
     for number, step in enumerate(steps, 1):
@@ -118,21 +125,72 @@ def _slug(title: str) -> str:
     return '-'.join(re.findall(r'[a-z0-9]+', title.lower()))[:60].strip('-') or 'how-to'
 
 
-class ScreenVideo:
-    """A silent screen video: a thread grabs the screen ``fps`` times a second into an mp4 until ``stop()``."""
+class MicRecorder:
+    """The narration as 16 kHz mono WAV, from a second shared input stream beside the voice listener's."""
 
-    def __init__(self, path: Path, capture, *, fps: float = 2, max_width: int = 1280, max_seconds: int = 1860):
+    def __init__(self, path: Path, samplerate: int = 16000):
+        import sounddevice
+        import wave
+        self.path = Path(path)
+        self._lock = threading.Lock()
+        self._wave = wave.open(str(self.path), 'wb')
+        self._wave.setnchannels(1)
+        self._wave.setsampwidth(2)
+        self._wave.setframerate(samplerate)
+
+        def heard(data, frames, when, status) -> None:
+            with self._lock:
+                if self._wave is not None:
+                    self._wave.writeframes(bytes(data))
+        try:
+            self._stream = sounddevice.InputStream(samplerate=samplerate, channels=1, dtype='int16', callback=heard)
+            self._stream.start()
+        except Exception:
+            self._close_wave()
+            self.path.unlink(missing_ok=True)
+            raise
+
+    def _close_wave(self) -> None:
+        with self._lock:
+            if self._wave is not None:
+                self._wave.close()
+                self._wave = None
+
+    def stop(self) -> None:
+        try:
+            self._stream.stop()
+            self._stream.close()
+        finally:
+            self._close_wave()
+
+
+class ScreenVideo:
+    """A screen video: a thread grabs the screen ``fps`` times a second into an H.264 mp4 until ``stop()``;
+    ``finish()`` then muxes the narration (AAC) in when ``audio`` recorded any. Browsers and GitHub play it."""
+
+    def __init__(self, path: Path, capture, *, fps: float = 2, max_width: int = 1280, max_seconds: int = 1860,
+                 audio=None):
         self.path, self.capture, self.fps, self.max_width, self.max_seconds = Path(path), capture, fps, max_width, max_seconds
+        self._silent = self.path.with_name(self.path.stem + '.video.mp4')
+        self.audio_path, self._audio = None, None
+        if audio is not None:
+            try:
+                self._audio = audio(self.path.with_name('narration.wav'))
+                self.audio_path = self.path.with_name('narration.wav')
+            except Exception as exc:  # a busy or missing microphone: a silent video still helps
+                LOG.info('How-to narration not recorded (%s)', type(exc).__name__)
+        self.ok = False
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name='how-to-video', daemon=True)
         self._thread.start()
 
     def _run(self) -> None:
         import time
-        import cv2
-        import numpy
-        writer, size, started = None, None, time.monotonic()
+        from fractions import Fraction
+        container = stream = size = None
+        last, started = -1, time.monotonic()
         try:
+            import av
             while not self._stop.is_set() and time.monotonic() - started < self.max_seconds:
                 tick = time.monotonic()
                 try:
@@ -140,27 +198,119 @@ class ScreenVideo:
                     if size is None:
                         width = min(self.max_width, image.width)
                         height = round(image.height * width / image.width)
-                        size = (width - width % 2, height - height % 2)  # the codec wants even sides
-                        writer = cv2.VideoWriter(str(self.path), cv2.VideoWriter_fourcc(*'mp4v'), self.fps, size)
-                    if image.size != size:
+                        size = (width - width % 2, height - height % 2)  # H.264 wants even sides
+                        container = av.open(str(self._silent), mode='w')
+                        stream = container.add_stream('libx264', rate=Fraction(self.fps).limit_denominator(1000))
+                        stream.width, stream.height, stream.pix_fmt = size[0], size[1], 'yuv420p'
+                        stream.options = {'preset': 'veryfast', 'crf': '28'}
+                    if image.size != size:  # a monitor change mid-recording
                         image = image.resize(size, Image.BILINEAR)
-                    writer.write(cv2.cvtColor(numpy.asarray(image), cv2.COLOR_RGB2BGR))
+                    pts = round((tick - started) * self.fps)  # by the clock, so the sound stays in step
+                    if pts > last:
+                        frame = av.VideoFrame.from_image(image)
+                        frame.pts, last = pts, pts
+                        for packet in stream.encode(frame):
+                            container.mux(packet)
                 except Exception as exc:  # a locked screen skips a frame
                     LOG.debug('How-to video frame skipped (%s)', type(exc).__name__)
                 self._stop.wait(max(0.0, 1 / self.fps - (time.monotonic() - tick)))
+        except Exception as exc:
+            LOG.warning('How-to video stopped (%s)', type(exc).__name__)
         finally:
-            if writer is not None:
-                writer.release()
+            if container is not None:
+                try:
+                    for packet in stream.encode():
+                        container.mux(packet)
+                finally:
+                    container.close()
 
     def stop(self) -> None:
         self._stop.set()
         self._thread.join(timeout=5)
+        self.ok = not self._thread.is_alive()  # a capture stuck past 5 s leaves the file unfinished
+        if self._audio is not None:
+            try:
+                self._audio.stop()
+            except Exception as exc:
+                LOG.debug('How-to narration did not stop cleanly (%s)', type(exc).__name__)
+
+    def finish(self) -> bool:
+        """Leaves ``recording.mp4``; True when the narration is in it."""
+        if not self.ok or not self._silent.exists():
+            return False
+        wav = self.audio_path
+        if wav is not None and wav.exists() and wav.stat().st_size > 44:
+            try:
+                _mux(self._silent, wav, self.path)
+                self._silent.unlink()
+                return True
+            except Exception as exc:
+                LOG.info('How-to sound not added to the video (%s)', type(exc).__name__)
+                self.path.unlink(missing_ok=True)
+        os.replace(self._silent, self.path)
+        return False
+
+
+def _mux(video: Path, wav: Path, out: Path) -> None:
+    import av
+    with av.open(str(video)) as picture, av.open(str(wav)) as sound, av.open(str(out), mode='w') as target:
+        source = picture.streams.video[0]
+        moving = target.add_stream_from_template(source)
+        voice = target.add_stream('aac', rate=sound.streams.audio[0].rate)
+        for packet in picture.demux(source):
+            if packet.dts is None:
+                continue
+            packet.stream = moving
+            target.mux(packet)
+        for frame in sound.decode(audio=0):
+            frame.pts = None
+            for packet in voice.encode(frame):
+                target.mux(packet)
+        for packet in voice.encode():
+            target.mux(packet)
+
+
+def spoken_segments(segments, duration: float) -> list[tuple[float, str]]:
+    """Whisper invents dots and stock phrases on silence, sometimes past the end: only real words inside it."""
+    return [(segment.start, segment.text.strip()) for segment in segments
+            if re.search(r'[A-Za-z0-9]', segment.text) and segment.start <= duration]
+
+
+def make_file_transcriber(voice_config):
+    """path to a 16 kHz WAV -> [(seconds, text)], with its own faster-whisper model loaded on first use."""
+    lock, model = threading.Lock(), []
+
+    def transcribe(path: Path) -> list[tuple[float, str]]:
+        import wave
+        import numpy
+        with wave.open(str(path)) as audio:
+            duration = audio.getnframes() / audio.getframerate()
+            samples = numpy.frombuffer(audio.readframes(audio.getnframes()), dtype='<i2').astype(numpy.float32) / 32768
+        with lock:
+            if not model:
+                from faster_whisper import WhisperModel
+                c = voice_config
+                model.append(WhisperModel(c.model_size, device=c.device, compute_type=c.compute_type,
+                                          cpu_threads=c.cpu_threads))
+            segments, _ = model[0].transcribe(samples, language='en', beam_size=5, vad_filter=True)
+            return spoken_segments(segments, duration)
+    return transcribe
+
+
+def render_transcript(segments) -> str:
+    lines = [f'- [{int(at) // 60:02d}:{int(at) % 60:02d}] {_one_line(text, 400)}' for at, text in segments]
+    return '\n'.join(['# Narration transcript', ''] + lines) + '\n'
 
 
 class HowToRecorder:
     def __init__(self, folder: Path, *, announce, capture, write_steps=None, clock=datetime.now, run=None,
-                 max_seconds: int = 1800, max_shots: int = 60, video=None, repos=None, remember=None):
+                 max_seconds: int = 1800, max_shots: int = 60, video=None, repos=None, remember=None,
+                 transcribe=None, git=None):
         self.folder = Path(folder)
+        self.transcribe = transcribe  # narration.wav -> [(seconds, text)]: a Whisper pass after recording
+        self.git = git  # run(repo, *args): "commit the guide"
+        self._latest = None  # (folder, title, guide, shots, when): the last guide, for "save it to ..."
+        self._copied = None  # (repo, target, title, when): the last repo copy, for "commit the guide"
         self.video = video  # path -> something with stop(): films the screen while recording
         self.repos = repos  # () -> repo folders; a guide whose title names one is copied to its docs/howto
         self.remember = remember  # (repo folder name, note) -> bool: a line in that repo's Room memory
@@ -185,6 +335,9 @@ class HowToRecorder:
         said = words(text)
         with self._lock:
             if not self.recording:
+                after = self._after(said)
+                if after is not None:
+                    return after
                 if not _START.fullmatch(said):
                     return None
                 phrase = _START_PHRASE.search(text)
@@ -198,7 +351,7 @@ class HowToRecorder:
                 return "Recording. Talk me through each step, and say 'done recording' when you finish."
             short = len(said.split()) <= SHORT_COMMAND
             if short and _CANCEL.search(said):
-                self._stop_video()
+                self._stop_video()  # closes the file, so the folder can go
                 shutil.rmtree(self._dir, ignore_errors=True)
                 self._reset()
                 return 'Recording thrown away.'
@@ -255,13 +408,29 @@ class HowToRecorder:
             except Exception as exc:  # no codec: screenshots and words still work
                 LOG.warning('How-to video unavailable (%s)', type(exc).__name__)
 
-    def _stop_video(self) -> None:
+    def _stop_video(self):
+        """Stops filming (quick); finishing the file, which can take seconds, is left to the caller."""
         video, self._video = self._video, None
         if video is not None:
             try:
                 video.stop()
             except Exception as exc:
                 LOG.debug('How-to video did not stop cleanly (%s)', type(exc).__name__)
+        return video
+
+    def close(self) -> None:
+        """Vision is quitting: a recording in progress keeps its draft guide and a playable video."""
+        with self._lock:
+            if not self.recording:
+                return
+            video = self._stop_video()
+            self._draft()
+            self._reset()
+        if video is not None and hasattr(video, 'finish'):
+            try:
+                video.finish()
+            except Exception as exc:
+                LOG.debug('How-to video not finished on exit (%s)', type(exc).__name__)
 
     def _shoot(self, line: int, only_if_changed: bool = False) -> None:
         self._last_check = self.clock()
@@ -284,12 +453,33 @@ class HowToRecorder:
             LOG.debug('How-to screenshot skipped (%s)', type(exc).__name__)
 
     def _finish(self) -> None:
-        self._stop_video()
+        video = self._stop_video()
         folder, title, lines, shots = self._dir, self._title, list(self._lines), dict(self._shots)
         self._reset()
-        self.run(lambda: self._write(folder, title, lines, shots))
+        self.run(lambda: self._write(folder, title, lines, shots, video))
 
-    def _write(self, folder: Path, title: str | None, lines: list[str], shots: dict[int, list[str]]) -> None:
+    def _sound(self, folder: Path, video) -> str | None:
+        """Finishes the video, then writes the Whisper transcript of the narration; its file name, or None."""
+        voiced = False
+        if video is not None and hasattr(video, 'finish'):
+            try:
+                voiced = bool(video.finish())
+            except Exception as exc:
+                LOG.info('How-to video not finished (%s)', type(exc).__name__)
+        wav, transcript = folder / 'narration.wav', None
+        if wav.exists() and self.transcribe is not None:
+            try:
+                (folder / 'transcript.md').write_text(render_transcript(self.transcribe(wav)), encoding='utf-8')
+                transcript = 'transcript.md'
+            except Exception as exc:
+                LOG.info('How-to narration not transcribed (%s)', type(exc).__name__)
+        if voiced:  # the sound is in the video; the WAV would only double the folder's size
+            wav.unlink(missing_ok=True)
+        return transcript
+
+    def _write(self, folder: Path, title: str | None, lines: list[str], shots: dict[int, list[str]],
+               video=None) -> None:
+        transcript = self._sound(folder, video)
         guide = None
         if self.write_steps is not None and lines and sum(len(line) + 6 for line in lines) <= MAX_AI_CHARS:
             try:
@@ -302,24 +492,64 @@ class HowToRecorder:
         try:
             (folder / 'guide.md').write_text(
                 render_guide(title, guide['summary'], guide['steps'], guide['checklist'], shots, shots.get(0, []),
-                             video), encoding='utf-8')
+                             video, transcript), encoding='utf-8')
         except OSError as exc:
             LOG.warning('How-to not saved (%s)', type(exc).__name__)
             self.announce("I couldn't save the how-to.")
             return
+        self._latest = (folder, title, guide, shots, self.clock())  # one assignment; the lock may be held here
         count = len(guide['steps'])
         self.announce(f"Your how-to is ready: {title}, {count} step{'' if count == 1 else 's'}."
                       + self._share(folder, title, guide, shots))
 
-    def _share(self, folder: Path, title: str, guide: dict, shots: dict[int, list[str]]) -> str:
-        """Copies a guide whose title names a repo into its docs/howto (uncommitted) and notes it in Room memory."""
+    def _after(self, said: str) -> str | None:
+        """'save it to <repo>' and 'commit the guide', shortly after a guide is ready."""
+        now = self.clock()
+        saving = _SAVE.fullmatch(said)
+        if saving and self._latest and (now - self._latest[4]).total_seconds() <= AFTER_SECONDS:
+            from assistant.revival import named_repo
+            name = saving['repo'].strip()
+            try:
+                repo = named_repo(f'{name} repo', self.repos()) if self.repos is not None else None
+            except Exception:
+                repo = None
+            if repo is None:
+                return f"I don't see a repo called {name}."
+            folder, title, guide, shots, _ = self._latest
+            said_back = self._share(folder, title, guide, shots, repo=repo).strip()
+            return said_back.replace('Also saved', 'Saved') if said_back else "I couldn't copy it into that repo."
+        if _COMMIT.fullmatch(said) and self._copied and (now - self._copied[3]).total_seconds() <= AFTER_SECONDS:
+            return self._commit()
+        return None
+
+    def _commit(self) -> str | None:
+        repo, target, title, _ = self._copied
+        if self.git is None:
+            return "I can't commit from here; the guide is waiting in docs/howto."
+        where = target.relative_to(repo).as_posix()
+        if not (self.git(repo, 'status', '--porcelain', '--', where) or '').strip():
+            self._copied = None
+            return None
+        # Only the guide's folder goes in the commit, whatever else is staged.
+        done = (self.git(repo, 'add', '--', where) is not None
+                and self.git(repo, 'commit', '-q', '-m', f'docs: how-to {_sentence(title)}', '--', where) is not None)
+        if not done:
+            return "Git didn't commit it, so it is still waiting in docs/howto."
+        self._copied = None
+        branch = (self.git(repo, 'rev-parse', '--abbrev-ref', 'HEAD') or '').strip() or 'the current branch'
+        return f'Committed {where} to {repo.name} on {branch}.'
+
+    def _share(self, folder: Path, title: str, guide: dict, shots: dict[int, list[str]], repo=None) -> str:
+        """Copies a guide into a repo's docs/howto (the one its title names, unless given), uncommitted, and notes
+        it in that repo's Room memory."""
         from assistant.revival import named_repo
-        try:
-            repo = named_repo(title, self.repos()) if self.repos is not None else None
-        except Exception:
-            repo = None
         if repo is None:
-            return ''
+            try:
+                repo = named_repo(title, self.repos()) if self.repos is not None else None
+            except Exception:
+                repo = None
+        if repo is None:
+            return " Say 'save it to' and a repo name to add it to that repo's docs." if self.repos is not None else ''
         repo, slug = Path(repo), _slug(title)
         target, n = repo / 'docs' / 'howto' / slug, 2
         while target.exists():  # an earlier guide (maybe edited by hand) is never overwritten
@@ -335,11 +565,12 @@ class HowToRecorder:
         except OSError as exc:
             LOG.warning('How-to not copied to the repo (%s)', type(exc).__name__)
             return ''
-        said = f" Also saved to {repo.name}'s docs/howto"
         note = memory_note(title, target.name)
         try:
             remembered = self.remember is not None and self.remember(repo.name, note)
         except Exception as exc:
             LOG.info('How-to not added to Room memory (%s)', type(exc).__name__)
             remembered = False
-        return said + (' and its Room memory.' if remembered else '.')
+        self._copied = (repo, target, title, self.clock())  # one assignment: safe from the writer thread
+        return (f" Also saved to {repo.name}'s docs/howto{' and its Room memory' if remembered else ''}."
+                " Say 'commit the guide' to commit it so Room agents get it.")

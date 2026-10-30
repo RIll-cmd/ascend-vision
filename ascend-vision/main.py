@@ -831,7 +831,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         if show_me_config is not None and show_me_config.enabled:
             try:
                 from assistant.revival import command_runner, default_repos
-                from assistant.show_me import HowToRecorder, ScreenVideo, make_writer
+                from assistant.read_for_me import capture_active_monitor
+                from assistant.show_me import HowToRecorder, MicRecorder, ScreenVideo, make_file_transcriber, make_writer
                 from llm_router import LLMRouter
                 from screen_auditor import capture_desktop
                 howto_git = command_runner('git')
@@ -848,8 +849,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     else Path(config.storage.database).parent / 'howto',
                     announce=announce_paced, capture=capture_desktop,
                     write_steps=make_writer(LLMRouter(config.llm)) if show_me_config.ai_cleanup else None,
-                    video=lambda path: ScreenVideo(path, capture_desktop), repos=howto_repos,
-                    remember=room_client.add_memory if room_client is not None else None)
+                    # The video films the monitor you work on, with your narration from a second mic stream.
+                    video=lambda path: ScreenVideo(path, capture_active_monitor, audio=MicRecorder), repos=howto_repos,
+                    remember=room_client.add_memory if room_client is not None else None,
+                    transcribe=make_file_transcriber(config.voice_commands), git=howto_git)
+                resources.callback(how_to.close)
             except Exception as exc:
                 LOG.warning('How-to recording unavailable (%s)', type(exc).__name__)
 

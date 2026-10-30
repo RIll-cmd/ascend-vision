@@ -261,6 +261,7 @@ def test_screen_video_writes_a_real_mp4_from_the_screen(tmp_path):
     video = ScreenVideo(tmp_path / 'recording.mp4', capture, fps=20, max_width=1280)
     time.sleep(0.5)
     video.stop()
+    assert video.finish() is False  # no sound was recorded, so the video stays silent
     reader = cv2.VideoCapture(str(tmp_path / 'recording.mp4'))
     frames = 0
     while True:
@@ -314,8 +315,8 @@ def test_a_guide_naming_a_repo_lands_in_its_docs_and_room_memory(tmp_path):
     assert not (docs / 'recording.mp4').exists()
     assert 'recording.mp4' not in (docs / 'guide.md').read_text()
     assert noted == [('ascend_hub', 'How-to "Deploy ascend hub": docs/howto/deploy-ascend-hub/guide.md')]
-    assert said[-1] == ("Your how-to is ready: deploy ascend hub, 1 step. "
-                        "Also saved to ascend_hub's docs/howto and its Room memory.")
+    assert said[-1] == ("Your how-to is ready: deploy ascend hub, 1 step. Also saved to ascend_hub's docs/howto "
+                        "and its Room memory. Say 'commit the guide' to commit it so Room agents get it.")
 
 
 def test_no_repo_named_means_no_copy_and_a_failed_memory_is_said(tmp_path):
@@ -326,11 +327,13 @@ def test_no_repo_named_means_no_copy_and_a_failed_memory_is_said(tmp_path):
     recorder.intercept('plug it in')
     recorder.intercept('done recording')
     assert not (hub / 'docs').exists()
-    assert said[-1] == 'Your how-to is ready: set up the printer, 1 step.'
+    assert said[-1] == ("Your how-to is ready: set up the printer, 1 step. "
+                        "Say 'save it to' and a repo name to add it to that repo's docs.")
     recorder.intercept('watch me fix the ascend_hub login')
     recorder.intercept('open the file')
     recorder.intercept('done recording')
-    assert said[-1] == "Your how-to is ready: fix the ascend_hub login, 1 step. Also saved to ascend_hub's docs/howto."
+    assert said[-1] == ("Your how-to is ready: fix the ascend_hub login, 1 step. Also saved to ascend_hub's "
+                        "docs/howto. Say 'commit the guide' to commit it so Room agents get it.")
 
 
 def test_a_second_guide_for_the_same_repo_task_does_not_overwrite_the_first(tmp_path):
@@ -349,3 +352,139 @@ def test_the_memory_note_is_capped_for_the_room():
     from assistant.show_me import memory_note
     note = memory_note('x' * 300, 'deploy')
     assert len(note) <= 200 and note.endswith(': docs/howto/deploy/guide.md')
+
+
+# Polish: sound, Whisper transcript, save to a repo, commit, closing
+
+def write_wav(path, seconds=1.0, rate=16000):
+    import math
+    import struct
+    import wave
+    with wave.open(str(path), 'wb') as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        out.writeframes(b''.join(struct.pack('<h', int(8000 * math.sin(i / 20))) for i in range(int(rate * seconds))))
+
+
+class FakeMic:
+    def __init__(self, path):
+        self.path = path
+
+    def stop(self):
+        write_wav(self.path)
+
+
+def test_the_video_is_h264_with_the_narration_muxed_in(tmp_path):
+    import time
+    import av
+    from assistant.show_me import ScreenVideo
+    video = ScreenVideo(tmp_path / 'recording.mp4', lambda: Image.new('RGB', (1920, 1080), (40, 90, 160)), fps=10,
+                        audio=FakeMic)
+    time.sleep(0.6)
+    video.stop()
+    assert video.finish() is True
+    with av.open(str(tmp_path / 'recording.mp4')) as container:
+        kinds = {s.type: s.codec_context.name for s in container.streams}
+    assert kinds == {'video': 'h264', 'audio': 'aac'}
+    assert (tmp_path / 'narration.wav').exists() and not (tmp_path / 'recording.video.mp4').exists()
+
+
+def test_a_microphone_that_will_not_open_leaves_a_silent_video(tmp_path):
+    import time
+    from assistant.show_me import ScreenVideo
+
+    def no_mic(path):
+        raise OSError('device busy')
+    video = ScreenVideo(tmp_path / 'recording.mp4', lambda: Image.new('RGB', (640, 480)), fps=10, audio=no_mic)
+    time.sleep(0.3)
+    video.stop()
+    assert video.finish() is False and (tmp_path / 'recording.mp4').exists()
+
+
+def test_the_narration_is_transcribed_with_timestamps_and_linked(tmp_path):
+    class Video(FakeVideo):
+        def finish(self):
+            write_wav(self.path.parent / 'narration.wav')
+            return True
+    heard = []
+
+    def transcribe(path):
+        heard.append(path.name)
+        return [(0.0, 'Open settings.'), (75.4, 'Click save.')]
+    recorder, clock, screen, said = recorder_for(tmp_path, video=Video, transcribe=transcribe)
+    recorder.intercept('watch me')
+    recorder.intercept('open settings')
+    recorder.intercept('done recording')
+    folder = Video.made[-1].path.parent
+    assert heard == ['narration.wav']
+    assert (folder / 'transcript.md').read_text(encoding='utf-8') == (
+        '# Narration transcript\n\n- [00:00] Open settings.\n- [01:15] Click save.\n')
+    guide = (folder / 'guide.md').read_text(encoding='utf-8')
+    assert 'Transcript: [transcript.md](transcript.md)' in guide
+    assert not (folder / 'narration.wav').exists()  # the sound is in the video now
+
+
+def test_save_it_to_a_repo_after_the_guide_is_ready(tmp_path):
+    hub = tmp_path / 'ascend_hub'
+    hub.mkdir()
+    noted = []
+    recorder, clock, screen, said = recorder_for(tmp_path, repos=lambda: [hub],
+                                                 remember=lambda key, note: (noted.append(key), True)[1])
+    recorder.intercept('watch me set up the printer')
+    recorder.intercept('plug it in')
+    recorder.intercept('done recording')
+    assert recorder.intercept('save it to the notes repo') == "I don't see a repo called notes."
+    assert recorder.intercept('save it to ascend hub') == (
+        "Saved to ascend_hub's docs/howto and its Room memory. Say 'commit the guide' to commit it so Room agents "
+        "get it.")
+    assert (hub / 'docs' / 'howto' / 'set-up-the-printer' / 'guide.md').exists() and noted == ['ascend_hub']
+    clock.now += timedelta(minutes=11)
+    assert recorder.intercept('save it to ascend hub') is None  # too long after: chat
+
+
+def test_commit_the_guide_commits_only_that_folder(tmp_path):
+    import subprocess
+    from assistant.revival import command_runner
+    hub = tmp_path / 'ascend_hub'
+    hub.mkdir()
+    git = lambda *args: subprocess.run(['git', *args], cwd=hub, check=True, capture_output=True, text=True).stdout
+    git('init', '-q', '-b', 'main')
+    git('config', 'user.email', 'owner@example.test')
+    git('config', 'user.name', 'Owner')
+    (hub / 'other.txt').write_text('mine')
+    git('add', 'other.txt')  # staged by the owner: must stay out of Vision's commit
+    recorder, clock, screen, said = recorder_for(tmp_path, repos=lambda: [hub], git=command_runner('git'))
+    recorder.intercept('watch me deploy ascend hub')
+    recorder.intercept('run the build')
+    recorder.intercept('done recording')
+    assert recorder.intercept('commit the guide') == "Committed docs/howto/deploy-ascend-hub to ascend_hub on main."
+    assert git('log', '--format=%s') == 'docs: how-to Deploy ascend hub\n'
+    assert git('show', '--name-only', '--format=').split() == [
+        'docs/howto/deploy-ascend-hub/guide.md', 'docs/howto/deploy-ascend-hub/shot-01.jpg',
+        'docs/howto/deploy-ascend-hub/shot-02.jpg']
+    assert 'A  other.txt' in git('status', '--porcelain')
+    assert recorder.intercept('commit the guide') is None  # nothing left to commit
+
+
+def test_closing_vision_mid_recording_finishes_the_video_and_keeps_the_draft(tmp_path):
+    class Video(FakeVideo):
+        finished = False
+
+        def finish(self):
+            Video.finished = True
+            return False
+    recorder, clock, screen, said = recorder_for(tmp_path, video=Video)
+    recorder.intercept('watch me')
+    recorder.intercept('open settings')
+    recorder.close()
+    assert Video.made[-1].stopped and Video.finished and not recorder.recording
+    assert 'Open settings' in (Video.made[-1].path.parent / 'guide.md').read_text(encoding='utf-8')
+
+
+def test_silence_does_not_become_a_transcript():
+    from types import SimpleNamespace
+    from assistant.show_me import spoken_segments
+    heard = [SimpleNamespace(start=0.0, text=' .'), SimpleNamespace(start=1.2, text=' Open settings. '),
+             SimpleNamespace(start=3.0, text='...'), SimpleNamespace(start=9.0, text='Thanks for watching!')]
+    assert spoken_segments(heard, duration=4.1) == [(1.2, 'Open settings.')]
