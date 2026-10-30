@@ -269,8 +269,11 @@ class DiscordPhoneBot:
                     return
                 if (owner != self._owner_id and self._receptionist is not None and command == "ask"
                         and isinstance(value, str)):
-                    name = getattr(interaction.user, "display_name", None) or getattr(interaction.user, "name", "")
-                    result = self._receptionist(user_id, str(name or ""), value[:4_000])
+                    # Display names can be anything; the account name next to it is unique.
+                    shown = str(getattr(interaction.user, "display_name", None) or "")
+                    account = str(getattr(interaction.user, "name", None) or "")
+                    name = f"{shown} ({account})" if shown and account and shown != account else shown or account
+                    result = self._receptionist(user_id, name, value[:4_000])
                 elif owner != self._owner_id:
                     result = _LINK_FIRST
                 elif command.startswith("browser_"):

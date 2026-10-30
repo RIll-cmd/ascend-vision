@@ -617,11 +617,12 @@ def test_completed_ask_cooldown_rejects_immediate_second_ask():
 def test_someone_else_asking_gets_the_front_desk_when_there_is_one():
     interaction = FakeInteraction(user_id=555)
     interaction.user.display_name = "Alex"
+    interaction.user.name = "alex99"
     taken = []
     bot = bot_for(interaction, linked=False,
                   receptionist=lambda sender, name, text: (taken.append((sender, name, text)), "I'll pass it on.")[1])
     asyncio.run(bot.handle_ask(interaction, "dinner at 8?"))
-    assert taken == [("555", "Alex", "dinner at 8?")]
+    assert taken == [("555", "Alex (alex99)", "dinner at 8?")]
     assert interaction.events[-1][:2] == ("edit", "I'll pass it on.")
     assert not any(event[0] == "handle" for event in interaction.events)
 

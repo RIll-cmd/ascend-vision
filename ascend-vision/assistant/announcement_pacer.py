@@ -136,6 +136,7 @@ class FocusDoorman:
         self._until = None
         self._leftover = False  # the block ended with notices waiting
         self._lock = threading.Lock()  # the main loop and the chat thread both ask
+        self._share()  # a block left by a crash must not keep the bot saying "in a focus block"
 
     def _here(self) -> bool:
         try:

@@ -18,6 +18,7 @@ LOG = logging.getLogger(__name__)
 
 INBOX = 'doorman_inbox.jsonl'
 READING = 'doorman_inbox.reading.jsonl'
+MORE = 'doorman_inbox.more.jsonl'
 BLOCK = 'focus_block.json'
 URGENT_WORDS = ('urgent', 'emergency', 'asap', 'hospital', 'call me', 'right now')
 MAX_NAME = 40
@@ -36,11 +37,11 @@ class Reception:
     """Bot side: answers a message from someone else and leaves it in the inbox for Vision to speak."""
 
     def __init__(self, folder: Path, *, clock=datetime.now, urgent_words=(), urgent_senders=(),
-                 per_hour: int = 3, max_chars: int = 300):
+                 per_hour: int = 3, total_per_hour: int = 10, max_chars: int = 300):
         self.folder, self.clock = Path(folder), clock
         self.urgent_words = tuple(w.lower() for w in (*URGENT_WORDS, *urgent_words) if w.strip())
-        self.urgent_senders = {s.strip().lower() for s in urgent_senders if s.strip()}
-        self.per_hour, self.max_chars = per_hour, max_chars
+        self.urgent_senders = {s.strip() for s in urgent_senders if s.strip()}  # Discord ids: names can be changed
+        self.per_hour, self.total_per_hour, self.max_chars = per_hour, total_per_hour, max_chars
         self._recent: dict[str, list[datetime]] = {}
         self._lock = threading.Lock()
 
@@ -57,14 +58,17 @@ class Reception:
             return 'Send a message with some words in it.'
         now = self.clock()
         with self._lock:
-            recent = [t for t in self._recent.get(sender_id, []) if now - t <= timedelta(hours=1)]
+            hour_ago = now - timedelta(hours=1)
+            self._recent = {k: kept for k, times in self._recent.items() if (kept := [t for t in times if t > hour_ago])}
+            recent = self._recent.get(sender_id, [])
             if len(recent) >= self.per_hour:
-                self._recent[sender_id] = recent
                 return 'I have your earlier messages and will pass them on.'
+            if sum(len(times) for times in self._recent.values()) >= self.total_per_hour:
+                return 'Vision is not taking more messages right now. Please try again later.'
             self._recent[sender_id] = recent + [now]
             lowered = f' {text.lower()} '
             urgent = (any(re.search(rf'\b{re.escape(w)}\b', lowered) for w in self.urgent_words)
-                      or sender_id.lower() in self.urgent_senders or name.lower() in self.urgent_senders)
+                      or sender_id in self.urgent_senders)
             line = json.dumps({'at': now.isoformat(), 'sender': sender_id, 'name': name, 'text': text,
                                'urgent': urgent})
             self.folder.mkdir(parents=True, exist_ok=True)
@@ -79,29 +83,37 @@ class Reception:
 
 
 class Inbox:
-    """Vision side: speaks each waiting message once. Routine ones are ordinary notices, so a block holds them."""
+    """Vision side: speaks each waiting message once. While a focus block holds, routine ones stay on disk."""
 
-    def __init__(self, folder: Path, *, announce):
-        self.folder, self.announce = Path(folder), announce
+    def __init__(self, folder: Path, *, announce, holding=lambda: False):
+        self.folder, self.announce, self.holding = Path(folder), announce, holding
 
     def tick(self) -> None:
         inbox, reading = self.folder / INBOX, self.folder / READING
-        messages = self._read(reading) if reading.exists() else []
         if inbox.exists():
             try:
-                if messages:
-                    messages += self._read(inbox, keep=False)
+                if reading.exists():  # merge by renaming, so a line the bot adds meanwhile is never lost
+                    more = self.folder / MORE
+                    os.replace(inbox, more)
+                    self._write(reading, self._read(reading) + self._read(more))
+                    more.unlink()
                 else:
                     os.replace(inbox, reading)  # the bot keeps appending to a new file
-                    messages = self._read(reading)
             except OSError as exc:  # the bot is writing right now; next tick
                 LOG.info('Doorman inbox busy (%s)', type(exc).__name__)
+        messages = self._read(reading)
         try:
-            reading.unlink(missing_ok=True)
-        except OSError:
-            return
-        for item in messages:
-            who = _clean(item.get('name', ''), MAX_NAME) or 'someone'
+            holding = bool(self.holding())
+        except Exception:
+            holding = False
+        speak = [m for m in messages if not holding or m.get('urgent') is True]
+        try:
+            self._write(reading, [m for m in messages if m not in speak])
+        except OSError as exc:
+            LOG.info('Doorman inbox not updated (%s)', type(exc).__name__)
+            return  # nothing is spoken twice
+        for item in speak:
+            who = _clean(item.get('name', ''), MAX_NAME + 40) or 'someone'
             text = _clean(item.get('text', ''), 300)
             if not text:
                 continue
@@ -111,11 +123,9 @@ class Inbox:
                 self.announce(f'Message from {who} on Discord: {text}')
 
     @staticmethod
-    def _read(path: Path, keep: bool = True) -> list[dict]:
+    def _read(path: Path) -> list[dict]:
         try:
             raw = path.read_text(encoding='utf-8')
-            if not keep:
-                path.unlink()
         except OSError:
             return []
         items = []
@@ -127,6 +137,15 @@ class Inbox:
             if isinstance(item, dict):
                 items.append(item)
         return items
+
+    @staticmethod
+    def _write(path: Path, items: list[dict]) -> None:
+        if not items:
+            path.unlink(missing_ok=True)
+            return
+        temporary = path.with_name(path.name + '.tmp')
+        temporary.write_text(''.join(json.dumps(i) + '\n' for i in items), encoding='utf-8')
+        os.replace(temporary, path)
 
 
 class hold_pushes:

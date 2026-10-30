@@ -521,7 +521,7 @@ class FocusDoormanConfig:
     let_room_through: bool = True
     take_messages: bool = True  # people who message Vision's Discord bot get a front-desk answer
     urgent_words: tuple[str, ...] = ()  # besides urgent, emergency, asap, hospital, call me, right now
-    urgent_senders: tuple[str, ...] = ()  # Discord user ids or display names
+    urgent_senders: tuple[str, ...] = ()  # Discord user ids (display names can be changed by anyone)
 
     def __post_init__(self):
         for name in ('enabled', 'let_room_through', 'take_messages'):

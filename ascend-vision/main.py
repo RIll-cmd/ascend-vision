@@ -731,7 +731,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         if doorman_on and doorman_config.take_messages:
             from assistant.doorman_inbox import Inbox
             # Messages people sent Vision's Discord bot (its own process); a focus block holds the routine ones.
-            doorman_inbox = Inbox(Path(config.storage.database).parent, announce=announce_paced)
+            doorman_inbox = Inbox(Path(config.storage.database).parent, announce=announce_paced,
+                                  holding=focus_doorman.holding)
 
         away_mode = None
         away_mode_config = getattr(config, 'away_mode', None)

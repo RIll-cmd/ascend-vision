@@ -43,8 +43,7 @@ def test_no_block_or_an_old_block_just_passes_it_on(tmp_path):
 
 def test_urgent_senders_and_words_from_config(tmp_path):
     block_until(tmp_path, NOW + timedelta(minutes=5))
-    desk = Reception(tmp_path, clock=Clock(), urgent_words=('deadline',), urgent_senders=('Mom', '99'))
-    assert 'urgent' in desk.take('1', 'mom', 'hello')
+    desk = Reception(tmp_path, clock=Clock(), urgent_words=('deadline',), urgent_senders=('99',))
     assert 'urgent' in desk.take('99', 'Zed', 'hello')
     assert 'urgent' in desk.take('2', 'Alex', 'the deadline moved')
     assert 'urgent' not in desk.take('3', 'Alex', 'nice weather')
@@ -102,3 +101,47 @@ def test_pushes_wait_while_holding():
     assert held.publish('agent needs you') is False and sent == []
     holding[0] = False
     assert held.publish('agent needs you') is True and sent == ['agent needs you']
+
+
+def test_urgent_senders_are_matched_by_id_only_since_names_can_be_changed(tmp_path):
+    block_until(tmp_path, NOW + timedelta(minutes=5))
+    desk = Reception(tmp_path, clock=Clock(), urgent_senders=('Mom', '99'))
+    assert 'urgent' not in desk.take('5', 'Mom', 'hello')
+    assert 'urgent' in desk.take('99', 'Zed', 'hello')
+
+
+def test_there_is_a_total_cap_and_quiet_senders_are_forgotten(tmp_path):
+    desk = Reception(tmp_path, clock=Clock(), per_hour=3, total_per_hour=4)
+    for sender in '1234':
+        assert desk.take(sender, 'P', 'hi') == "I'll pass it on."
+    assert desk.take('5', 'Q', 'hi') == 'Vision is not taking more messages right now. Please try again later.'
+    assert len(lines(tmp_path)) == 4
+    desk.clock.now += timedelta(hours=2)
+    assert desk.take('6', 'R', 'hi') == "I'll pass it on."
+    assert set(desk._recent) == {'6'}
+
+
+def test_during_a_block_routine_messages_stay_on_disk_and_urgent_ones_are_spoken(tmp_path):
+    said, holding = [], [True]
+    inbox = Inbox(tmp_path, announce=lambda text, **kw: said.append(text), holding=lambda: holding[0])
+    desk = Reception(tmp_path, clock=Clock())
+    desk.take('1', 'Alex', 'dinner at 8?')
+    desk.take('2', 'Sam', 'urgent: call me')
+    inbox.tick()
+    assert said == ['Urgent message from Sam on Discord: urgent: call me']
+    restarted = Inbox(tmp_path, announce=lambda text, **kw: said.append(text), holding=lambda: holding[0])
+    restarted.tick()
+    assert len(said) == 1  # a restart during the block loses nothing and repeats nothing
+    holding[0] = False
+    restarted.tick()
+    assert said[-1] == 'Message from Alex on Discord: dinner at 8?'
+    restarted.tick()
+    assert len(said) == 2
+
+
+def test_a_doorman_starting_up_clears_a_block_left_by_a_crash(tmp_path):
+    from assistant.announcement_pacer import AnnouncementPacer, FocusDoorman
+    state = tmp_path / 'focus_block.json'
+    block_until(tmp_path, NOW + timedelta(hours=1))
+    FocusDoorman(AnnouncementPacer(lambda text: None), clock=Clock(), state_path=state)
+    assert not state.exists()
