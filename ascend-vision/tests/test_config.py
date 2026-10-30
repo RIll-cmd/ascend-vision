@@ -268,3 +268,14 @@ def test_slump_config_defaults_and_validation():
         SlumpConfig(enabled='no')
     with pytest.raises(ValueError, match='slump.phone_nudge'):
         SlumpConfig(phone_nudge=1)
+
+
+def test_promises_config_defaults_and_validation(tmp_path):
+    from config import Config, PromisesConfig, load_config
+
+    assert Config().promises == PromisesConfig(enabled=True)
+    with pytest.raises(ValueError, match='promises.enabled'):
+        PromisesConfig(enabled='yes')
+    path = tmp_path / 'config.yaml'
+    path.write_text('promises:\n  enabled: false\n', encoding='utf-8')
+    assert load_config(path).promises.enabled is False

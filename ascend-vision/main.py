@@ -806,6 +806,16 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             except Exception as exc:
                 LOG.warning('Slump check-ins unavailable (%s)', type(exc).__name__)
 
+        promise_coach = None
+        promises_config = getattr(config, 'promises', None)
+        if promises_config is not None and promises_config.enabled:
+            try:
+                from assistant.promises import PromiseCoach, PromiseStore
+                promise_coach = PromiseCoach(
+                    PromiseStore(Path(config.storage.database).parent / 'promises.json'), announce=announce_paced)
+            except Exception as exc:
+                LOG.warning('Promise check-ins unavailable (%s)', type(exc).__name__)
+
         nutrition_coach = None
         try:
             from assistant.nutrition import NutritionStore
@@ -834,8 +844,9 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 LOG.warning('Eye calibration unavailable (%s)', type(exc).__name__)
 
         def local_intercept(text):
-            # Away/sleep first (it blocks everything while asleep), then eyes, weather, GitHub, food and slumps.
-            for handler in (away_mode, eye_calibrator, weather_coach, github_coach, nutrition_coach, slump_coach):
+            # Away/sleep first (it blocks everything while asleep), then eyes, weather, GitHub, food, promises, slumps.
+            for handler in (away_mode, eye_calibrator, weather_coach, github_coach, nutrition_coach, promise_coach,
+                            slump_coach):
                 if handler is not None:
                     answer = handler.intercept(text)
                     if answer:
@@ -1719,6 +1730,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         slump_coach.tick(owner_available)
                     except Exception as exc:
                         LOG.debug('Slump check skipped (%s)', type(exc).__name__)
+                if promise_coach is not None:
+                    try:
+                        promise_coach.tick(owner_available)
+                    except Exception as exc:
+                        LOG.debug('Promise check skipped (%s)', type(exc).__name__)
                 try:
                     for notice in key_low_notifier.messages(ai_key_summary()):
                         announce_paced(notice)

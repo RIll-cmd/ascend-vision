@@ -505,6 +505,16 @@ class SlumpConfig:
 
 
 @dataclass(frozen=True)
+class PromisesConfig:
+    """Catch "remind me to X tomorrow" and "I'll X tomorrow", then check on X when it is due."""
+    enabled: bool = True
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('promises.enabled must be a YAML boolean')
+
+
+@dataclass(frozen=True)
 class WeatherConfig:
     """Daily weather briefing from Open-Meteo (free, no key) for the owner's places."""
     enabled: bool = True
@@ -781,6 +791,7 @@ class Config:
     weather: WeatherConfig = field(default_factory=WeatherConfig)
     agent_room: AgentRoomConfig = field(default_factory=AgentRoomConfig)
     slump: SlumpConfig = field(default_factory=SlumpConfig)
+    promises: PromisesConfig = field(default_factory=PromisesConfig)
     github: GitHubCoachConfig = field(default_factory=GitHubCoachConfig)
     phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
     browser_automation: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
@@ -807,7 +818,7 @@ def load_config(path: Path) -> Config:
                  'screen_audit': ScreenAuditConfig, 'phone_chat': PhoneChatConfig,
                  'distraction_watch': DistractionWatchConfig, 'away_mode': AwayModeConfig,
                  'weather': WeatherConfig, 'github': GitHubCoachConfig, 'agent_room': AgentRoomConfig,
-                 'slump': SlumpConfig, 'browser_automation': BrowserAutomationConfig}
+                 'slump': SlumpConfig, 'promises': PromisesConfig, 'browser_automation': BrowserAutomationConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')
     values = {}

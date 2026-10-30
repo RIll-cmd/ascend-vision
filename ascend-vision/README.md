@@ -47,6 +47,7 @@ Everything has a default. Edit `config.yaml` only if you need to:
 | Send phone voice notes to Gemini instead of transcribing them on this computer | `phone_chat.voice_transcriber: gemini` |
 | Stop slump check-ins | `slump.enabled: false` |
 | Keep slump check-ins but never push the phone | `slump.phone_nudge: false` |
+| Stop promise check-ins | `promises.enabled: false` |
 
 While a gate waits, say the wake word, then the answer ("Vision, approve"); the
 follow-up "yes" needs no wake word for 20 seconds. Phone messages and voice notes
@@ -61,6 +62,13 @@ it says so once, kindly, during the day, and offers one small step; on the third
 day it can send one plain phone push through the Agent Room. Say "Vision, how am I
 doing?" any time, or "not now" to pause it for three days. Nothing new leaves the
 computer.
+
+Say or type "remind me to call mom at 6" or "I'll fix the login tomorrow" and Vision
+keeps it in `data/promises.json`. When it is due and you are at the PC, Vision asks
+once whether it is done; if not, it asks again the next day, then offers to keep it,
+make it smaller or drop it, and goes quiet after five asks. Answer "done", "not yet",
+"smaller" or "drop it"; say "what did I promise?", "done with the login" or, right
+after Vision notes one, "drop that".
 
 Advanced and experimental features (phone chat, Discord, browser automation,
 proactive check-ins, Core link) are off by default and are described below.
