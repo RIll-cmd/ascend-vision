@@ -29,8 +29,8 @@ MAX_REPOS = 20
 COUNTS = ('No', 'One', 'Two', 'Three')
 _LEAD = r"(?:(?:hey|ok|okay) )?(?:vision )?"
 _REVIVE = re.compile(rf"{_LEAD}(?:yes )?(?:revive(?: it)?|bring it back)")
-_LATER = re.compile(rf"{_LEAD}(?:later|maybe later|not now|next month)")
-_FORGET = re.compile(rf"{_LEAD}(?:forget(?: about)? it|forget it for good|no)")
+_LATER = re.compile(rf"{_LEAD}(?:later|maybe later|not now|next month|no|nope|not yet)")  # a bare no only postpones
+_FORGET = re.compile(rf"{_LEAD}(?:forget(?: about)? it|forget it for good)")
 _LIST = re.compile(rf"{_LEAD}(?:what did i leave(?: behind)?|what have i left(?: behind)?|anything unfinished"
                    r"|what's unfinished)")
 
@@ -66,8 +66,9 @@ def _age(last: datetime, now: datetime) -> str:
 
 
 def left_branches(repo: Path, run_git, now: datetime) -> list[Leftover]:
-    default = next((b for b in ('main', 'master')
-                    if run_git(repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{b}')), None)
+    head = (run_git(repo, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD') or '').strip()
+    names = ([head.split('/', 1)[1]] if head.startswith('origin/') else []) + ['main', 'master']
+    default = next((b for b in names if run_git(repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{b}')), None)
     if default is None:
         return []
     listing = run_git(repo, 'for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)') or ''
@@ -79,7 +80,9 @@ def left_branches(repo: Path, run_git, now: datetime) -> list[Leftover]:
         last = datetime.fromtimestamp(int(stamp))
         if not BRANCH_DAYS <= (now - last).days <= MAX_DAYS:
             continue
-        ahead = (run_git(repo, 'rev-list', '--count', f'{default}..{name}', '--') or '').strip()
+        # Commits that reached the default branch by rebase or cherry-pick are not "left"; squash merges still are.
+        ahead = (run_git(repo, 'rev-list', '--count', '--cherry-pick', '--right-only', '--no-merges',
+                         f'{default}...{name}', '--') or '').strip()
         if not ahead.isdigit() or int(ahead) == 0:
             continue
         count = int(ahead)
@@ -210,6 +213,7 @@ class RevivalCoach:
         self._found: list[Leftover] | None = None
         self._found_at: datetime | None = None
         self._scanning = self._unspoken = False
+        self._retry_after: datetime | None = None
         self._offer: tuple[Leftover, datetime, int | None] | None = None
 
     def _save(self) -> None:
@@ -243,36 +247,44 @@ class RevivalCoach:
 
     def _waiting(self, item: Leftover, now: datetime) -> bool:
         mark = self._data['marks'].get(item.key)
-        if not mark:
+        if not isinstance(mark, dict):  # a hand-edited entry of the wrong shape counts as no mark
             return False
         if mark.get('status') == 'forgotten':
             return True
         try:
             return now < datetime.fromisoformat(mark.get('until') or '')
-        except ValueError:
+        except (TypeError, ValueError):
             return False
+
+    def _stale(self, now: datetime) -> bool:
+        return self._found is None or self._found_at is None or now - self._found_at > SCAN_FRESH
 
     def tick(self, owner_available: bool) -> None:
         now = self.clock()
         if not owner_available or not ASK_FROM <= now.hour < ASK_UNTIL or self._unspoken or self._open_offer(now):
             return
+        if self._retry_after and now < self._retry_after:
+            return
         last = self._data.get('last_asked')
         try:
             if last and now - datetime.fromisoformat(last) < ASK_EVERY:
                 return
-        except ValueError:
+        except (TypeError, ValueError):
             pass
-        if self._found is None or self._found_at is None or now - self._found_at > SCAN_FRESH:
+        if self._stale(now):
             self._found = None
             self._start_scan()
         with self._lock:
-            if self._found is None:
+            found = self._found
+            if found is None:
                 return
-            item = next((i for i in self._found if not self._waiting(i, now)), None)
+            item = next((i for i in found if not self._waiting(i, now)), None)
+            if item is None:
+                # Nothing to offer (or every source failed): look again tomorrow, the week is not used up.
+                self._retry_after = now + timedelta(days=1)
+                return
             self._data['last_asked'] = now.isoformat()
             self._save()
-            if item is None:
-                return
             self._unspoken = True
         self.announce(f'Something you left: {item.label}, last touched {_age(item.last, now)}. {item.detail}. '
                       'Revive it, later, or forget it?', on_said=self._opened(item))
@@ -287,12 +299,13 @@ class RevivalCoach:
     def intercept(self, text: str) -> str | None:
         said, now = words(text), self.clock()
         if _LIST.fullmatch(said):
-            if self._found is None:
+            if self._stale(now):
                 self._start_scan()
             with self._lock:
-                if self._found is None:
+                found = self._found
+                if found is None or self._scanning:
                     return 'Let me look. Ask me again in a minute.'
-                return self._list(now)
+                return self._list(found, now)
         with self._lock:
             offer = self._open_offer(now)
             if not offer:
@@ -318,8 +331,8 @@ class RevivalCoach:
         self._data['marks'][item.key] = {'status': status, 'until': until.isoformat() if until else None}
         self._save()
 
-    def _list(self, now: datetime) -> str:
-        items = [i for i in self._found if not self._waiting(i, now)][:3]
+    def _list(self, found: list[Leftover], now: datetime) -> str:
+        items = [i for i in found if not self._waiting(i, now)][:3]
         if not items:
             return 'Nothing left behind that I can see.'
         things = '; '.join(f'{i.label}, {_age(i.last, now)}' for i in items)

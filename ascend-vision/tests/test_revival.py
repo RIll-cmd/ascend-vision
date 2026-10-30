@@ -13,14 +13,18 @@ def ago(days):
     return int((NOW - timedelta(days=days)).timestamp())
 
 
-def git_for(branches, ahead, default='main'):
+def git_for(branches, ahead, default='main', origin_head=None):
     def run_git(repo, *args):
+        if args[:2] == ('symbolic-ref', '--short'):
+            return f'origin/{origin_head}\n' if origin_head else None
         if args[:3] == ('rev-parse', '--verify', '--quiet'):
             return 'abc123\n' if args[3] == f'refs/heads/{default}' else None
         if args[0] == 'for-each-ref':
             return ''.join(f'{name}\t{stamp}\n' for name, stamp in branches)
         if args[0] == 'rev-list':
-            return f"{ahead[args[2].split('..')[1]]}\n"
+            # commits already on the default branch by rebase or cherry-pick must not count
+            assert {'--cherry-pick', '--right-only', '--no-merges'} <= set(args), args
+            return f"{ahead[args[-2].split('...')[1]]}\n"
         raise AssertionError(args)
     return run_git
 
@@ -38,6 +42,9 @@ def test_branches_left_two_weeks_to_a_year_with_unmerged_commits():
 def test_a_repo_without_main_or_master_or_failing_git_is_skipped():
     assert left_branches(REPO, git_for([('x', ago(20))], {'x': 1}, default='trunk'), NOW) == []
     assert left_branches(REPO, lambda repo, *args: None, NOW) == []
+    (found,) = left_branches(REPO, git_for([('trunk', ago(1)), ('x', ago(20))], {'x': 1}, default='trunk',
+                                           origin_head='trunk'), NOW)
+    assert found.detail == '1 commit not merged'
 
 
 def test_room_sessions_stopped_or_waiting_at_a_gate():
@@ -212,7 +219,7 @@ def test_nothing_found_still_waits_a_week_before_scanning_again(tmp_path):
     coach.tick(True)
     clock.now += timedelta(hours=2)
     coach.tick(True)
-    assert len(scans) == 1 and pacer.said == []
+    assert len(scans) == 1 and pacer.said == []  # within a day
 
 
 def test_a_broken_store_is_set_aside(tmp_path):
@@ -220,3 +227,38 @@ def test_a_broken_store_is_set_aside(tmp_path):
     coach, clock, pacer, scans = coach_for(tmp_path)
     coach.tick(True)
     assert (tmp_path / 'revival.json.bad').exists() and len(pacer.said) == 1
+
+
+def test_wrong_types_in_the_file_do_not_break_it(tmp_path):
+    (tmp_path / 'revival.json').write_text(json.dumps(
+        {'last_asked': 5, 'marks': {'room:b': 'forgotten', 'branch:a': {'status': 'later', 'until': 7}}}))
+    coach, clock, pacer, scans = coach_for(tmp_path)
+    coach.tick(True)
+    assert len(pacer.said) == 1
+    assert coach.intercept('what did I leave').startswith('Two things')
+
+
+def test_a_bare_no_postpones_instead_of_forgetting(tmp_path):
+    coach, clock, pacer, scans = coach_for(tmp_path)
+    coach.tick(True)
+    assert coach.intercept('No.') == "Okay. I'll bring it up again next month."
+    assert json.loads((tmp_path / 'revival.json').read_text())['marks']['room:b']['status'] == 'later'
+
+
+def test_the_list_rescans_when_the_last_scan_is_old(tmp_path):
+    coach, clock, pacer, scans = coach_for(tmp_path)
+    coach.intercept('what did I leave')
+    clock.now += timedelta(hours=2)
+    coach.intercept('what did I leave')
+    assert len(scans) == 2
+
+
+def test_an_empty_scan_tries_again_the_next_day_not_next_week(tmp_path):
+    coach, clock, pacer, scans = coach_for(tmp_path, leftovers=[])
+    coach.tick(True)
+    clock.now += timedelta(hours=2)
+    coach.tick(True)
+    assert len(scans) == 1
+    clock.now += timedelta(days=1)
+    coach.tick(True)
+    assert len(scans) == 2
