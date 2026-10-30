@@ -18,6 +18,8 @@ from statistics import mean, median
 import threading
 import urllib.request
 
+from assistant.answers import is_not_now, is_yes, words
+
 LOG = logging.getLogger(__name__)
 
 METRICS = ('commits', 'room_sessions', 'active_minutes', 'late_minutes', 'focus_minutes',
@@ -282,15 +284,6 @@ ACCEPTED = {'one small commit on anything': 'Good. One small commit, whenever yo
             FOCUS_STEP: "Good. I'll check in after twenty-five minutes.",
             'one small task for the Agent Room': 'Good. Queue one small task in the Agent Room when you are ready.'}
 SPEAK_FROM, SPEAK_UNTIL, MIN_ACTIVE = 8, 21, 30
-# A yes starts the answer ("sounds good", "yes let's try it"); any negation later turns it down.
-_YES = re.compile(r"(?:(?:hey|ok|okay) )?(?:vision )?(?:yes|yeah|yep|sure|okay|ok|alright|sounds good|"
-                  r"let's do it|let's try it|go ahead)\b")
-_NEGATION = re.compile(r"\b(?:no|not|don't|never|later|nope)\b")
-_NOT_NOW = re.compile(r'(?:(?:hey|ok|okay) )?(?:vision )?(?:not now|no|nope|no thanks|not today)')
-
-
-def _words(text: str) -> str:
-    return ' '.join(re.sub(r"[^a-z' ]", ' ', text.lower()).split())
 
 
 def _join(parts: list[str]) -> str:
@@ -405,20 +398,19 @@ class SlumpCoach:
         return opened
 
     def intercept(self, text: str) -> str | None:
-        words = _words(text)
-        if re.search(r'\bhow am i doing\b', words):
+        if re.search(r'\bhow am i doing\b', words(text)):
             return self._summary()
         now = self.clock()
         offer = self._offer
         if not offer or (now - offer[1]).total_seconds() > self.offer_window:
             return None
-        if _NOT_NOW.fullmatch(words):
+        if is_not_now(text):
             self._offer = None
             # A fresh ladder: after the pause the owner hears a check-in again, never a phone push first.
             self.store.save_ladder(Ladder(last_day=self.store.ladder().last_day,
                                           paused_until=now.date() + timedelta(days=3)))
             return "Okay. I'll leave it for a few days."
-        if not _YES.match(words) or _NEGATION.search(words):
+        if not is_yes(text):
             return None
         ladder = self.store.ladder()
         if offer[0] == 'check_in':
