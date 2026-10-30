@@ -856,7 +856,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             for handler in (away_mode, eye_calibrator, focus_doorman, weather_coach, github_coach, nutrition_coach,
                             promise_coach, slump_coach):
                 if handler is not None:
-                    answer = handler.intercept(text)
+                    try:
+                        answer = handler.intercept(text)
+                    except Exception as exc:  # one broken helper must not skip the others
+                        LOG.warning('%s skipped a message (%s)', type(handler).__name__, type(exc).__name__)
+                        continue
                     if answer:
                         return answer
             return None

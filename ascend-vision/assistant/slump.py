@@ -320,6 +320,7 @@ class SlumpCoach:
         self._activity: str | None = None
         self.backfill_thread: threading.Thread | None = None
         self._offer: tuple[str, datetime] | None = None  # ('check_in' | 'plan', when)
+        self._offer_seq = None  # the pacer's question count when the offer was spoken
         self._step = FOCUS_STEP
         self._focus_due: datetime | None = None
 
@@ -395,6 +396,7 @@ class SlumpCoach:
         """The answer window starts when the line is spoken, not when it is queued behind other notices."""
         def opened() -> None:
             self._offer = (kind, self.clock())
+            self._offer_seq = getattr(self.announce, 'question_seq', None)
         return opened
 
     def intercept(self, text: str) -> str | None:
@@ -402,8 +404,9 @@ class SlumpCoach:
             return self._summary()
         now = self.clock()
         offer = self._offer
-        if not offer or (now - offer[1]).total_seconds() > self.offer_window:
-            return None
+        if (not offer or (now - offer[1]).total_seconds() > self.offer_window
+                or self._offer_seq != getattr(self.announce, 'question_seq', None)):
+            return None  # too late, or another question (a promise check-in) was spoken after it
         if is_not_now(text):
             self._offer = None
             # A fresh ladder: after the pause the owner hears a check-in again, never a phone push first.

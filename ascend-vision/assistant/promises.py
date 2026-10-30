@@ -16,21 +16,26 @@ import re
 import secrets
 import threading
 
-from assistant.answers import is_not_now, is_yes, words
+from assistant.answers import words
 
 LOG = logging.getLogger(__name__)
 WEEKDAYS = ('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday')
 PART_HOURS = {'morning': 10, 'afternoon': 15, 'evening': 19, 'night': 20}
 _CLOCK = r"\d{1,2}(?::\d{2})? ?(?:am|pm)?"
-_WHEN = (r"(?P<when>today|tonight|this (?:morning|afternoon|evening)"
-         rf"|tomorrow(?: (?:morning|afternoon|evening|night))?(?: at {_CLOCK})?"
+_DAY_CLOCK = re.compile(rf"(today|tonight|tomorrow) at ({_CLOCK})|at ({_CLOCK}) (today|tonight|tomorrow)")
+# Longer forms first, so "at 10am tomorrow" is not cut to "at 10am".
+_WHEN = (rf"(?P<when>(?:today|tonight|tomorrow) at {_CLOCK}|at {_CLOCK} (?:today|tonight|tomorrow)"
+         r"|tomorrow(?: (?:morning|afternoon|evening|night))?|today|tonight|this (?:morning|afternoon|evening)"
          rf"|(?:on|by) (?:{'|'.join(WEEKDAYS)})|next week"
          r"|in (?:a|an|one|\d+) (?:minutes?|hours?|days?)"
          rf"|at {_CLOCK})")
-_EXPLICIT_AFTER = re.compile(rf"\bremind me (?:to |about )?(?P<what>.+?) {_WHEN}$")
+_EXPLICIT_AFTER = re.compile(rf"\bremind me (?:to|about) (?P<what>.+?) {_WHEN}$")
 _EXPLICIT_BEFORE = re.compile(rf"\bremind me {_WHEN} (?:to|about) (?P<what>.+)$")
 _IMPLICIT = re.compile(rf"\b(?:i'll|i will|i'm going to|i am going to) (?P<what>.+?) {_WHEN}(?= |$)")
-_NOT_A_TASK = re.compile(r"(?:be|have been|never|not|probably)\b")
+# Plans that are not tasks to chase ("I'll be late today", "I'll see you tomorrow").
+_NOT_A_TASK = re.compile(r"(?:be|have|never|not|probably|maybe|try|go to (?:bed|sleep)|head to bed|see you"
+                         r"|talk to you|call you|text you|message you|get back to you|let you know|ping you)\b")
+MAX_AHEAD = {'minutes': 7 * 24 * 60, 'hours': 30 * 24, 'days': 365}
 
 
 @dataclass(frozen=True)
@@ -46,15 +51,20 @@ def _clean(sentence: str) -> str:
     return ' '.join(re.sub(r"[^a-z0-9': ]", ' ', sentence.lower()).split())
 
 
-def _clock(text: str, day: date, now: datetime, *, roll: bool) -> datetime:
-    """``H[:MM][am|pm]`` on ``day``; with ``roll``, a time already gone moves forward (12 h if no am/pm, else a day)."""
+def _clock(text: str, day: date, now: datetime, *, roll: bool, evening: bool = False) -> datetime:
+    """``H[:MM][am|pm]`` on ``day``. Without am/pm: with ``roll`` the next such time from now, else 1 to 6 (or any
+    hour ``evening``) mean pm. With ``roll`` a time already gone moves forward. Impossible times raise ValueError."""
     hour, minute, half = re.fullmatch(r"(\d{1,2})(?::(\d{2}))? ?(am|pm)?", text).groups()
     hour, minute = int(hour), int(minute or 0)
+    if minute > 59 or hour > (12 if half else 23) or (half and hour == 0):
+        raise ValueError(f'no such time: {text}')
     if half == 'pm' and hour < 12:
         hour += 12
     elif half == 'am' and hour == 12:
         hour = 0
-    at = datetime.combine(day, datetime.min.time()).replace(hour=hour % 24, minute=minute % 60)
+    elif half is None and hour < 12 and (evening or (not roll and 1 <= hour <= 6)):
+        hour += 12
+    at = datetime.combine(day, datetime.min.time()).replace(hour=hour, minute=minute)
     if roll and at <= now:
         at += timedelta(hours=12) if half is None and hour < 12 and at + timedelta(hours=12) > now else timedelta(days=1)
     return at
@@ -62,18 +72,23 @@ def _clock(text: str, day: date, now: datetime, *, roll: bool) -> datetime:
 
 def _due(when: str, now: datetime) -> tuple[datetime, bool]:
     today = now.date()
+    # Before 04:00 "tomorrow" still means the coming day.
+    tomorrow = today if now.hour < 4 else today + timedelta(days=1)
 
     def at_hour(day: date, hour: int) -> datetime:
         return datetime.combine(day, datetime.min.time()).replace(hour=hour)
 
+    paired = _DAY_CLOCK.fullmatch(when)
+    if paired:
+        day_word, clock = paired[1] or paired[4], paired[2] or paired[3]
+        if day_word == 'tomorrow':
+            return _clock(clock, tomorrow, now, roll=False), True
+        return _clock(clock, today, now, roll=True, evening=day_word == 'tonight'), True
     if when in ('today', 'tonight') or when.startswith('this '):
         hour = {'today': 17, 'tonight': 20}.get(when) or PART_HOURS[when.split()[1]]
         due = at_hour(today, hour)
         return (due if due > now else now + timedelta(hours=1)), False
     if when.startswith('tomorrow'):
-        tomorrow = today + timedelta(days=1)
-        if ' at ' in when:
-            return _clock(when.split(' at ')[1], tomorrow, now, roll=False), True
         parts = when.split()
         return at_hour(tomorrow, PART_HOURS[parts[1]] if len(parts) > 1 else 10), False
     if when.startswith(('on ', 'by ')):
@@ -83,8 +98,10 @@ def _due(when: str, now: datetime) -> tuple[datetime, bool]:
         return at_hour(today + timedelta(days=7 - today.weekday()), 10), False
     if when.startswith('in '):
         _, count, unit = when.split()
-        amount = 1 if count in ('a', 'an', 'one') else int(count)
-        return now + timedelta(**{unit.rstrip('s') + 's': amount}), True
+        amount, unit = (1 if count in ('a', 'an', 'one') else int(count)), unit.rstrip('s') + 's'
+        if amount > MAX_AHEAD[unit]:
+            raise ValueError(f'too far ahead: {when}')
+        return now + timedelta(**{unit: amount}), True
     return _clock(when[3:], today, now, roll=True), True
 
 
@@ -97,9 +114,12 @@ def parse_promise(text: str, now: datetime) -> Caught | None:
             if not found:
                 continue
             what = found['what'].strip()
-            if not 3 <= len(what) <= 120 or _NOT_A_TASK.match(what):
-                return None
-            due, timed = _due(found['when'], now)
+            if not 3 <= len(what) <= 120 or (not explicit and (len(what.split()) < 2 or _NOT_A_TASK.match(what))):
+                continue
+            try:
+                due, timed = _due(found['when'], now)
+            except ValueError:
+                continue
             return Caught(what=what, due=due, timed=timed, explicit=explicit, when=found['when'])
     return None
 
@@ -109,12 +129,19 @@ MAX_ASKS = 5
 SPEAK_FROM, SPEAK_UNTIL = 8, 22
 COUNTS = ('No', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten')
 _STOP = {'the', 'a', 'an', 'my', 'to', 'with', 'on', 'of', 'for', 'and', 'it', 'i', "i'm", 'im', 'am', 'done'}
-_DONE = re.compile(r"(?:i did(?: it)?|did it|done|all done|finished)\b")
-_NO = re.compile(r"(?:no|nope|nah|not yet)\b")
-_DROP = re.compile(r"\b(?:drop it|forget it|forget about it|cancel(?: it)?)\b")
-_DROP_THAT = re.compile(r"(?:(?:hey|ok|okay) )?(?:vision )?(?:drop|forget) that")
-_DONE_WITH = re.compile(r"\b(?:done with|cross off) (?P<what>.+)")
-_LIST = re.compile(r"\b(?:what did i promise|my promises)\b")
+# Answers count only as the whole message; anything longer is chat for the AI.
+_LEAD = r"(?:(?:hey|ok|okay) )?(?:vision )?"
+_FINISHED = r"(?:i did(?: it)?|did it|done|all done|finished|i finished(?: it)?|it's done)"
+_DONE = re.compile(rf"{_LEAD}(?:(?:yes|yeah|yep|yup|sure|ok|okay)(?: {_FINISHED})?|{_FINISHED})")
+_NO = re.compile(rf"{_LEAD}(?:no|nope|nah|not yet|no not yet|nope not yet|not now|not today|no thanks|not really)")
+_KEEP = re.compile(rf"{_LEAD}keep(?: it)?(?: please| on the list)?")
+_DROP = re.compile(rf"{_LEAD}(?:drop(?: it)?|forget(?: about)? it|cancel(?: it)?)")
+_SMALLER = re.compile(rf"{_LEAD}(?:(?:make it )?smaller|make it small|split it)(?: please)?")
+_DROP_THAT = re.compile(rf"{_LEAD}(?:drop|forget) that")
+_DONE_WITH = re.compile(rf"{_LEAD}(?:i'm |im |i am )?(?:done with|cross off|crossed off) (?P<what>(?:\S+ ?){{1,6}})")
+_LIST = re.compile(rf"{_LEAD}(?:what did i promise|what have i promised|what are my promises|my promises"
+                   r"|list my promises)")
+_QUESTION = re.compile(r"(?:what|why|how|who|when|where|which|can|could|would|should|is|are|do|does|did|will)\b")
 _STEP_LEAD = re.compile(r"^(?:the first (?:small )?step is |first step is |first |just |i'll |i will )+")
 
 
@@ -138,13 +165,26 @@ class PromiseStore:
 
     def load(self) -> list[Promise]:
         try:
-            return [Promise(**item) for item in json.loads(self.path.read_text(encoding='utf-8'))]
+            items = json.loads(self.path.read_text(encoding='utf-8'))
+            if not isinstance(items, list):
+                raise ValueError('not a list')
         except FileNotFoundError:
             return []
-        except (ValueError, TypeError) as exc:
+        except ValueError as exc:
             LOG.warning('Promises file unreadable (%s); starting fresh', type(exc).__name__)
             os.replace(self.path, self.path.with_name(self.path.name + '.bad'))
             return []
+        promises = []
+        for item in items:
+            try:
+                promise = Promise(**item)
+                for stamp in (promise.created, promise.next, promise.closed):
+                    if stamp is not None:
+                        datetime.fromisoformat(stamp)
+                promises.append(promise)
+            except (TypeError, ValueError) as exc:  # A hand-edited entry is skipped, the rest still count.
+                LOG.warning('Skipping an unreadable promise (%s)', type(exc).__name__)
+        return promises
 
     def save(self, promises: list[Promise], now: datetime) -> None:
         cutoff = now - timedelta(days=KEEP_CLOSED_DAYS)
@@ -189,8 +229,17 @@ class PromiseCoach:
         self._lock = threading.RLock()
         self._promises = store.load()
         self._asking: str | None = None  # queued behind other notices, not yet spoken
-        self._offer: tuple[str, str, datetime] | None = None  # ('ask' | 'smaller', promise id, spoken at)
+        # ('ask' | 'smaller', promise id, spoken at, the pacer's question count then)
+        self._offer: tuple[str, str, datetime, int | None] | None = None
         self._captured: tuple[str, datetime] | None = None
+
+    def _open_offer(self, now: datetime):
+        """The open question, if it is recent and no other question (a slump check-in) was spoken after it."""
+        offer = self._offer
+        if (offer and (now - offer[2]).total_seconds() <= self.offer_window
+                and offer[3] == getattr(self.announce, 'question_seq', None)):
+            return offer
+        return None
 
     def _save(self) -> None:
         try:
@@ -209,7 +258,7 @@ class PromiseCoach:
             return
         with self._lock:
             now = self.clock()
-            if self._asking or (self._offer and (now - self._offer[2]).total_seconds() <= self.offer_window):
+            if self._asking or self._open_offer(now):
                 return
             due = sorted((p for p in self._promises if p.status == 'open' and datetime.fromisoformat(p.next) <= now
                           and (p.timed or SPEAK_FROM <= now.hour < SPEAK_UNTIL)), key=lambda p: p.next)
@@ -242,19 +291,26 @@ class PromiseCoach:
         def opened() -> None:
             with self._lock:
                 self._asking = None
-                self._offer = (kind, promise_id, self.clock())
+                self._offer = (kind, promise_id, self.clock(), getattr(self.announce, 'question_seq', None))
         return opened
 
     def intercept(self, text: str) -> str | None:
         with self._lock:
             reply, notice = self._intercept(text)
         if notice:
-            self.announce(notice)
+            self.announce(notice, on_said=self._noted(self._captured[0]))
         return reply
+
+    def _noted(self, promise_id: str):
+        """"Drop that" counts from when the note is heard."""
+        def noted() -> None:
+            with self._lock:
+                self._captured = (promise_id, self.clock())
+        return noted
 
     def _intercept(self, text: str) -> tuple[str | None, str | None]:
         said, now = words(text), self.clock()
-        if _LIST.search(said):
+        if _LIST.fullmatch(said):
             return self._list(now), None
         if (_DROP_THAT.fullmatch(said) and self._captured
                 and (now - self._captured[1]).total_seconds() <= self.offer_window):
@@ -264,14 +320,14 @@ class PromiseCoach:
                 self._close(promise, 'dropped')
                 self._save()
                 return 'Dropped.', None
-        offer = self._offer
-        if offer and (now - offer[2]).total_seconds() <= self.offer_window:
-            reply = self._answer(offer, said, now)
+        offer = self._open_offer(now)
+        if offer:
+            reply = self._answer(offer, text, said, now)
             if reply:
                 self._save()
                 return reply, None
-        found = _DONE_WITH.search(said)
-        if found:
+        found = _DONE_WITH.fullmatch(said)
+        if found and '?' not in text:
             promise = self._closest(found['what'])
             if promise:
                 self._close(promise, 'done')
@@ -291,37 +347,37 @@ class PromiseCoach:
             return f"Okay. I'll check on {caught.what} {caught.when}.", None
         return None, f"Noted: {caught.what}, {caught.when}. Say 'drop that' if I got it wrong."
 
-    def _answer(self, offer: tuple[str, str, datetime], said: str, now: datetime) -> str | None:
-        kind, promise_id, _ = offer
+    def _answer(self, offer: tuple, text: str, said: str, now: datetime) -> str | None:
+        kind, promise_id, _, seq = offer
         promise = self._find(promise_id)
         if promise is None or promise.status != 'open':
             self._offer = None
             return None
         if kind == 'smaller':
             step = _STEP_LEAD.sub('', said).strip()
-            if not 3 <= len(step) <= 120:
-                return None
+            if '?' in text or _QUESTION.match(step) or not 3 <= len(step) <= 120 or len(step.split()) > 12:
+                return None  # a question for the AI, not the step
             self._offer = None
             self._close(promise, 'dropped')
             self._promises.append(Promise(id=secrets.token_hex(4), what=step, created=now.isoformat(),
                                           next=(now + timedelta(hours=2)).isoformat(), timed=True))
             return f"Okay: {step}. I'll check on it in two hours."
-        if _DROP.search(said):
+        if _DROP.fullmatch(said):
             self._offer = None
             self._close(promise, 'dropped')
             return 'Dropped.'
-        if re.search(r'\bsmaller\b', said):
-            self._offer = ('smaller', promise.id, now)
+        if _SMALLER.fullmatch(said):
+            self._offer = ('smaller', promise.id, now, seq)
             return "What's the first small step?"
-        if re.match(r'keep\b', said):
+        if _KEEP.fullmatch(said):
             self._offer = None
             promise.next = _at_ten(now.date() + timedelta(days=3)).isoformat()
             return "Okay. I'll ask again in three days."
-        if is_not_now(said) or _NO.match(said):
+        if _NO.fullmatch(said):
             self._offer = None
             promise.next = _at_ten(now.date() + timedelta(days=1)).isoformat()
             return "Okay. I'll ask again tomorrow."
-        if is_yes(said) or _DONE.match(said):
+        if _DONE.fullmatch(said):
             self._offer = None
             self._close(promise, 'done')
             return 'Nice. Crossed off.'

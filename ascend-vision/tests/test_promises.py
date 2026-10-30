@@ -256,6 +256,110 @@ def test_the_list_names_each_open_promise_with_its_day(tmp_path):
         'Two open: call mom, due today at 6:30 pm; fix the login, due Friday.')
 
 
+def asked(tmp_path, promise='remind me to fix the login tomorrow'):
+    coach, clock, voice = coach_for(tmp_path)
+    coach.intercept(promise)
+    clock.now = datetime(2026, 10, 29, 10, 0)
+    coach.tick(True)
+    return coach, clock, voice
+
+
+def status(tmp_path):
+    return [p['status'] for p in json.loads((tmp_path / 'promises.json').read_text())]
+
+
+@pytest.mark.parametrize('chat', [
+    'I did not', 'ok what is the weather', 'sure, but first tell me a joke', 'forget it, what time is it',
+    'can you make the font smaller', 'no idea why this test fails, help?', 'keep going with the story',
+])
+def test_chat_inside_the_answer_window_reaches_the_ai_and_leaves_the_promise_alone(tmp_path, chat):
+    coach, clock, voice = asked(tmp_path)
+    assert coach.intercept(chat) is None
+    assert status(tmp_path) == ['open']
+    assert coach.intercept('done') == 'Nice. Crossed off.'
+
+
+def test_a_question_after_smaller_is_not_taken_as_the_step(tmp_path):
+    coach, clock, voice = asked(tmp_path)
+    coach.intercept('smaller')
+    assert coach.intercept('what is a closure?') is None
+    assert coach.intercept('how do I start') is None
+    assert coach.intercept('write the first test') == "Okay: write the first test. I'll check on it in two hours."
+
+
+def test_done_with_and_the_list_only_as_short_commands(tmp_path):
+    coach, clock, voice = coach_for(tmp_path)
+    coach.intercept('remind me to fix the login page tomorrow')
+    assert coach.intercept("I'm done with the login error, now how do I deploy?") is None
+    assert coach.intercept('tell me about my promises to my sister and how to keep them') is None
+    assert status(tmp_path) == ['open']
+
+
+@pytest.mark.parametrize('chat', [
+    'remind me why we did that today', 'can you remind me what I said yesterday at 3',
+    "I'm going to bed in an hour", 'I will see you tomorrow', "I'll call you back in 5 minutes",
+    "I'll talk to you tomorrow", "I'm going to sleep tonight",
+])
+def test_ordinary_chat_is_not_a_promise(chat):
+    assert parse_promise(chat, WED_9AM) is None
+
+
+def test_a_clock_time_before_the_day_keeps_both():
+    assert due("I'll message Sam at 10am tomorrow", datetime(2026, 10, 28, 8, 0)) == datetime(2026, 10, 29, 10, 0)
+    assert due('remind me to call mom at 6 tomorrow') == datetime(2026, 10, 29, 18, 0)
+    assert parse_promise('remind me to call mom at 6 tomorrow', WED_9AM).what == 'call mom'
+    assert due('remind me to call mom tonight at 9') == datetime(2026, 10, 28, 21, 0)
+
+
+def test_tomorrow_said_after_midnight_means_the_coming_day():
+    assert due('remind me to call the bank tomorrow', datetime(2026, 10, 29, 0, 30)) == datetime(2026, 10, 29, 10, 0)
+
+
+def test_the_second_sentence_is_read_when_the_first_is_not_a_task():
+    assert parse_promise("I'll be late today. I'll fix the login tomorrow.", WED_9AM).what == 'fix the login'
+
+
+@pytest.mark.parametrize('text', ['remind me to x y z in 99999999 days', 'remind me to stretch at 25',
+                                  'remind me to stretch at 7:75'])
+def test_impossible_times_are_not_caught(text):
+    assert parse_promise(text, WED_9AM) is None
+
+
+def test_a_hand_edited_bad_date_drops_that_promise_only(tmp_path):
+    (tmp_path / 'promises.json').write_text(json.dumps([
+        {'id': 'a', 'what': 'call mom', 'created': 'soon', 'next': 'later', 'timed': False},
+        {'id': 'b', 'what': 'fix the login', 'created': WED_9AM.isoformat(), 'next': WED_9AM.isoformat(),
+         'timed': False}]))
+    coach, clock, voice = coach_for(tmp_path)
+    coach.tick(True)
+    assert voice.said == ['Checking in on fix the login. Done?']
+
+
+def test_a_later_question_takes_the_answer(tmp_path):
+    class Pacer(Voice):
+        question_seq = 0
+
+        def __call__(self, text, on_said=None, urgent=False):
+            if on_said:
+                self.question_seq += 1
+            super().__call__(text, on_said, urgent)
+    clock, voice = Clock(WED_9AM), Pacer()
+    coach = PromiseCoach(PromiseStore(tmp_path / 'promises.json'), announce=voice, clock=clock)
+    coach.intercept('remind me to stretch in 5 minutes')
+    clock.now += timedelta(minutes=5)
+    coach.tick(True)
+    voice('Lately I have noticed fewer commits. Want a small plan for today?', on_said=lambda: None)
+    assert coach.intercept('yes') is None, 'the slump question was asked last'
+
+
+def test_drop_that_counts_from_when_the_note_is_spoken(tmp_path):
+    coach, clock, voice = coach_for(tmp_path, hold=True)
+    coach.intercept("I'll fix the login tomorrow")
+    clock.now += timedelta(minutes=3)
+    voice.release()
+    assert coach.intercept('drop that') == 'Dropped.'
+
+
 def test_a_broken_file_is_set_aside_and_closed_promises_go_after_thirty_days(tmp_path):
     path = tmp_path / 'promises.json'
     path.write_text('{not json')

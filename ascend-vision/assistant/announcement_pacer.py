@@ -36,6 +36,7 @@ class AnnouncementPacer:
         self._last = float('-inf')
         self._was_holding = self._summary_due = False
         self._released = 0  # waiting notices the owner let through early
+        self.question_seq = 0  # notices with an answer window spoken so far
 
     def __call__(self, text: str, on_said: Callable[[], None] | None = None, urgent: bool = False) -> None:
         """Queue a notice; on_said runs once it has been spoken (an offer's answer window starts then)."""
@@ -91,10 +92,15 @@ class AnnouncementPacer:
             self._last = self._clock()
         try:
             self._say(text)
-            if on_said:
-                on_said()
         except Exception:  # One failed notice must not hold back the rest.
             LOG.exception('Paced notice failed')
+        if on_said:
+            # Coaches compare this count to learn whether a later question took over the owner's answer.
+            self.question_seq += 1
+            try:
+                on_said()  # even after a failed say, so a coach waiting for its question is never stuck
+            except Exception:
+                LOG.exception('Paced notice callback failed')
 
 
 class FocusDoorman:

@@ -150,6 +150,18 @@ def test_a_hold_check_that_fails_lets_notices_through():
     assert said == ['Water break?']
 
 
+def test_questions_are_counted_and_on_said_still_runs_when_speech_fails():
+    from assistant.announcement_pacer import AnnouncementPacer
+
+    def broken(text):
+        raise OSError('no audio device')
+    opened = []
+    pacer = AnnouncementPacer(broken, clock=Clock())
+    pacer('Checking in on stretch. Done?', on_said=lambda: opened.append(pacer.question_seq))
+    pacer.pump()
+    assert opened == [1], 'a coach waiting for its question must not wait forever'
+
+
 def test_dedupe_spans_urgent_and_held_notices():
     pacer, _, said, clock, focus = focused_pacer()
     pacer('Water break?')

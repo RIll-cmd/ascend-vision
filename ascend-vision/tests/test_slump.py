@@ -257,6 +257,25 @@ def test_yes_to_the_check_in_offers_one_small_step_from_what_dropped(tmp_path):
     assert store.ladder().accepted
 
 
+def test_a_question_spoken_after_the_check_in_takes_the_answer(tmp_path):
+    clock = Clock().at(0, 10)
+    store = SlumpStore(tmp_path / 'slump.db')
+
+    class Pacer:
+        question_seq = 0
+
+        def __call__(self, text, on_said=None, urgent=False):
+            if on_said:
+                self.question_seq += 1
+                on_said()
+    pacer = Pacer()
+    coach = SlumpCoach(store, announce=pacer, clock=clock)
+    seed(store)
+    coach.tick(True)
+    pacer('Checking in on fix the login. Done?', on_said=lambda: None)
+    assert coach.intercept('yes') is None
+
+
 def test_a_focus_plan_checks_in_after_twenty_five_minutes(tmp_path):
     clock = Clock().at(0, 10)
     store, said, coach = coach_for(tmp_path, clock)
