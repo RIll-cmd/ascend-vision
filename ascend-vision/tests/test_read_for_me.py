@@ -351,3 +351,32 @@ def test_pdf_names_match_inside_joined_words(tmp_path):
     assert find_pdf([folder], 'lease agreement', NOW) == joined
     assert find_pdf([folder], 'lease 2025', NOW) == joined
     assert find_pdf([folder], 'tax', NOW) is None
+
+
+def test_a_dropped_picture_is_closed_after_reading(tmp_path):
+    drop = tmp_path / 'drop'
+    drop.mkdir()
+    photo = drop / 'photo.png'
+    Image.new('RGB', (300, 200), 'white').save(photo)
+    os.utime(photo, (0, (datetime.now() - timedelta(seconds=5)).timestamp()))
+    reader, calls, said, jobs = reader_for(tmp_path)
+    reader.drop = drop
+    reader.tick()
+    finish(jobs)
+    (drop / 'read' / 'photo.png').unlink()  # Windows refuses this while the image is still open
+
+
+def test_a_reader_that_cannot_start_is_not_left_busy(tmp_path):
+    drop = tmp_path / 'drop'
+    drop.mkdir()
+    pdf = drop / 'a.pdf'
+    pdf.write_bytes(b'%PDF')
+    os.utime(pdf, (0, (datetime.now() - timedelta(seconds=5)).timestamp()))
+    reader, calls, said, jobs = reader_for(tmp_path)
+    reader.drop = drop
+
+    def broken(job):
+        raise RuntimeError('no thread')
+    reader.run = broken
+    reader.tick()
+    assert reader._busy is False and said[-1] == "I couldn't start reading a.pdf."

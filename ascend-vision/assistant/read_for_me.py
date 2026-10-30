@@ -186,6 +186,11 @@ def pdf_folders(downloads: Path, home: Path) -> list[Path]:
     return found
 
 
+def _picture(path: Path) -> bytes:
+    with Image.open(path) as image:  # closed at once: Windows keeps an open file locked
+        return _jpeg(image.convert('RGB'))
+
+
 def capture_active_monitor() -> Image.Image:
     """The monitor the active window is on, so text stays readable and other screens stay private."""
     from screen_auditor import capture_desktop
@@ -330,8 +335,13 @@ class DocumentReader:
         if mime == 'application/pdf':
             job = (path.name, lambda: target.read_bytes(), mime, path.name)
         else:
-            job = (path.name, lambda: _jpeg(Image.open(target).convert('RGB')), 'image/jpeg', path.name)
-        self.run(lambda: self._read(*job))
+            job = (path.name, lambda: _picture(target), 'image/jpeg', path.name)
+        try:
+            self.run(lambda: self._read(*job))
+        except Exception as exc:
+            LOG.warning('Reading could not start (%s)', type(exc).__name__)
+            self._done()
+            self.announce(f"I couldn't start reading {path.name}.")
 
     def _read(self, kind: str, data, mime: str, source: str) -> None:
         try:

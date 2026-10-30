@@ -331,3 +331,54 @@ def test_two_repos_with_the_same_folder_name_keep_their_own_place(tmp_path):
     assert said[-1].startswith('Release notes for app are ready: 1 change')
     state = json.loads((tmp_path / 'notes' / 'state.json').read_text())
     assert first.as_posix() in state and second.as_posix() in state
+
+
+# Final review fixes
+
+def notes_ready(tmp_path, readme):
+    hub = tmp_path / 'ascend_hub'
+    git = make_repo(hub, ['feat: dark mode'])
+    (hub / 'README.md').write_bytes(readme.encode('utf-8'))
+    git('add', 'README.md')
+    git('commit', '-q', '-m', 'docs: readme')
+    notes, said, jobs = notes_for(tmp_path, [hub], story=lambda name, commits: {'whats_new': ['Dark mode.'], 'post': 'p'})
+    notes.intercept('write release notes for ascend hub')
+    finish(jobs)
+    return hub, git, notes
+
+
+def test_a_bom_and_a_code_fence_never_catch_the_section(tmp_path):
+    readme = '\ufeffIntro line.\n\n```sh\n# install\nnpm i\n```\n'
+    hub, git, notes = notes_ready(tmp_path, readme)
+    notes.intercept('add it to the readme')
+    text = (hub / 'README.md').read_bytes().decode('utf-8')
+    assert text.startswith('\ufeff<!-- vision-whats-new:start -->') and text.endswith(readme[1:])
+
+
+def test_a_readme_with_your_own_edits_is_left_alone(tmp_path):
+    hub, git, notes = notes_ready(tmp_path, '# Hub\n\nText.\n')
+    (hub / 'README.md').write_text('# Hub\n\nMy unsaved change.\n', encoding='utf-8')
+    assert notes.intercept('add it to the readme') == (
+        "ascend_hub's README.md has changes of yours that aren't committed, so I left it alone.")
+
+
+def test_no_readme_commit_in_the_middle_of_a_merge(tmp_path):
+    hub, git, notes = notes_ready(tmp_path, '# Hub\n\nText.\n')
+    notes.intercept('add it to the readme')
+    (hub / '.git' / 'MERGE_HEAD').write_text(git('rev-parse', 'HEAD').stdout.decode() if hasattr(
+        git('rev-parse', 'HEAD'), 'stdout') else '0' * 40)
+    assert notes.intercept('commit the readme') == (
+        "You're in the middle of a merge in ascend_hub, so I left the README uncommitted.")
+
+
+def test_long_voice_samples_never_crowd_out_the_commits():
+    from assistant.release_notes import make_story_writer
+    asked = []
+
+    class Router:
+        def generate_structured_response(self, prompt, **kwargs):
+            asked.append(prompt)
+            return {'whats_new': ['A'], 'post': 'p'}
+    commits = parse_log(f'a1{SEP}feat: dark mode{SEP}2026-10-29T10:00:00Z{END}')
+    make_story_writer(Router(), voice=lambda: ['v' * 20000])('hub', commits)
+    assert '- feat: dark mode' in asked[0] and len(asked[0]) <= 12000

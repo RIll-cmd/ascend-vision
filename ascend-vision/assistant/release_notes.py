@@ -136,7 +136,7 @@ def make_story_writer(router, voice=None):
     def write(name: str, commits: list[Commit]):
         samples = voice() if voice else []
         tail = ('\n\nPosts the owner wrote (match the voice, do not copy):\n' + '\n---\n'.join(samples)
-                if samples else '')
+                if samples else '')[:MAX_REQUEST // 3]  # the commits always keep most of the room
         request, room = f'App: {name}', MAX_REQUEST - len(tail) - len(name) - 6
         for c in commits:  # whole lines only, newest first, as many as fit beside the voice
             line = f'\n- {c.kind}: {c.subject}'
@@ -249,6 +249,7 @@ class ReleaseNotes:
         self.repos, self.run_git, self.write_story = repos, run_git, write_story
         self.screenshots = screenshots  # (repo, base name, folder) -> (file names, any failed)
         self._latest = None  # (repo, what's new, when): for "add it to the readme"
+        self._written: dict[str, str] = {}  # repo -> the README text Vision last wrote there
         self.folder, self.announce, self.clock = Path(folder), announce, clock
         self.run = run or (lambda job: threading.Thread(target=job, name='release-notes', daemon=True).start())
         self._lock = threading.Lock()
@@ -298,34 +299,38 @@ class ReleaseNotes:
             return f'{Path(repo).name} has no README.md, so I left it alone.'
         except OSError:
             return f"I couldn't read {Path(repo).name}'s README."
-        eol = '\r\n' if '\r\n' in text else '\n'
+        key = Path(repo).as_posix()
+        if (self.run_git(repo, 'status', '--porcelain', '--', 'README.md') or '').strip() and \
+                self._written.get(key) != text:
+            return f"{Path(repo).name}'s README.md has changes of yours that aren't committed, so I left it alone."
+        bom = '\ufeff' if text.startswith('\ufeff') else ''
+        body = text[len(bom):]
+        eol = '\r\n' if '\r\n' in body else '\n'
         section = eol.join([README_START, f"## What's new ({when:%Y-%m-%d})", '']
                            + [f'- {_plain(item, 200)}' for item in items] + [README_END]) + eol
-        start, end = text.find(README_START), text.find(README_END)
+        start, end = body.find(README_START), body.find(README_END)
         if 0 <= start < end:
             stop = end + len(README_END)
-            stop += len(eol) if text.startswith(eol, stop) else 0
-            text = text[:start] + section + text[stop:]
+            stop += len(eol) if body.startswith(eol, stop) else 0
+            body = body[:start] + section + body[stop:]
         else:
-            heading = re.search(r'^# .*(?:\r?\n)(?:\r?\n)?', text, flags=re.M)
+            # Only a title on the first line counts; a "# comment" further down may be inside a code block.
+            heading = re.match(r'(?:[ \t]*\r?\n)*# .*(?:\r?\n)(?:[ \t]*\r?\n)?', body)
             at = heading.end() if heading else 0
-            text = text[:at] + section + eol + text[at:]
+            body = body[:at] + section + eol + body[at:]
         try:
             with open(path, 'w', encoding='utf-8', newline='') as file:
-                file.write(text)
+                file.write(bom + body)
         except OSError:
             return f"I couldn't write {Path(repo).name}'s README."
+        self._written[key] = bom + body
         return f"Added what's new to {Path(repo).name}'s README. It is not committed yet."
 
     def _commit_readme(self, repo: Path) -> str | None:
+        from assistant.show_me import commit_only
         if not (self.run_git(repo, 'status', '--porcelain', '--', 'README.md') or '').strip():
             return None
-        # Only the README goes in the commit, whatever else is staged.
-        if (self.run_git(repo, 'add', '--', 'README.md') is None
-                or self.run_git(repo, 'commit', '-q', '-m', "docs: what's new", '--', 'README.md') is None):
-            return "Git didn't commit the README, so the change is still waiting."
-        branch = (self.run_git(repo, 'rev-parse', '--abbrev-ref', 'HEAD') or '').strip() or 'the current branch'
-        return f'Committed README.md to {Path(repo).name} on {branch}.'
+        return commit_only(self.run_git, repo, 'README.md', "docs: what's new", 'the README')
 
     def _state(self) -> dict:
         try:
