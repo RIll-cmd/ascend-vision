@@ -841,6 +841,26 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             except Exception as exc:
                 LOG.warning('Promise check-ins unavailable (%s)', type(exc).__name__)
 
+        revival_coach = None
+        revival_config = getattr(config, 'revival', None)
+        if revival_config is not None and revival_config.enabled:
+            try:
+                from assistant.revival import RevivalCoach, RevivalStore, command_runner, default_repos, scan
+                from assistant.slump import read_room_sessions
+                run_git, run_gh = command_runner('git'), command_runner('gh', timeout=20.0)
+                common = run_git(Path(__file__).resolve().parent, 'rev-parse', '--path-format=absolute',
+                                 '--git-common-dir')
+                repos = ([Path(r) for r in revival_config.repos] if revival_config.repos
+                         else default_repos(Path(common.strip()).parent) if common else [])
+                revival_room_url = getattr(agent_room_config, 'base_url', 'http://127.0.0.1:5173')
+                revival_coach = RevivalCoach(
+                    RevivalStore(Path(config.storage.database).parent / 'revival.json'),
+                    scan=lambda: scan(repos, run_git=run_git, run_gh=run_gh,
+                                      room=lambda: read_room_sessions(revival_room_url), now=datetime.now()),
+                    announce=announce_paced, promise=promise_coach.add if promise_coach is not None else None)
+            except Exception as exc:
+                LOG.warning('Leftover check-ins unavailable (%s)', type(exc).__name__)
+
         nutrition_coach = None
         try:
             from assistant.nutrition import NutritionStore
@@ -872,7 +892,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             # Away/sleep first (it blocks everything while asleep), then eyes, weather, GitHub, food, promises, slumps.
             # While a how-to is recording, every line is narration, so the recorder comes right after away mode.
             for handler in (away_mode, how_to, eye_calibrator, focus_doorman, weather_coach, github_coach,
-                            nutrition_coach, promise_coach, slump_coach):
+                            nutrition_coach, promise_coach, revival_coach, slump_coach):
                 if handler is not None:
                     try:
                         answer = handler.intercept(text)
@@ -1772,6 +1792,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         promise_coach.tick(owner_available)
                     except Exception as exc:
                         LOG.debug('Promise check skipped (%s)', type(exc).__name__)
+                if revival_coach is not None:
+                    try:
+                        revival_coach.tick(owner_available)
+                    except Exception as exc:
+                        LOG.debug('Leftover check skipped (%s)', type(exc).__name__)
                 try:
                     for notice in key_low_notifier.messages(ai_key_summary()):
                         announce_paced(notice)

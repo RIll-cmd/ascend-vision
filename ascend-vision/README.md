@@ -51,6 +51,7 @@ Everything has a default. Edit `config.yaml` only if you need to:
 | Turn off "do not disturb" focus blocks | `focus_doorman.enabled: false` |
 | Hold agent room announcements during a focus block too | `focus_doorman.let_room_through: false` |
 | Keep how-to guides somewhere else, or write them without the AI | `show_me.folder: 'D:/guides'`, `show_me.ai_cleanup: false` |
+| Stop the weekly "something you left" check-in, or pick which repos it reads | `revival.enabled: false`, `revival.repos: ['D:/ascend_hub']` |
 
 While a gate waits, say the wake word, then the answer ("Vision, approve"); the
 follow-up "yes" needs no wake word for 20 seconds. Phone messages and voice notes
@@ -85,6 +86,13 @@ say (and when the screen changes), then writes `data/howto/<date>-<title>/guide.
 with numbered steps and those screenshots. Only the words you said go to the AI to tidy
 the steps (`show_me.ai_cleanup`); screenshots stay on this computer, so mind what is on
 screen. "cancel recording" throws it away; recording stops by itself after 30 minutes.
+
+Once a week, during the day, Vision brings back one thing you left: a branch with
+unmerged commits untouched for two weeks, an Agent Room session you stopped or left
+at a gate, or a GitHub issue you opened that nobody touched for a month. It looks at
+the git repos next to Vision's own folder (or `revival.repos`) and only reads them.
+Answer "revive it" (it becomes a promise for tomorrow), "later" (asked again in a
+month) or "forget it"; ask "what did I leave?" any time.
 
 Advanced and experimental features (phone chat, Discord, browser automation,
 proactive check-ins, Core link) are off by default and are described below.

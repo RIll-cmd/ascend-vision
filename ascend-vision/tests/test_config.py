@@ -293,6 +293,20 @@ def test_show_me_config_defaults_and_validation(tmp_path):
     assert load_config(path).show_me == ShowMeConfig(folder='D:/guides', ai_cleanup=False)
 
 
+def test_revival_config_defaults_and_validation(tmp_path):
+    from config import Config, RevivalConfig, load_config
+
+    assert Config().revival == RevivalConfig(enabled=True, repos=())
+    with pytest.raises(ValueError, match='revival.enabled'):
+        RevivalConfig(enabled='yes')
+    for bad in ('D:/x', [3], ['']):
+        with pytest.raises(ValueError, match='revival.repos'):
+            RevivalConfig(repos=bad)
+    path = tmp_path / 'config.yaml'
+    path.write_text("revival:\n  repos: ['D:/ascend_hub', 'D:/ascend-vision']\n", encoding='utf-8')
+    assert load_config(path).revival.repos == ('D:/ascend_hub', 'D:/ascend-vision')
+
+
 def test_focus_doorman_config_defaults_and_validation(tmp_path):
     from config import Config, FocusDoormanConfig, load_config
 

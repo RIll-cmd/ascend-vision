@@ -254,6 +254,17 @@ class PromiseCoach:
     def _close(self, promise: Promise, status: str) -> None:
         promise.status, promise.closed = status, self.clock().isoformat()
 
+    def add(self, what: str, due: datetime) -> bool:
+        """A promise another helper made for the owner (a revived leftover); False if it is already open."""
+        with self._lock:
+            if any(p.status == 'open' and p.what == what for p in self._promises):
+                return False
+            now = self.clock()
+            self._promises.append(Promise(id=secrets.token_hex(4), what=what, created=now.isoformat(),
+                                          next=due.isoformat(), timed=False))
+            self._save()
+            return True
+
     def tick(self, owner_available: bool) -> None:
         if not owner_available:
             return

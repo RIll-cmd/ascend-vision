@@ -542,6 +542,21 @@ class ShowMeConfig:
 
 
 @dataclass(frozen=True)
+class RevivalConfig:
+    """Once a week, bring back one unmerged branch, stopped Room session or old issue."""
+    enabled: bool = True
+    repos: tuple[str, ...] = ()  # empty: every git repo next to Vision's own
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('revival.enabled must be a YAML boolean')
+        if not isinstance(self.repos, (list, tuple)) or any(not isinstance(r, str) or not r.strip()
+                                                            for r in self.repos):
+            raise ValueError('revival.repos must be a list of folder paths')
+        object.__setattr__(self, 'repos', tuple(self.repos))
+
+
+@dataclass(frozen=True)
 class WeatherConfig:
     """Daily weather briefing from Open-Meteo (free, no key) for the owner's places."""
     enabled: bool = True
@@ -821,6 +836,7 @@ class Config:
     promises: PromisesConfig = field(default_factory=PromisesConfig)
     focus_doorman: FocusDoormanConfig = field(default_factory=FocusDoormanConfig)
     show_me: ShowMeConfig = field(default_factory=ShowMeConfig)
+    revival: RevivalConfig = field(default_factory=RevivalConfig)
     github: GitHubCoachConfig = field(default_factory=GitHubCoachConfig)
     phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
     browser_automation: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
@@ -848,7 +864,8 @@ def load_config(path: Path) -> Config:
                  'distraction_watch': DistractionWatchConfig, 'away_mode': AwayModeConfig,
                  'weather': WeatherConfig, 'github': GitHubCoachConfig, 'agent_room': AgentRoomConfig,
                  'slump': SlumpConfig, 'promises': PromisesConfig,
-                 'focus_doorman': FocusDoormanConfig, 'show_me': ShowMeConfig, 'browser_automation': BrowserAutomationConfig}
+                 'focus_doorman': FocusDoormanConfig, 'show_me': ShowMeConfig, 'revival': RevivalConfig,
+                 'browser_automation': BrowserAutomationConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')
     values = {}

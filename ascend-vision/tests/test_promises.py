@@ -372,6 +372,15 @@ def test_a_held_ordinary_ask_does_not_block_a_clock_time_reminder(tmp_path):
     assert voice.urgent[-1] == 'Checking in on call mom. Done?'
 
 
+def test_other_helpers_can_add_a_promise(tmp_path):
+    coach, clock, voice = coach_for(tmp_path)
+    assert coach.add('get back to branch fix login in ascend hub', datetime(2026, 10, 29, 10, 0))
+    assert not coach.add('get back to branch fix login in ascend hub', datetime(2026, 10, 30, 10, 0))
+    clock.now = datetime(2026, 10, 29, 10, 0)
+    coach.tick(True)
+    assert voice.said == ['Checking in on get back to branch fix login in ascend hub. Done?']
+
+
 def test_a_bare_okay_does_not_cross_off(tmp_path):
     coach, clock, voice = asked(tmp_path)
     assert coach.intercept('okay') is None
