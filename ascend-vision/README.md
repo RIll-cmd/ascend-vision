@@ -102,7 +102,7 @@ went smoothly, what the smooth ones had that the rough ones lacked (named files,
 what done looks like, a check command, listed steps, an example), and one tip. Ask "how
 are my prompts?" any time.
 
-Say "read this for me" (the screen), "read what I'm holding" (a page held to the camera)
+Say "read this for me" (the screen your active window is on), "read what I'm holding" (a page held to the camera)
 or "read my latest download" (the newest PDF in Downloads from the last week). Vision
 sends that one image or PDF to Google Gemini, then says what it is and the two most
 serious red flags (automatic renewal, fees, cancellation notice, deadlines...), and keeps

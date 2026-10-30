@@ -837,8 +837,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         read_config = getattr(config, 'read_for_me', None)
         if read_config is not None and read_config.enabled:
             try:
-                from assistant.read_for_me import DocumentReader, make_gemini_reader
-                from screen_auditor import capture_desktop
+                from assistant.read_for_me import DocumentReader, capture_active_monitor, make_gemini_reader
 
                 def camera_image():
                     frame = latest_frame[0]
@@ -850,7 +849,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     ask_model=make_gemini_reader(
                         os.getenv(config.llm.gemini_api_key_env, '').strip().split(',')[0].strip(),
                         config.llm.gemini_model),
-                    screen=capture_desktop, camera=camera_image,
+                    screen=capture_active_monitor, camera=camera_image,
                     downloads=Path(read_config.downloads) if read_config.downloads else Path.home() / 'Downloads',
                     announce=announce_local,
                     folder=Path(read_config.folder) if read_config.folder

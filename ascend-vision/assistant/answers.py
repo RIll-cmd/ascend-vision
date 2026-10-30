@@ -12,7 +12,7 @@ _NOT_NOW = re.compile(r'(?:(?:hey|ok|okay) )?(?:vision )?(?:not now|no|nope|no t
 
 
 def words(text: str) -> str:
-    return ' '.join(re.sub(r"[^a-z' ]", ' ', text.lower()).split())
+    return ' '.join(re.sub(r"[^a-z' ]", ' ', text.lower().replace('’', "'")).split())  # ’ typed on phones
 
 
 def is_yes(text: str) -> bool:

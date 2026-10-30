@@ -89,9 +89,7 @@ def test_no_pdf_says_so(tmp_path):
     assert reader.intercept('check my last PDF') == "I don't see a PDF in Downloads from the last week."
 
 
-@pytest.mark.parametrize('answer', [None, 'not json', {'summary': ''}, {'summary': 'x', 'red_flags': 'many'},
-                                    {'summary': 'x', 'red_flags': [{'severity': 'urgent', 'text': 'y'}]},
-                                    {'summary': 'x', 'red_flags': [{'severity': 'high', 'text': 'y'}] * 9}])
+@pytest.mark.parametrize('answer', [None, 'not json', {'summary': ''}, {'summary': 'x', 'red_flags': 'many'}])
 def test_a_bad_model_reply_is_not_trusted(tmp_path, answer):
     assert parse_reading(answer) is None
     reader, calls, said, jobs = reader_for(tmp_path, answer=answer)
@@ -102,7 +100,8 @@ def test_a_bad_model_reply_is_not_trusted(tmp_path, answer):
 
 
 def test_a_failing_model_or_missing_key(tmp_path):
-    reader, calls, said, jobs = reader_for(tmp_path, answer=PermissionError('no key'))
+    from assistant.read_for_me import MissingKey
+    reader, calls, said, jobs = reader_for(tmp_path, answer=MissingKey())
     reader.intercept('read this for me')
     finish(jobs)
     assert said == ['Reading needs a Gemini key.']
@@ -131,3 +130,90 @@ def test_spoken_answer_without_flags_or_with_one():
     capital = {**one, 'red_flags': [{'severity': 'high', 'text': 'The plan renews.'},
                                     {'severity': 'low', 'text': 'USD only.'}]}
     assert spoken_answer(capital).endswith('high, the plan renews; low, USD only.')
+
+
+def test_one_odd_flag_does_not_lose_the_reading():
+    reading = parse_reading({'kind': 'Lease Agreement', 'summary': 'A lease.', 'red_flags': [
+        {'severity': 'High', 'text': 'renews by itself'}, {'severity': 'critical', 'text': 'odd'}, 'junk']
+        + [{'severity': 'low', 'text': f'small {n}'} for n in range(9)]})
+    assert reading['red_flags'][0] == {'severity': 'high', 'text': 'renews by itself'}
+    assert len(reading['red_flags']) == 8
+    assert spoken_answer(reading).endswith("I'm not a lawyer, so for anything big, ask one.")
+
+
+def test_a_too_big_newest_pdf_is_refused_not_swapped(tmp_path):
+    downloads = tmp_path / 'Downloads'
+    downloads.mkdir()
+    older = downloads / 'invoice.pdf'
+    older.write_bytes(b'%PDF small')
+    os.utime(older, (0, (NOW - timedelta(hours=2)).timestamp()))
+    big = downloads / 'lease.pdf'
+    with open(big, 'wb') as file:
+        file.truncate(21 * 1024 * 1024)
+    os.utime(big, (0, (NOW - timedelta(hours=1)).timestamp()))
+    reader, *_ = reader_for(tmp_path, downloads=downloads)
+    assert reader.intercept('read my latest download') == 'The newest PDF, lease.pdf, is too big for me to read.'
+
+
+def test_an_empty_or_still_downloading_pdf_is_skipped(tmp_path):
+    downloads = tmp_path / 'Downloads'
+    downloads.mkdir()
+    ready = downloads / 'ready.pdf'
+    ready.write_bytes(b'%PDF ok')
+    os.utime(ready, (0, (NOW - timedelta(hours=2)).timestamp()))
+    for name in ('report.pdf', 'report.pdf.part', 'empty.pdf'):
+        (downloads / name).write_bytes(b'x' if name.endswith('.part') else b'')
+        os.utime(downloads / name, (0, (NOW - timedelta(minutes=5)).timestamp()))
+    (downloads / 'report.pdf').write_bytes(b'%PDF partial')
+    os.utime(downloads / 'report.pdf', (0, (NOW - timedelta(minutes=5)).timestamp()))
+    assert latest_pdf(downloads, NOW) == ready
+
+
+def test_the_pdf_name_is_said_with_the_answer(tmp_path):
+    downloads = tmp_path / 'Downloads'
+    downloads.mkdir()
+    lease = downloads / 'lease.pdf'
+    lease.write_bytes(b'%PDF lease')
+    os.utime(lease, (0, (NOW - timedelta(hours=1)).timestamp()))
+    reader, calls, said, jobs = reader_for(tmp_path, downloads=downloads)
+    reader.intercept('read my latest download')
+    finish(jobs)
+    assert said[0].startswith('lease.pdf: A one-year flat lease')
+
+
+def test_a_file_read_error_is_not_called_a_missing_key(tmp_path):
+    reader, calls, said, jobs = reader_for(tmp_path, answer=PermissionError('file locked'))
+    reader.intercept('read this for me')
+    finish(jobs)
+    assert said == ["I couldn't read that one. Try again, or bring it closer."]
+
+
+def test_a_tiny_placeholder_frame_counts_as_no_camera(tmp_path):
+    reader, calls, said, jobs = reader_for(tmp_path)
+    reader.camera = lambda: Image.new('RGB', (1, 1))
+    assert reader.intercept('read this paper') == "I can't see the camera right now."
+
+
+def test_no_document_keeps_no_notes(tmp_path):
+    reader, calls, said, jobs = reader_for(tmp_path, answer={'kind': 'none', 'summary': "I can't see a document.",
+                                                             'red_flags': [], 'dates': []})
+    reader.intercept('read this for me')
+    finish(jobs)
+    assert said == ["I can't see a document."] and not (tmp_path / 'readings').exists()
+
+
+def test_a_failed_screenshot_is_said_plainly(tmp_path):
+    reader, *_ = reader_for(tmp_path)
+
+    def locked():
+        raise OSError('screen locked')
+    reader.screen = locked
+    assert reader.intercept('read this for me') == "I couldn't take a screenshot right now."
+    assert reader.intercept('read this for me') == "I couldn't take a screenshot right now.", 'not stuck busy'
+
+
+@pytest.mark.parametrize('phrase', ['can you read this for me', 'read this for me please', 'read the latest pdf',
+                                    'read this page for me', 'Read what I’m holding'])
+def test_natural_phrasings(tmp_path, phrase):
+    reader, *_ = reader_for(tmp_path)
+    assert reader.intercept(phrase) is not None
