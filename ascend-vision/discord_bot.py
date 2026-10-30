@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from assistant.memory import MemoryStore, UnavailableMemoryStore
 from assistant.doorman_inbox import Reception
 from assistant.phone_handler import PhoneMessageHandler
+from assistant.promises import promise_desk
 from assistant.service import AssistantService
 from assistant.tool_runtime import ToolRuntime, ToolSpec
 from config import load_config
@@ -50,8 +51,13 @@ def build_discord_bot(settings: DiscordBotSettings, config, *, sync_commands: bo
 
     assistant = AssistantService(config.feedback, config.llm, memory_store=memory_store,
                                  tool_runtime=status_runtime)
+    room_answer = None
+    promises = getattr(config, "promises", None)
+    if promises is not None and promises.enabled:
+        # "remind me to ..." from Discord waits in a file for Vision, which owns the promise list.
+        room_answer = promise_desk(Path(config.storage.database).parent)
     handler = PhoneMessageHandler(assistant, owner_id=settings.owner_id,
-                                  allowed_channels=frozenset({"discord_dm"}))
+                                  allowed_channels=frozenset({"discord_dm"}), room_answer=room_answer)
     core = DiscordCoreClient(settings.core_url, settings.bridge_token)
     receptionist = None
     doorman = getattr(config, "focus_doorman", None)

@@ -26,11 +26,12 @@ _DAY_CLOCK = re.compile(rf"(today|tonight|tomorrow) at ({_CLOCK})|at ({_CLOCK}) 
 # Longer forms first, so "at 10am tomorrow" is not cut to "at 10am".
 _WHEN = (rf"(?P<when>(?:today|tonight|tomorrow) at {_CLOCK}|at {_CLOCK} (?:today|tonight|tomorrow)"
          r"|tomorrow(?: (?:morning|afternoon|evening|night))?|today|tonight|this (?:morning|afternoon|evening)"
-         rf"|(?:on|by) (?:{'|'.join(WEEKDAYS)})|next week"
+         rf"|(?:(?:on|by|this|next) )?(?:{'|'.join(WEEKDAYS)})|next week"
          r"|in (?:a|an|one|\d+) (?:minutes?|hours?|days?)"
          rf"|at {_CLOCK})")
 _EXPLICIT_AFTER = re.compile(rf"\bremind me (?:to|about) (?P<what>.+?) {_WHEN}$")
 _EXPLICIT_BEFORE = re.compile(rf"\bremind me {_WHEN} (?:to|about) (?P<what>.+)$")
+_BARE = re.compile(rf"(?:(?:hey|ok|okay) )?(?:vision )?remind me {_WHEN}")  # the task comes next
 _IMPLICIT = re.compile(rf"\b(?:i'll|i will|i'm going to|i am going to) (?P<what>.+?) {_WHEN}(?= |$)")
 # Plans that are not tasks to chase ("I'll be late today", "I'll see you tomorrow").
 _NOT_A_TASK = re.compile(r"(?:be|have|never|not|probably|maybe|try|go to (?:bed|sleep)|head to bed|see you"
@@ -84,6 +85,9 @@ def _due(when: str, now: datetime) -> tuple[datetime, bool]:
         if day_word == 'tomorrow':
             return _clock(clock, tomorrow, now, roll=False), True
         return _clock(clock, today, now, roll=True, evening=day_word == 'tonight'), True
+    if when.split()[-1] in WEEKDAYS:  # "friday", "on friday", "next friday": the coming one
+        ahead = (WEEKDAYS.index(when.split()[-1]) - today.weekday()) % 7 or 7
+        return at_hour(today + timedelta(days=ahead), 10), False
     if when in ('today', 'tonight') or when.startswith('this '):
         hour = {'today': 17, 'tonight': 20}.get(when) or PART_HOURS[when.split()[1]]
         due = at_hour(today, hour)
@@ -91,9 +95,6 @@ def _due(when: str, now: datetime) -> tuple[datetime, bool]:
     if when.startswith('tomorrow'):
         parts = when.split()
         return at_hour(tomorrow, PART_HOURS[parts[1]] if len(parts) > 1 else 10), False
-    if when.startswith(('on ', 'by ')):
-        ahead = (WEEKDAYS.index(when.split()[1]) - today.weekday()) % 7 or 7
-        return at_hour(today + timedelta(days=ahead), 10), False
     if when == 'next week':
         return at_hour(today + timedelta(days=7 - today.weekday()), 10), False
     if when.startswith('in '):
@@ -103,6 +104,10 @@ def _due(when: str, now: datetime) -> tuple[datetime, bool]:
             raise ValueError(f'too far ahead: {when}')
         return now + timedelta(**{unit: amount}), True
     return _clock(when[3:], today, now, roll=True), True
+
+
+def _when_words(when: str) -> str:
+    return f'on {when.split()[-1]}' if when.split()[-1] in WEEKDAYS else when
 
 
 def parse_promise(text: str, now: datetime) -> Caught | None:
@@ -120,7 +125,7 @@ def parse_promise(text: str, now: datetime) -> Caught | None:
                 due, timed = _due(found['when'], now)
             except ValueError:
                 continue
-            return Caught(what=what, due=due, timed=timed, explicit=explicit, when=found['when'])
+            return Caught(what=what, due=due, timed=timed, explicit=explicit, when=_when_words(found['when']))
     return None
 
 
@@ -272,13 +277,42 @@ def make_evidence(repos, run_git, room_data: Path):
         commits = []
         for repo in repos:
             email = (run_git(repo, 'config', 'user.email') or '').strip()
-            args = ['log', '--all', '--no-merges', f'--since={since.isoformat(timespec="seconds")}']
-            if email:
-                args.append(f'--author={email}')
-            out = run_git(repo, *args, '--format=%s', '-n', '50') or ''
+            if not email:  # without it a teammate's commit could pass for the owner's
+                continue
+            out = run_git(repo, 'log', '--all', '--no-merges', f'--since={since.isoformat(timespec="seconds")}',
+                          f'--author={re.escape(email)}', '--format=%s', '-n', '50') or ''
             commits += [(Path(repo).name, line.strip()) for line in out.splitlines() if line.strip()]
         return find_evidence(what, commits, _done_room_titles(room_data, since))
     return lookup
+
+
+def promise_desk(folder: Path, clock=datetime.now):
+    """For the Discord bot, which runs in its own process: "remind me to ..." is left in promise_inbox.jsonl for
+    Vision, and "what did I promise?" is read from promises.json; the bot never writes that file."""
+    folder = Path(folder)
+    store, inbox = PromiseStore(folder / 'promises.json'), folder / 'promise_inbox.jsonl'
+    lock = threading.Lock()
+
+    def answer(text: str) -> str | None:
+        now = clock()
+        if _LIST.fullmatch(words(text)):
+            return PromiseCoach(store, announce=lambda *a, **k: None, clock=clock)._list(now)
+        caught = parse_promise(text, now)
+        if caught is None or not caught.explicit:
+            return None
+        with lock:
+            try:
+                waiting = [json.loads(line).get('what') for line in inbox.read_text(encoding='utf-8').splitlines()]
+            except (OSError, ValueError):
+                waiting = []
+            if caught.what in waiting or any(p.status == 'open' and p.what == caught.what for p in store.load()):
+                return "That's already on your list."
+            folder.mkdir(parents=True, exist_ok=True)
+            with open(inbox, 'a', encoding='utf-8') as file:
+                file.write(json.dumps({'what': caught.what, 'due': caught.due.isoformat(), 'timed': caught.timed,
+                                       'at': now.isoformat()}) + '\n')
+        return f"Okay. I'll check on {caught.what} {caught.when}."
+    return answer
 
 
 def _sentence(text: str) -> str:
@@ -289,8 +323,9 @@ class PromiseCoach:
     """Catches promises in chat, and asks about one due promise at a time while the owner is around."""
 
     def __init__(self, store: PromiseStore, *, announce, clock=datetime.now, offer_window: float = 120.0,
-                 evidence=None, queue=None):
+                 evidence=None, queue=None, inbox=None):
         self.store = store
+        self.inbox = Path(inbox) if inbox else None  # reminders the Discord bot (another process) took
         self.evidence = evidence  # (what, made at) -> 'the commit ...' | None, for the first check-in
         self.queue = queue  # what -> (ok, message): hands the promise to the Agent Room
         self.announce = announce
@@ -303,6 +338,7 @@ class PromiseCoach:
         self._offer: tuple[str, str, datetime, int | None] | None = None
         self._captured: tuple[str, datetime] | None = None
         self._queueing: Promise | None = None  # handed to the Room once the lock is let go
+        self._task_for: tuple[str, datetime, bool, datetime] | None = None  # "remind me friday": when, due, timed, asked
 
     def _open_offer(self, now: datetime):
         """The open question, if it is recent and no other question (a slump check-in) was spoken after it."""
@@ -335,7 +371,36 @@ class PromiseCoach:
             self._save()
             return True
 
+    def _take_inbox(self) -> None:
+        reading = self.inbox.with_name(self.inbox.name + '.reading')
+        try:
+            if self.inbox.exists() and not reading.exists():
+                os.replace(self.inbox, reading)
+            lines = reading.read_text(encoding='utf-8').splitlines() if reading.exists() else []
+        except OSError:
+            return  # the bot is writing; next tick
+        added = False
+        for line in lines:
+            try:
+                item = json.loads(line)
+                what, due, made = str(item['what']), datetime.fromisoformat(item['due']), datetime.fromisoformat(item['at'])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if what and not any(p.status == 'open' and p.what == what for p in self._promises):
+                self._promises.append(Promise(id=secrets.token_hex(4), what=what, created=made.isoformat(),
+                                              next=due.isoformat(), timed=item.get('timed') is True))
+                added = True
+        if added:
+            self._save()
+        try:
+            reading.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def tick(self, owner_available: bool) -> None:
+        if self.inbox is not None:
+            with self._lock:
+                self._take_inbox()
         if not owner_available:
             return
         with self._lock:
@@ -376,7 +441,8 @@ class PromiseCoach:
                     found = self.evidence(promise.what, datetime.fromisoformat(promise.created))
                 except Exception as exc:
                     LOG.warning('Promise evidence lookup failed (%s)', type(exc).__name__)
-            line = f'Checking in on {promise.what}. ' + (f'I saw {found}. ' if found else '') + 'Done?'
+            line = (f'Looks like {promise.what} is done: I saw {found}. Cross it off?' if found
+                    else f'Checking in on {promise.what}. Done?')
         self.announce(line, on_said=self._opened('ask', promise.id), urgent=urgent)
 
     def _opened(self, kind: str, promise_id: str):
@@ -443,6 +509,24 @@ class PromiseCoach:
                 self._close(promise, 'done')
                 self._save()
                 return f'Nice. Crossed off {promise.what}.', None
+        waiting = self._task_for
+        if waiting and (now - waiting[3]).total_seconds() <= self.offer_window:
+            task = re.sub(r'^(?:to|about) ', '', said).strip()
+            if '?' not in text and not _QUESTION.match(task) and 3 <= len(task) <= 120:
+                self._task_for = None
+                when, due, timed, _ = waiting
+                self._promises.append(Promise(id=secrets.token_hex(4), what=task, created=now.isoformat(),
+                                              next=due.isoformat(), timed=timed))
+                self._save()
+                return f"Okay. I'll check on {task} {when}.", None
+        bare = _BARE.fullmatch(' '.join(re.sub(r"[^a-z0-9': ]", ' ', text.lower()).split()))
+        if bare:
+            try:
+                due, timed = _due(bare['when'], now)
+            except ValueError:
+                return None, None
+            self._task_for = (_when_words(bare['when']), due, timed, now)
+            return f'What should I remind you about {_when_words(bare["when"])}?', None
         caught = parse_promise(text, now)
         if caught is None:
             return None, None

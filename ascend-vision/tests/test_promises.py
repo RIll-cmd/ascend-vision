@@ -434,7 +434,8 @@ def test_first_check_in_mentions_the_commit_it_found(tmp_path):
         return "the commit 'fix login redirect' in ascend_hub"
 
     coach, clock, voice = ask_with_evidence(tmp_path, evidence)
-    assert voice.said == ["Checking in on fix the login. I saw the commit 'fix login redirect' in ascend_hub. Done?"]
+    assert voice.said == ["Looks like fix the login is done: I saw the commit 'fix login redirect' in ascend_hub. "
+                          'Cross it off?']
     assert seen == [('fix the login', WED_9AM)]
     assert coach.intercept('yes') == 'Nice. Crossed off.'
 
@@ -521,9 +522,9 @@ def test_make_evidence_reads_owner_commits_since_the_promise_and_done_room_sessi
     lookup = make_evidence([tmp_path / 'hub', tmp_path / 'other'], run_git, tmp_path / 'room')
     assert lookup('fix the login', WED_9AM - timedelta(days=1)) == "the commit 'fix(hub): login redirect' in hub"
     log = [args for name, args in calls if args[0] == 'log']
-    assert log[0] == ('log', '--all', '--no-merges', '--since=2026-10-27T09:00:00', '--author=me@example.com',
+    assert log[0] == ('log', '--all', '--no-merges', '--since=2026-10-27T09:00:00', '--author=me@example' + chr(92) + '.com',
                       '--format=%s', '-n', '50')
-    assert '--author=me@example.com' not in log[1]  # no email set there: any author
+    assert len(log) == 1  # no email set in the other repo: nobody's commits can be told apart, so none count
     assert lookup('write the report', WED_9AM - timedelta(days=1)) == "the Room session 'Write the weekly report'"
     assert lookup('plan the trip', WED_9AM - timedelta(days=1)) is None  # stopped, or made before the promise
     assert make_evidence([], run_git, tmp_path / 'missing')('fix the login', WED_9AM) is None
@@ -604,3 +605,58 @@ def test_a_phone_reminder_keeps_the_pc_drop_that_window(tmp_path):
     assert coach.intercept('drop that') == 'Dropped.'
     assert {p['what']: p['status'] for p in json.loads((tmp_path / 'promises.json').read_text())} == {
         'fix the login': 'dropped', 'buy milk': 'open'}
+
+
+# Polish: bare weekdays, a reminder with no task yet, the Discord bot's desk, careful authors
+
+@pytest.mark.parametrize('when, expected', [
+    ('friday', datetime(2026, 10, 30, 10, 0)),
+    ('next friday', datetime(2026, 10, 30, 10, 0)),
+    ('this friday', datetime(2026, 10, 30, 10, 0)),
+])
+def test_a_bare_weekday_is_a_time(when, expected):
+    assert due(f'remind me {when} to stretch') == expected
+    assert due(f'remind me to stretch {when}') == expected
+
+
+def test_a_reminder_without_a_task_asks_for_it(tmp_path):
+    coach, clock, voice = coach_for(tmp_path)
+    assert coach.intercept('Remind me Friday.') == 'What should I remind you about on friday?'
+    assert coach.intercept('what time is it?') is None  # a question is chat, the offer stays
+    assert coach.intercept('to call the landlord') == "Okay. I'll check on call the landlord on friday."
+    saved = json.loads((tmp_path / 'promises.json').read_text())
+    assert [(p['what'], p['next']) for p in saved] == [('call the landlord', '2026-10-30T10:00:00')]
+    coach.intercept('remind me tomorrow')
+    clock.now += timedelta(minutes=3)
+    assert coach.intercept('water the plants') is None  # too late: it was not an answer
+
+
+def test_the_discord_bots_desk_leaves_reminders_for_vision(tmp_path):
+    from assistant.promises import promise_desk
+    desk = promise_desk(tmp_path, clock=lambda: WED_9AM)
+    assert desk('remind me to call mom tomorrow') == "Okay. I'll check on call mom tomorrow."
+    assert desk('remind me to call mom tomorrow') == "That's already on your list."
+    assert desk("I'll fix the login tomorrow") is None
+    assert desk('how are you') is None
+    clock, voice = Clock(WED_9AM), Voice(False)
+    coach = PromiseCoach(PromiseStore(tmp_path / 'promises.json'), announce=voice, clock=clock,
+                         inbox=tmp_path / 'promise_inbox.jsonl')
+    coach.tick(False)  # the inbox is read even while the owner is away
+    assert coach.intercept('what did I promise') == 'One open: call mom, due tomorrow.'
+    assert not (tmp_path / 'promise_inbox.jsonl').exists()
+    assert desk('what did I promise') == 'One open: call mom, due tomorrow.'
+    with open(tmp_path / 'promise_inbox.jsonl', 'a', encoding='utf-8') as f:
+        f.write('not json\n{"what": 3}\n')
+    coach.tick(False)
+    assert len(json.loads((tmp_path / 'promises.json').read_text())) == 1
+
+
+def test_an_email_with_regex_characters_is_matched_literally(tmp_path):
+    from assistant.promises import make_evidence
+    calls = []
+
+    def run_git(repo, *args):
+        calls.append(args)
+        return 'me+vision@example.com\n' if args[0] == 'config' else ''
+    make_evidence([tmp_path / 'r'], run_git, tmp_path / 'room')('fix the login', WED_9AM)
+    assert any(a.startswith('--author=') and a.endswith('me\\+vision@example\\.com') for a in calls[-1])

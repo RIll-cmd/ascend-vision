@@ -907,13 +907,16 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 revival_repos = getattr(getattr(config, 'revival', None), 'repos', ())
                 promise_repos = ([Path(r) for r in revival_repos] if revival_repos
                                  else default_repos(Path(common.strip()).parent) if common else [])
-                promise_room = (Path(common.strip()).parent.parent / 'ascend_hub' / '.sites-runtime' / 'agent-room'
+                configured_room = getattr(getattr(config, 'prompt_coach', None), 'room_data', '')
+                promise_room = (Path(configured_room) if configured_room
+                                else Path(common.strip()).parent.parent / 'ascend_hub' / '.sites-runtime' / 'agent-room'
                                 if common else Path('.'))
                 promise_coach = PromiseCoach(
                     PromiseStore(Path(config.storage.database).parent / 'promises.json'), announce=announce_paced,
                     evidence=make_evidence(promise_repos, promise_git, promise_room),
                     queue=(promise_queue(room_client, newest=lambda dirs: newest_repo(dirs, promise_git))
-                           if room_client is not None else None))
+                           if room_client is not None else None),
+                    inbox=Path(config.storage.database).parent / 'promise_inbox.jsonl')
             except Exception as exc:
                 LOG.warning('Promise check-ins unavailable (%s)', type(exc).__name__)
 

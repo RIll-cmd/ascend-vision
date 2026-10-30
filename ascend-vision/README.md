@@ -75,12 +75,14 @@ keeps it in `data/promises.json`. When it is due and you are at the PC, Vision a
 once whether it is done; if not, it asks again the next day, then offers to keep it,
 make it smaller or drop it, and goes quiet after five asks. Answer "done", "not yet",
 "smaller" or "drop it"; say "what did I promise?", "done with the login" or, right
-after Vision notes one, "drop that". Before the first check-in Vision looks for a
-commit of yours or a finished Agent Room session that matches, and names it in the
-question. With the Agent Room on, answer "queue it" to add the job to the Room's
-queue (in the repo the promise names, else the one you committed to last); it starts
-as soon as the Room is free. In phone chat, "remind me to ..." and "what did I
-promise?" work too.
+after Vision notes one, "drop that". "Remind me Friday" on its own makes Vision ask
+what for. Before the first check-in Vision looks for a commit of yours (by your git
+email) or a finished Agent Room session that matches; if it finds one it asks "Looks
+like that is done ... Cross it off?" instead of reminding you. From the third ask, with
+the Agent Room on, answer "queue it" to add the job to the Room's queue (in the repo
+the promise names, else the one you committed to last); it starts as soon as the Room
+is free. In phone chat and in a Discord DM to Vision's bot, "remind me to ..." and
+"what did I promise?" work too.
 
 Say "Vision, do not disturb" (or "focus block for 25 minutes"; 50 minutes if you give
 no time) and Vision's own notices (weather, GitHub, food, check-ins) wait until the
