@@ -29,10 +29,12 @@ _WHEN = (rf"(?P<when>(?:today|tonight|tomorrow) at {_CLOCK}|at {_CLOCK} (?:today
          rf"|(?:(?:on|by|this|next) )?(?:{'|'.join(WEEKDAYS)})|next week"
          r"|in (?:a|an|one|\d+) (?:minutes?|hours?|days?)"
          rf"|at {_CLOCK})")
+# In "I will send the friday report" a bare weekday is part of the task, so implicit promises need "on friday".
+_WHEN_IMPLICIT = _WHEN.replace('(?:(?:on|by|this|next) )?', '(?:on|by|this|next) ')
 _EXPLICIT_AFTER = re.compile(rf"\bremind me (?:to|about) (?P<what>.+?) {_WHEN}$")
 _EXPLICIT_BEFORE = re.compile(rf"\bremind me {_WHEN} (?:to|about) (?P<what>.+)$")
 _BARE = re.compile(rf"(?:(?:hey|ok|okay) )?(?:vision )?remind me {_WHEN}")  # the task comes next
-_IMPLICIT = re.compile(rf"\b(?:i'll|i will|i'm going to|i am going to) (?P<what>.+?) {_WHEN}(?= |$)")
+_IMPLICIT = re.compile(rf"\b(?:i'll|i will|i'm going to|i am going to) (?P<what>.+?) {_WHEN_IMPLICIT}(?= |$)")
 # Plans that are not tasks to chase ("I'll be late today", "I'll see you tomorrow").
 _NOT_A_TASK = re.compile(r"(?:be|have|never|not|probably|maybe|try|go to (?:bed|sleep)|head to bed|see you"
                          r"|talk to you|call you|text you|message you|get back to you|let you know|ping you)\b")
@@ -139,7 +141,11 @@ _LEAD = r"(?:(?:hey|ok|okay) )?(?:vision )?"
 _FINISHED = r"(?:i did(?: it)?|did it|done|all done|finished|i finished(?: it)?|it's done)"
 _DONE = re.compile(rf"{_LEAD}(?:(?:yes|yeah|yep|yup)(?: {_FINISHED})?|(?:ok|okay|sure) {_FINISHED}|{_FINISHED})")
 DROP_THAT_SECONDS = 180  # the note can wait one pacer gap before it is heard
-_NO = re.compile(rf"{_LEAD}(?:no|nope|nah|not yet|no not yet|nope not yet|not now|not today|no thanks|not really)")
+_NO = re.compile(rf"{_LEAD}(?:no|nope|nah|not yet|no not yet|nope not yet|not now|not today|no thanks|not really"
+                 r"|it's not done|its not done|not done)")
+# After "Looks like X is done ... Cross it off?" an easy yes is enough; an ordinary check-in still needs "done".
+_CROSS = re.compile(rf"{_LEAD}(?:(?:yes|yeah|yep|yup|sure|ok|okay)(?: please)?(?: cross it off)?|cross it off(?: please)?)")
+_NEVER = re.compile(rf"{_LEAD}(?:never ?mind|cancel|forget it|forget about it|nothing|no|drop it)")
 _KEEP = re.compile(rf"{_LEAD}keep(?: it)?(?: please| on the list)?")
 _DROP = re.compile(rf"{_LEAD}(?:drop(?: it)?|forget(?: about)? it|cancel(?: it)?)")
 _SMALLER = re.compile(rf"{_LEAD}(?:(?:make it )?smaller|make it small|split it)(?: please)?")
@@ -279,8 +285,9 @@ def make_evidence(repos, run_git, room_data: Path):
             email = (run_git(repo, 'config', 'user.email') or '').strip()
             if not email:  # without it a teammate's commit could pass for the owner's
                 continue
-            out = run_git(repo, 'log', '--all', '--no-merges', f'--since={since.isoformat(timespec="seconds")}',
-                          f'--author={re.escape(email)}', '--format=%s', '-n', '50') or ''
+            # -F: the email is a fixed string; a "+" in a GitHub noreply address is not a regex.
+            out = run_git(repo, 'log', '--all', '--no-merges', '-F', f'--since={since.isoformat(timespec="seconds")}',
+                          f'--author={email}', '--format=%s', '-n', '50') or ''
             commits += [(Path(repo).name, line.strip()) for line in out.splitlines() if line.strip()]
         return find_evidence(what, commits, _done_room_titles(room_data, since))
     return lookup
@@ -301,11 +308,19 @@ def promise_desk(folder: Path, clock=datetime.now):
         if caught is None or not caught.explicit:
             return None
         with lock:
-            try:
-                waiting = [json.loads(line).get('what') for line in inbox.read_text(encoding='utf-8').splitlines()]
+            waiting = []
+            for path in (inbox, inbox.with_name(inbox.name + '.reading')):  # Vision may be reading one right now
+                try:
+                    waiting += [json.loads(line).get('what') for line in path.read_text(encoding='utf-8').splitlines()]
+                except (OSError, ValueError, AttributeError):
+                    pass
+            try:  # read only: a broken file is Vision's to set aside, not the bot's
+                saved = json.loads(store.path.read_text(encoding='utf-8'))
             except (OSError, ValueError):
-                waiting = []
-            if caught.what in waiting or any(p.status == 'open' and p.what == caught.what for p in store.load()):
+                saved = []
+            open_ = {i.get('what') for i in saved if isinstance(i, dict) and i.get('status') == 'open'} \
+                if isinstance(saved, list) else set()
+            if caught.what in waiting or caught.what in open_:
                 return "That's already on your list."
             folder.mkdir(parents=True, exist_ok=True)
             with open(inbox, 'a', encoding='utf-8') as file:
@@ -434,8 +449,8 @@ class PromiseCoach:
                            else 'Keep it, make it smaller, or drop it?'))
             self._asking.add(promise.id)
             self._save()
+        found = None
         if line is None:
-            found = None
             if self.evidence:
                 try:  # git and the Room files are read outside the lock
                     found = self.evidence(promise.what, datetime.fromisoformat(promise.created))
@@ -443,7 +458,7 @@ class PromiseCoach:
                     LOG.warning('Promise evidence lookup failed (%s)', type(exc).__name__)
             line = (f'Looks like {promise.what} is done: I saw {found}. Cross it off?' if found
                     else f'Checking in on {promise.what}. Done?')
-        self.announce(line, on_said=self._opened('ask', promise.id), urgent=urgent)
+        self.announce(line, on_said=self._opened('cross' if found else 'ask', promise.id), urgent=urgent)
 
     def _opened(self, kind: str, promise_id: str):
         """The answer window starts when the question is spoken, not when it is queued."""
@@ -511,6 +526,9 @@ class PromiseCoach:
                 return f'Nice. Crossed off {promise.what}.', None
         waiting = self._task_for
         if waiting and (now - waiting[3]).total_seconds() <= self.offer_window:
+            if _NEVER.fullmatch(said):
+                self._task_for = None
+                return 'Okay.', None
             task = re.sub(r'^(?:to|about) ', '', said).strip()
             if '?' not in text and not _QUESTION.match(task) and 3 <= len(task) <= 120:
                 self._task_for = None
@@ -560,6 +578,10 @@ class PromiseCoach:
             self._offer = None
             self._close(promise, 'dropped')
             return 'Dropped.'
+        if kind == 'cross' and _CROSS.fullmatch(said):
+            self._offer = None
+            self._close(promise, 'done')
+            return 'Nice. Crossed off.'
         if self.queue and promise.asks >= 3 and _QUEUE.fullmatch(said):  # only once the Room was offered
             self._offer = None
             self._queueing = promise

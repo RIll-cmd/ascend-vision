@@ -522,7 +522,7 @@ def test_make_evidence_reads_owner_commits_since_the_promise_and_done_room_sessi
     lookup = make_evidence([tmp_path / 'hub', tmp_path / 'other'], run_git, tmp_path / 'room')
     assert lookup('fix the login', WED_9AM - timedelta(days=1)) == "the commit 'fix(hub): login redirect' in hub"
     log = [args for name, args in calls if args[0] == 'log']
-    assert log[0] == ('log', '--all', '--no-merges', '--since=2026-10-27T09:00:00', '--author=me@example' + chr(92) + '.com',
+    assert log[0] == ('log', '--all', '--no-merges', '-F', '--since=2026-10-27T09:00:00', '--author=me@example.com',
                       '--format=%s', '-n', '50')
     assert len(log) == 1  # no email set in the other repo: nobody's commits can be told apart, so none count
     assert lookup('write the report', WED_9AM - timedelta(days=1)) == "the Room session 'Write the weekly report'"
@@ -659,4 +659,46 @@ def test_an_email_with_regex_characters_is_matched_literally(tmp_path):
         calls.append(args)
         return 'me+vision@example.com\n' if args[0] == 'config' else ''
     make_evidence([tmp_path / 'r'], run_git, tmp_path / 'room')('fix the login', WED_9AM)
-    assert any(a.startswith('--author=') and a.endswith('me\\+vision@example\\.com') for a in calls[-1])
+    assert '-F' in calls[-1] and '--author=me+vision@example.com' in calls[-1]  # a fixed string, not a regex
+
+
+# Final review fixes
+
+@pytest.mark.parametrize('answer', ['cross it off', 'yes cross it off', 'sure', 'yes please', 'ok', 'yep'])
+def test_the_looks_done_question_takes_easy_yeses(tmp_path, answer):
+    coach, clock, voice = ask_with_evidence(tmp_path, lambda what, since: "the commit 'fix login' in hub")
+    assert coach.intercept(answer) == 'Nice. Crossed off.'
+
+
+def test_an_ordinary_check_in_still_ignores_a_bare_ok(tmp_path):
+    coach, clock, voice = coach_for(tmp_path)
+    coach.intercept('remind me to fix the login tomorrow')
+    clock.now = datetime(2026, 10, 29, 10, 0)
+    coach.tick(True)
+    assert coach.intercept('ok') is None
+    assert coach.intercept("it's not done") == "Okay. I'll ask again tomorrow."
+
+
+@pytest.mark.parametrize('answer', ['never mind', 'cancel', 'forget it', 'nothing'])
+def test_never_mind_after_a_bare_reminder(tmp_path, answer):
+    coach, clock, voice = coach_for(tmp_path)
+    coach.intercept('remind me friday')
+    assert coach.intercept(answer) == 'Okay.'
+    assert coach.intercept('what did I promise') == 'No open promises.'
+
+
+def test_a_weekday_inside_an_implicit_promise_is_not_its_time():
+    assert parse_promise('I will send the friday report to Sam', WED_9AM) is None
+    assert parse_promise("I'll fix the monday standup bot", WED_9AM) is None
+    assert parse_promise("I'll send the report on friday", WED_9AM).what == 'send the report'
+    assert parse_promise('remind me friday to call Sam', WED_9AM).what == 'call sam'
+
+
+def test_the_bots_desk_never_renames_a_broken_promises_file(tmp_path):
+    from assistant.promises import promise_desk
+    (tmp_path / 'promises.json').write_text('{broken')
+    desk = promise_desk(tmp_path, clock=lambda: WED_9AM)
+    assert desk('remind me to call mom tomorrow') == "Okay. I'll check on call mom tomorrow."
+    assert (tmp_path / 'promises.json').read_text() == '{broken'
+    (tmp_path / 'promise_inbox.jsonl').rename(tmp_path / 'promise_inbox.jsonl.reading')
+    assert desk('remind me to call mom tomorrow') == "That's already on your list."
