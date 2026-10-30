@@ -46,7 +46,9 @@ REWORK_WORDS = {'plan revisions': ('a plan revision', 'plan revisions'),
                 'review rounds': ('an extra review round', 'extra review rounds'),
                 'retries': ('a retry', 'retries'), 'failed checks': ('a failed check', 'failed checks'),
                 'rejected results': ('a rejected result', 'rejected results'),
-                'stopped sessions': ('stopping it partway', 'stopping it partway')}
+                'stopped sessions': ('stopping it partway', 'stopping it partway'),
+                'stalls': ('a stall', 'stalls'), 'reassigned tasks': ('a reassigned task', 'reassigned tasks'),
+                'failures': ('a failure', 'failures')}
 _ASK = re.compile(r"(?:(?:hey|ok|okay) )?(?:vision )?(?:how are my prompts(?: doing)?|coach my prompts|prompt tips"
                   r"|grade my prompts)")
 
@@ -143,6 +145,11 @@ def grade(session: dict) -> Grade:
         check = task.get('check')
         # A failed check that was retried is already a retry; only a check still red at the end counts again.
         reasons['failed checks'] += 1 if isinstance(check, dict) and check.get('ok') is False and not retries else 0
+        # The scorecard's other signals: a task that stalled, was moved to another agent, or failed without a retry.
+        reasons['stalls'] += 1 if _number(task.get('keptGoing')) or _number(task.get('extraRounds')) else 0
+        reasons['reassigned tasks'] += 1 if task.get('reassigned') is True else 0
+        failures = task.get('failures')
+        reasons['failures'] += max(0, len(failures) - retries) if isinstance(failures, list) else 0
     stage = state.get('stage')
     if stage == 'rejected':
         reasons['rejected results'] += 1

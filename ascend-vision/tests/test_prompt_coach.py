@@ -153,3 +153,14 @@ def test_nothing_to_say_is_silent_on_the_weekly_turn(tmp_path):
     coach, clock, said = coach_for(tmp_path, smooth=2, rough=1)
     coach.tick(True)
     assert said == []
+
+
+def test_grade_also_counts_the_scorecards_stalls_reassignments_and_failures(tmp_path):
+    from assistant.prompt_coach import _rework_words
+    write_session(tmp_path, 1, task='Stalled one', tasks=[
+        {'status': 'done', 'attempts': 1, 'rounds': 1, 'keptGoing': 1, 'reassigned': True, 'failures': ['a', 'b']},
+        {'status': 'done', 'attempts': 0, 'rounds': 1, 'extraRounds': 2, 'failures': 'odd'}])
+    (rough,) = [grade(s) for s in read_sessions(tmp_path, NOW)]
+    assert dict(rough.reasons) == {'retries': 1, 'stalls': 2, 'reassigned tasks': 1, 'failures': 1}
+    assert not rough.smooth
+    assert _rework_words(rough.reasons) == '2 stalls, a retry, a reassigned task and a failure'
