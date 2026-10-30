@@ -6,10 +6,19 @@ Promises live in a small JSON file next to Vision's other data.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
+import json
+import logging
+import os
+from pathlib import Path
 import re
+import secrets
+import threading
 
+from assistant.answers import is_not_now, is_yes, words
+
+LOG = logging.getLogger(__name__)
 WEEKDAYS = ('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday')
 PART_HOURS = {'morning': 10, 'afternoon': 15, 'evening': 19, 'night': 20}
 _CLOCK = r"\d{1,2}(?::\d{2})? ?(?:am|pm)?"
@@ -93,3 +102,250 @@ def parse_promise(text: str, now: datetime) -> Caught | None:
             due, timed = _due(found['when'], now)
             return Caught(what=what, due=due, timed=timed, explicit=explicit, when=found['when'])
     return None
+
+
+KEEP_CLOSED_DAYS = 30
+MAX_ASKS = 5
+SPEAK_FROM, SPEAK_UNTIL = 8, 22
+COUNTS = ('No', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten')
+_STOP = {'the', 'a', 'an', 'my', 'to', 'with', 'on', 'of', 'for', 'and', 'it', 'i', "i'm", 'im', 'am', 'done'}
+_DONE = re.compile(r"(?:i did(?: it)?|did it|done|all done|finished)\b")
+_NO = re.compile(r"(?:no|nope|nah|not yet)\b")
+_DROP = re.compile(r"\b(?:drop it|forget it|forget about it|cancel(?: it)?)\b")
+_DROP_THAT = re.compile(r"(?:(?:hey|ok|okay) )?(?:vision )?(?:drop|forget) that")
+_DONE_WITH = re.compile(r"\b(?:done with|cross off) (?P<what>.+)")
+_LIST = re.compile(r"\b(?:what did i promise|my promises)\b")
+_STEP_LEAD = re.compile(r"^(?:the first (?:small )?step is |first step is |first |just |i'll |i will )+")
+
+
+@dataclass
+class Promise:
+    id: str
+    what: str
+    created: str
+    next: str
+    timed: bool
+    asks: int = 0
+    status: str = 'open'  # open | stale | done | dropped
+    closed: str | None = None
+
+
+class PromiseStore:
+    """``promises.json``: open and quiet promises, and closed ones for 30 days. A broken file is set aside."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+
+    def load(self) -> list[Promise]:
+        try:
+            return [Promise(**item) for item in json.loads(self.path.read_text(encoding='utf-8'))]
+        except FileNotFoundError:
+            return []
+        except (ValueError, TypeError) as exc:
+            LOG.warning('Promises file unreadable (%s); starting fresh', type(exc).__name__)
+            os.replace(self.path, self.path.with_name(self.path.name + '.bad'))
+            return []
+
+    def save(self, promises: list[Promise], now: datetime) -> None:
+        cutoff = now - timedelta(days=KEEP_CLOSED_DAYS)
+        promises[:] = [p for p in promises if not p.closed or datetime.fromisoformat(p.closed) >= cutoff]
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(self.path.name + '.tmp')
+        temporary.write_text(json.dumps([asdict(p) for p in promises], indent=1), encoding='utf-8')
+        os.replace(temporary, self.path)
+
+
+def _at_ten(day: date) -> datetime:
+    return datetime.combine(day, datetime.min.time()).replace(hour=10)
+
+
+def _clock_words(at: datetime) -> str:
+    hour = at.hour % 12 or 12
+    return f"{hour}{f':{at.minute:02d}' if at.minute else ''} {'am' if at.hour < 12 else 'pm'}"
+
+
+def _day_words(day: date, today: date) -> str:
+    if day == today:
+        return 'today'
+    if day == today + timedelta(days=1):
+        return 'tomorrow'
+    if day == today - timedelta(days=1):
+        return 'yesterday'
+    return WEEKDAYS[day.weekday()].title() if abs((day - today).days) < 7 else f'{day:%B} {day.day}'
+
+
+def _sentence(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+class PromiseCoach:
+    """Catches promises in chat, and asks about one due promise at a time while the owner is around."""
+
+    def __init__(self, store: PromiseStore, *, announce, clock=datetime.now, offer_window: float = 120.0):
+        self.store = store
+        self.announce = announce
+        self.clock = clock
+        self.offer_window = offer_window
+        self._lock = threading.RLock()
+        self._promises = store.load()
+        self._asking: str | None = None  # queued behind other notices, not yet spoken
+        self._offer: tuple[str, str, datetime] | None = None  # ('ask' | 'smaller', promise id, spoken at)
+        self._captured: tuple[str, datetime] | None = None
+
+    def _save(self) -> None:
+        try:
+            self.store.save(self._promises, self.clock())
+        except OSError as exc:
+            LOG.warning('Promises not saved (%s)', type(exc).__name__)
+
+    def _find(self, promise_id: str) -> Promise | None:
+        return next((p for p in self._promises if p.id == promise_id), None)
+
+    def _close(self, promise: Promise, status: str) -> None:
+        promise.status, promise.closed = status, self.clock().isoformat()
+
+    def tick(self, owner_available: bool) -> None:
+        if not owner_available:
+            return
+        with self._lock:
+            now = self.clock()
+            if self._asking or (self._offer and (now - self._offer[2]).total_seconds() <= self.offer_window):
+                return
+            due = sorted((p for p in self._promises if p.status == 'open' and datetime.fromisoformat(p.next) <= now
+                          and (p.timed or SPEAK_FROM <= now.hour < SPEAK_UNTIL)), key=lambda p: p.next)
+            if not due:
+                return
+            promise = due[0]
+            if promise.asks >= MAX_ASKS:
+                promise.status = 'stale'
+                self._save()
+                return
+            promise.asks += 1
+            promise.timed = False  # asked again on later days, in daytime only
+            promise.next = _at_ten(now.date() + timedelta(days=1)).isoformat()
+            created = datetime.fromisoformat(promise.created).date()
+            if promise.asks == 1:
+                line = f'Checking in on {promise.what}. Done?'
+            elif promise.asks == 2:
+                line = f'{_sentence(promise.what)} is still open from {_day_words(created, now.date())}. Done yet?'
+            else:
+                days = (now.date() - created).days
+                line = (f"{_sentence(promise.what)} has been open {'a day' if days == 1 else f'{days} days'}. "
+                        'Keep it, make it smaller, or drop it?')
+            self._asking = promise.id
+            self._save()
+        self.announce(line, on_said=self._opened('ask', promise.id))
+
+    def _opened(self, kind: str, promise_id: str):
+        """The answer window starts when the question is spoken, not when it is queued."""
+        def opened() -> None:
+            with self._lock:
+                self._asking = None
+                self._offer = (kind, promise_id, self.clock())
+        return opened
+
+    def intercept(self, text: str) -> str | None:
+        with self._lock:
+            reply, notice = self._intercept(text)
+        if notice:
+            self.announce(notice)
+        return reply
+
+    def _intercept(self, text: str) -> tuple[str | None, str | None]:
+        said, now = words(text), self.clock()
+        if _LIST.search(said):
+            return self._list(now), None
+        if (_DROP_THAT.fullmatch(said) and self._captured
+                and (now - self._captured[1]).total_seconds() <= self.offer_window):
+            promise = self._find(self._captured[0])
+            self._captured = None
+            if promise and promise.status == 'open':
+                self._close(promise, 'dropped')
+                self._save()
+                return 'Dropped.', None
+        offer = self._offer
+        if offer and (now - offer[2]).total_seconds() <= self.offer_window:
+            reply = self._answer(offer, said, now)
+            if reply:
+                self._save()
+                return reply, None
+        found = _DONE_WITH.search(said)
+        if found:
+            promise = self._closest(found['what'])
+            if promise:
+                self._close(promise, 'done')
+                self._save()
+                return f'Nice. Crossed off {promise.what}.', None
+        caught = parse_promise(text, now)
+        if caught is None:
+            return None, None
+        if any(p.status == 'open' and p.what == caught.what for p in self._promises):
+            return ("That's already on your list." if caught.explicit else None), None
+        promise = Promise(id=secrets.token_hex(4), what=caught.what, created=now.isoformat(),
+                          next=caught.due.isoformat(), timed=caught.timed)
+        self._promises.append(promise)
+        self._captured = (promise.id, now)
+        self._save()
+        if caught.explicit:
+            return f"Okay. I'll check on {caught.what} {caught.when}.", None
+        return None, f"Noted: {caught.what}, {caught.when}. Say 'drop that' if I got it wrong."
+
+    def _answer(self, offer: tuple[str, str, datetime], said: str, now: datetime) -> str | None:
+        kind, promise_id, _ = offer
+        promise = self._find(promise_id)
+        if promise is None or promise.status != 'open':
+            self._offer = None
+            return None
+        if kind == 'smaller':
+            step = _STEP_LEAD.sub('', said).strip()
+            if not 3 <= len(step) <= 120:
+                return None
+            self._offer = None
+            self._close(promise, 'dropped')
+            self._promises.append(Promise(id=secrets.token_hex(4), what=step, created=now.isoformat(),
+                                          next=(now + timedelta(hours=2)).isoformat(), timed=True))
+            return f"Okay: {step}. I'll check on it in two hours."
+        if _DROP.search(said):
+            self._offer = None
+            self._close(promise, 'dropped')
+            return 'Dropped.'
+        if re.search(r'\bsmaller\b', said):
+            self._offer = ('smaller', promise.id, now)
+            return "What's the first small step?"
+        if re.match(r'keep\b', said):
+            self._offer = None
+            promise.next = _at_ten(now.date() + timedelta(days=3)).isoformat()
+            return "Okay. I'll ask again in three days."
+        if is_not_now(said) or _NO.match(said):
+            self._offer = None
+            promise.next = _at_ten(now.date() + timedelta(days=1)).isoformat()
+            return "Okay. I'll ask again tomorrow."
+        if is_yes(said) or _DONE.match(said):
+            self._offer = None
+            self._close(promise, 'done')
+            return 'Nice. Crossed off.'
+        return None
+
+    def _closest(self, text: str) -> Promise | None:
+        wanted = set(text.split()) - _STOP
+        best, score = None, 0
+        for promise in self._promises:
+            if promise.status in ('open', 'stale'):
+                overlap = len(wanted & (set(promise.what.split()) - _STOP))
+                if overlap > score:
+                    best, score = promise, overlap
+        return best
+
+    def _list(self, now: datetime) -> str:
+        open_ = sorted((p for p in self._promises if p.status == 'open'), key=lambda p: p.next)
+        quiet = [p.what for p in self._promises if p.status == 'stale']
+        parts = []
+        for promise in open_:
+            due = datetime.fromisoformat(promise.next)
+            when = _day_words(due.date(), now.date())
+            if promise.timed:
+                when += f' at {_clock_words(due)}'
+            parts.append(f'{promise.what}, due {when}')
+        count = COUNTS[len(open_)] if len(open_) < len(COUNTS) else str(len(open_))
+        answer = f"{count} open: {'; '.join(parts)}." if parts else 'No open promises.'
+        return f"{answer} Gone quiet: {', '.join(quiet)}." if quiet else answer
