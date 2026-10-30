@@ -134,6 +134,20 @@ def left_issues(repo: Path, run_gh, now: datetime) -> list[Leftover]:
     return found
 
 
+def _plain(text: str) -> str:
+    return ' ' + ' '.join(re.sub(r'[^a-z0-9]+', ' ', str(text).lower()).split()) + ' '
+
+
+def named_repo(text: str, dirs):
+    """The first repo whose folder name ('ascend_hub' or 'ascend hub') appears in the text, or None."""
+    said = _plain(text)
+    for folder in dirs:
+        name = _plain(re.split(r'[\\/]', str(folder).rstrip('\\/'))[-1])
+        if name.strip() and name in said:
+            return folder
+    return None
+
+
 def default_repos(vision_repo: Path) -> list[Path]:
     """Git repos one level under the folder that holds Vision's own repo."""
     def is_repo(folder: Path) -> bool:

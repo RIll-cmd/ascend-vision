@@ -228,3 +228,106 @@ def test_narration_cannot_break_the_guide_structure():
     html = render_guide('T', '', [{'text': '<img src="http://x/a.png"> [a]: http://evil', 'from': [1]}], [], {})
     assert '<img' not in html and '\n[a]:' not in html
     assert json.dumps(guide)  # plain text
+
+
+# Gap 3: screen video, repo docs, Room memory
+
+class FakeVideo:
+    made = []
+
+    def __init__(self, path):
+        self.path, self.stopped = path, False
+        path.write_bytes(b'mp4')
+        FakeVideo.made.append(self)
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_screen_video_writes_a_real_mp4_from_the_screen(tmp_path):
+    import time
+    import cv2
+    from assistant.show_me import ScreenVideo
+    sizes = iter([(2000, 1001), (640, 480)])
+    calls = []
+
+    def capture():
+        calls.append(1)
+        if len(calls) == 3:
+            raise OSError('screen locked')
+        size = next(sizes, (2000, 1001))
+        return Image.new('RGB', size, (len(calls) * 20 % 255, 0, 0))
+
+    video = ScreenVideo(tmp_path / 'recording.mp4', capture, fps=20, max_width=1280)
+    time.sleep(0.5)
+    video.stop()
+    reader = cv2.VideoCapture(str(tmp_path / 'recording.mp4'))
+    frames = 0
+    while True:
+        ok, frame = reader.read()
+        if not ok:
+            break
+        frames += 1
+        assert frame.shape[:2] == (640, 1280)  # first frame scaled to 1280 wide, even height
+    reader.release()
+    assert frames >= 3
+
+
+def test_the_recorder_films_while_it_records(tmp_path):
+    FakeVideo.made = []
+    recorder, clock, screen, said = recorder_for(tmp_path, video=FakeVideo)
+    recorder.intercept('watch me')
+    recorder.intercept('open settings')
+    recorder.intercept('done recording')
+    video = FakeVideo.made[0]
+    assert video.path.name == 'recording.mp4' and video.stopped
+    assert 'Screen recording: [recording.mp4](recording.mp4)' in (video.path.parent / 'guide.md').read_text()
+    recorder.intercept('watch me')
+    recorder.intercept('cancel recording')
+    assert FakeVideo.made[1].stopped
+
+
+def test_a_failed_video_does_not_stop_the_recording(tmp_path):
+    def broken(path):
+        raise RuntimeError('no codec')
+
+    recorder, clock, screen, said = recorder_for(tmp_path, video=broken)
+    assert recorder.intercept('watch me').startswith('Recording.')
+    recorder.intercept('open settings')
+    recorder.intercept('done recording')
+    assert said[-1] == 'Your how-to is ready: How-to, 1 step.'
+
+
+def test_a_guide_naming_a_repo_lands_in_its_docs_and_room_memory(tmp_path):
+    FakeVideo.made = []
+    hub = tmp_path / 'ascend_hub'
+    hub.mkdir()
+    noted = []
+    recorder, clock, screen, said = recorder_for(
+        tmp_path, video=FakeVideo, repos=lambda: [tmp_path / 'ascend-vision', hub],
+        remember=lambda key, note: (noted.append((key, note)), True)[1])
+    recorder.intercept('watch me deploy ascend hub')
+    recorder.intercept('run the build')
+    recorder.intercept('done recording')
+    docs = hub / 'docs' / 'howto' / 'deploy-ascend-hub'
+    assert (docs / 'guide.md').exists() and (docs / 'shot-01.jpg').exists()
+    assert not (docs / 'recording.mp4').exists()
+    assert 'recording.mp4' not in (docs / 'guide.md').read_text()
+    assert noted == [('ascend_hub', 'How-to "Deploy ascend hub": docs/howto/deploy-ascend-hub/guide.md')]
+    assert said[-1] == ("Your how-to is ready: deploy ascend hub, 1 step. "
+                        "Also saved to ascend_hub's docs/howto and its Room memory.")
+
+
+def test_no_repo_named_means_no_copy_and_a_failed_memory_is_said(tmp_path):
+    hub = tmp_path / 'ascend_hub'
+    hub.mkdir()
+    recorder, clock, screen, said = recorder_for(tmp_path, repos=lambda: [hub], remember=lambda key, note: False)
+    recorder.intercept('watch me set up the printer')
+    recorder.intercept('plug it in')
+    recorder.intercept('done recording')
+    assert not (hub / 'docs').exists()
+    assert said[-1] == 'Your how-to is ready: set up the printer, 1 step.'
+    recorder.intercept('watch me fix the ascend_hub login')
+    recorder.intercept('open the file')
+    recorder.intercept('done recording')
+    assert said[-1] == "Your how-to is ready: fix the ascend_hub login, 1 step. Also saved to ascend_hub's docs/howto."

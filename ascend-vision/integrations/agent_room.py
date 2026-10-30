@@ -8,6 +8,7 @@ import threading
 import urllib.error
 import urllib.request
 
+from assistant.revival import named_repo
 from assistant.room_dialog import RoomAction, RoomDialog
 
 LOG = logging.getLogger(__name__)
@@ -80,6 +81,25 @@ class RoomClient:
             return False, "I couldn't reach the agent room."
 
 
+    def add_memory(self, key: str, note: str) -> bool:
+        """Adds one line to a project's Room memory (the room replaces the whole list, so read it first)."""
+        from urllib.parse import quote
+        try:
+            with self._opener.open(f'{self.base_url}/api/room/memory?key={quote(key)}',
+                                   timeout=self.timeout_seconds) as response:
+                notes = json.loads(response.read().decode('utf-8')).get('notes')
+            notes = [n for n in notes if isinstance(n, str)] if isinstance(notes, list) else []
+            if note in notes:
+                return True
+            request = urllib.request.Request(
+                f'{self.base_url}/api/room/memory', data=json.dumps({'key': key, 'notes': notes + [note]}).encode('utf-8'),
+                headers={'content-type': 'application/json'}, method='POST')
+            with self._opener.open(request, timeout=self.timeout_seconds):
+                return True
+        except (OSError, ValueError, AttributeError):
+            return False
+
+
 def _folder(path: str) -> str:
     return re.split(r'[\\/]', path.rstrip('\\/'))[-1]
 
@@ -87,9 +107,7 @@ def _folder(path: str) -> str:
 def room_task(what: str, repos: list, *, newest) -> dict | None:
     """A Room start body for a promise: the repo it names, else the one worked on last; None without a repo."""
     dirs = [r['dir'] for r in repos if isinstance(r, dict) and isinstance(r.get('dir'), str)]
-    said = ' ' + re.sub(r'[^a-z0-9]+', ' ', what.lower()) + ' '
-    named = [d for d in dirs if f" {re.sub(r'[^a-z0-9]+', ' ', _folder(d).lower()).strip()} " in said]
-    repo = named[0] if named else (newest(dirs) if dirs else None)
+    repo = named_repo(what, dirs) or (newest(dirs) if dirs else None)
     if repo not in dirs:
         return None
     slug = '-'.join(re.sub(r'[^a-z0-9]+', ' ', what.lower()).split()[:3])[:40].strip('-')

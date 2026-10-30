@@ -12,6 +12,7 @@ from integrations.agent_room import RoomClient, newest_repo, promise_queue, room
 class FakeHub(BaseHTTPRequestHandler):
     posts = []
     session = {'id': 's1', 'stage': 'gate-plan', 'attention': None}
+    memory = ['Use npm test']
     status = {'online': True, 'repos': [{'dir': 'D:/ascend_hub', 'check': 'npm test'},
                                         {'dir': 'D:/ascend-vision', 'check': None}]}
 
@@ -31,6 +32,8 @@ class FakeHub(BaseHTTPRequestHandler):
             return self._send(200, {'session': FakeHub.session})
         if self.path == '/api/room':
             return self._send(200, FakeHub.status)
+        if self.path.startswith('/api/room/memory?key='):
+            return self._send(200, {'key': self.path.split('=', 1)[1], 'notes': FakeHub.memory})
         self._send(404, {'error': 'NOT_FOUND'})
 
     def do_POST(self):
@@ -142,3 +145,13 @@ def test_windows_folders_from_the_room_are_named_by_their_last_part():
 
 def test_queueing_waits_longer_than_a_status_read(hub):
     assert RoomClient(hub, timeout_seconds=0.2).queue({'task': 'Slow start'}) == (True, 'Queued in the Agent Room.')
+
+
+def test_a_memory_note_is_added_once_to_the_project_memory(hub):
+    client = RoomClient(hub)
+    assert client.add_memory('ascend_hub', 'How-to "Deploy": docs/howto/deploy/guide.md') is True
+    assert FakeHub.posts[-1][:2] == ('/api/room/memory', {'key': 'ascend_hub', 'notes': [
+        'Use npm test', 'How-to "Deploy": docs/howto/deploy/guide.md']})
+    posts = len(FakeHub.posts)
+    assert client.add_memory('ascend_hub', 'Use npm test') is True and len(FakeHub.posts) == posts
+    assert RoomClient('http://127.0.0.1:1', timeout_seconds=0.5).add_memory('x', 'note') is False

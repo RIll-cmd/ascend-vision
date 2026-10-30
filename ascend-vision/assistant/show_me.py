@@ -90,10 +90,12 @@ def make_writer(router):
 
 
 def render_guide(title: str, summary: str, steps: list[dict], checklist: list[str], shots: dict[int, list[str]],
-                 start_shots: list[str] = ()) -> str:
+                 start_shots: list[str] = (), video: str | None = None) -> str:
     parts = [f'# {_one_line(_sentence(title), 120)}', '']
     if summary:
         parts += [_one_line(summary, 300), '']
+    if video:
+        parts += [f'Screen recording: [{video}]({video})', '']
     for shot in start_shots:
         parts += [f'![Start]({shot})', '']
     for number, step in enumerate(steps, 1):
@@ -111,10 +113,52 @@ def _slug(title: str) -> str:
     return '-'.join(re.findall(r'[a-z0-9]+', title.lower()))[:60].strip('-') or 'how-to'
 
 
+class ScreenVideo:
+    """A silent screen video: a thread grabs the screen ``fps`` times a second into an mp4 until ``stop()``."""
+
+    def __init__(self, path: Path, capture, *, fps: float = 2, max_width: int = 1280, max_seconds: int = 1860):
+        self.path, self.capture, self.fps, self.max_width, self.max_seconds = Path(path), capture, fps, max_width, max_seconds
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name='how-to-video', daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        import time
+        import cv2
+        import numpy
+        writer, size, started = None, None, time.monotonic()
+        try:
+            while not self._stop.is_set() and time.monotonic() - started < self.max_seconds:
+                tick = time.monotonic()
+                try:
+                    image = self.capture().convert('RGB')
+                    if size is None:
+                        width = min(self.max_width, image.width)
+                        height = round(image.height * width / image.width)
+                        size = (width - width % 2, height - height % 2)  # the codec wants even sides
+                        writer = cv2.VideoWriter(str(self.path), cv2.VideoWriter_fourcc(*'mp4v'), self.fps, size)
+                    if image.size != size:
+                        image = image.resize(size, Image.BILINEAR)
+                    writer.write(cv2.cvtColor(numpy.asarray(image), cv2.COLOR_RGB2BGR))
+                except Exception as exc:  # a locked screen skips a frame
+                    LOG.debug('How-to video frame skipped (%s)', type(exc).__name__)
+                self._stop.wait(max(0.0, 1 / self.fps - (time.monotonic() - tick)))
+        finally:
+            if writer is not None:
+                writer.release()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+
 class HowToRecorder:
     def __init__(self, folder: Path, *, announce, capture, write_steps=None, clock=datetime.now, run=None,
-                 max_seconds: int = 1800, max_shots: int = 60):
+                 max_seconds: int = 1800, max_shots: int = 60, video=None, repos=None, remember=None):
         self.folder = Path(folder)
+        self.video = video  # path -> something with stop(): films the screen while recording
+        self.repos = repos  # () -> repo folders; a guide whose title names one is copied to its docs/howto
+        self.remember = remember  # (repo folder name, note) -> bool: a line in that repo's Room memory
         self.announce, self.capture, self.write_steps, self.clock = announce, capture, write_steps, clock
         self.run = run or (lambda job: threading.Thread(target=job, name='how-to-writer', daemon=True).start())
         self.max_seconds, self.max_shots = max_seconds, max_shots
@@ -130,6 +174,7 @@ class HowToRecorder:
         self._count = 0
         self._thumb = None
         self._started = self._last_check = None
+        self._video = None
 
     def intercept(self, text: str) -> str | None:
         said = words(text)
@@ -148,11 +193,13 @@ class HowToRecorder:
                 return "Recording. Talk me through each step, and say 'done recording' when you finish."
             short = len(said.split()) <= SHORT_COMMAND
             if short and _CANCEL.search(said):
+                self._stop_video()
                 shutil.rmtree(self._dir, ignore_errors=True)
                 self._reset()
                 return 'Recording thrown away.'
             if short and _STOP.search(said):
                 if not self._lines:
+                    self._stop_video()
                     shutil.rmtree(self._dir, ignore_errors=True)
                     self._reset()
                     return 'Nothing was said, so I kept nothing.'
@@ -197,6 +244,19 @@ class HowToRecorder:
         self._dir.mkdir(parents=True)
         self.recording = True  # only once the folder exists
         self._shoot(0)
+        if self.video is not None:
+            try:
+                self._video = self.video(self._dir / 'recording.mp4')
+            except Exception as exc:  # no codec: screenshots and words still work
+                LOG.warning('How-to video unavailable (%s)', type(exc).__name__)
+
+    def _stop_video(self) -> None:
+        video, self._video = self._video, None
+        if video is not None:
+            try:
+                video.stop()
+            except Exception as exc:
+                LOG.debug('How-to video did not stop cleanly (%s)', type(exc).__name__)
 
     def _shoot(self, line: int, only_if_changed: bool = False) -> None:
         self._last_check = self.clock()
@@ -219,6 +279,7 @@ class HowToRecorder:
             LOG.debug('How-to screenshot skipped (%s)', type(exc).__name__)
 
     def _finish(self) -> None:
+        self._stop_video()
         folder, title, lines, shots = self._dir, self._title, list(self._lines), dict(self._shots)
         self._reset()
         self.run(lambda: self._write(folder, title, lines, shots))
@@ -232,13 +293,46 @@ class HowToRecorder:
                 LOG.info('How-to written without AI (%s)', type(exc).__name__)
         guide = guide or fallback_steps(lines)
         title = title or guide['title'] or 'How-to'
+        video = 'recording.mp4' if (folder / 'recording.mp4').is_file() and (folder / 'recording.mp4').stat().st_size else None
         try:
             (folder / 'guide.md').write_text(
-                render_guide(title, guide['summary'], guide['steps'], guide['checklist'], shots, shots.get(0, [])),
-                encoding='utf-8')
+                render_guide(title, guide['summary'], guide['steps'], guide['checklist'], shots, shots.get(0, []),
+                             video), encoding='utf-8')
         except OSError as exc:
             LOG.warning('How-to not saved (%s)', type(exc).__name__)
             self.announce("I couldn't save the how-to.")
             return
         count = len(guide['steps'])
-        self.announce(f"Your how-to is ready: {title}, {count} step{'' if count == 1 else 's'}.")
+        self.announce(f"Your how-to is ready: {title}, {count} step{'' if count == 1 else 's'}."
+                      + self._share(folder, title, guide, shots))
+
+    def _share(self, folder: Path, title: str, guide: dict, shots: dict[int, list[str]]) -> str:
+        """Copies a guide whose title names a repo into its docs/howto (uncommitted) and notes it in Room memory."""
+        from assistant.revival import named_repo
+        try:
+            repo = named_repo(title, self.repos()) if self.repos is not None else None
+        except Exception:
+            repo = None
+        if repo is None:
+            return ''
+        repo, slug = Path(repo), _slug(title)
+        target = repo / 'docs' / 'howto' / slug
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            (target / 'guide.md').write_text(
+                render_guide(title, guide['summary'], guide['steps'], guide['checklist'], shots, shots.get(0, [])),
+                encoding='utf-8')
+            for names in shots.values():
+                for name in names:
+                    shutil.copy2(folder / name, target / name)
+        except OSError as exc:
+            LOG.warning('How-to not copied to the repo (%s)', type(exc).__name__)
+            return ''
+        said = f" Also saved to {repo.name}'s docs/howto"
+        note = f'How-to "{_sentence(title)}": docs/howto/{slug}/guide.md'
+        try:
+            remembered = self.remember is not None and self.remember(repo.name, note)
+        except Exception as exc:
+            LOG.info('How-to not added to Room memory (%s)', type(exc).__name__)
+            remembered = False
+        return said + (' and its Room memory.' if remembered else '.')

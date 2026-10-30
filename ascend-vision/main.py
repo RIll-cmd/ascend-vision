@@ -828,14 +828,26 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         show_me_config = getattr(config, 'show_me', None)
         if show_me_config is not None and show_me_config.enabled:
             try:
-                from assistant.show_me import HowToRecorder, make_writer
+                from assistant.revival import command_runner, default_repos
+                from assistant.show_me import HowToRecorder, ScreenVideo, make_writer
                 from llm_router import LLMRouter
                 from screen_auditor import capture_desktop
+                howto_git = command_runner('git')
+
+                def howto_repos():
+                    listed = getattr(getattr(config, 'revival', None), 'repos', ())
+                    if listed:
+                        return [Path(r) for r in listed]
+                    common = howto_git(Path(__file__).resolve().parent, 'rev-parse', '--path-format=absolute',
+                                       '--git-common-dir')
+                    return default_repos(Path(common.strip()).parent) if common else []
                 how_to = HowToRecorder(
                     Path(show_me_config.folder) if show_me_config.folder
                     else Path(config.storage.database).parent / 'howto',
                     announce=announce_paced, capture=capture_desktop,
-                    write_steps=make_writer(LLMRouter(config.llm)) if show_me_config.ai_cleanup else None)
+                    write_steps=make_writer(LLMRouter(config.llm)) if show_me_config.ai_cleanup else None,
+                    video=lambda path: ScreenVideo(path, capture_desktop), repos=howto_repos,
+                    remember=room_client.add_memory if room_client is not None else None)
             except Exception as exc:
                 LOG.warning('How-to recording unavailable (%s)', type(exc).__name__)
 

@@ -100,6 +100,11 @@ say (and when the screen changes), then writes `data/howto/<date>-<title>/guide.
 with numbered steps and those screenshots. Only the words you said go to the AI to tidy
 the steps (`show_me.ai_cleanup`); screenshots stay on this computer, so mind what is on
 screen. "cancel recording" throws it away; recording stops by itself after 30 minutes.
+It also saves a silent screen video (`recording.mp4`, 2 frames a second). When the title
+names one of your repos ("watch me deploy ascend hub"), the guide and screenshots are
+also copied to that repo's `docs/howto/<title>/` (not committed), and with the Agent
+Room on, a line pointing to it is added to that repo's Room project memory, so agents
+see it.
 
 Once a week, during the day, Vision brings back one thing you left: a branch with
 unmerged commits untouched for two weeks, an Agent Room session you stopped or left
