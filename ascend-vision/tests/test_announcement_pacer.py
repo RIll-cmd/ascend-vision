@@ -70,15 +70,14 @@ def test_on_said_runs_when_the_notice_is_actually_spoken():
     assert said == ['first', 'second'] and spoken == [45]
 
 
-def focused_pacer():
-    from assistant.announcement_pacer import AnnouncementPacer, FocusDoorman
-    said, clock, focus = [], Clock(), [True]
-    pacer = AnnouncementPacer(said.append, gap_seconds=45, clock=clock, hold=lambda: focus[0])
-    return pacer, FocusDoorman(pacer), said, clock, focus
+def held_pacer():
+    from assistant.announcement_pacer import AnnouncementPacer
+    said, clock, hold = [], Clock(), [True]
+    return AnnouncementPacer(said.append, gap_seconds=45, clock=clock, hold=lambda: hold[0]), said, clock, hold
 
 
-def test_focus_holds_ordinary_notices_and_lets_urgent_ones_through_in_order():
-    pacer, _, said, clock, focus = focused_pacer()
+def test_a_hold_keeps_ordinary_notices_and_lets_urgent_ones_through_in_order():
+    pacer, said, clock, hold = held_pacer()
     pacer('It may rain today.')
     pacer('The agents need you to review the plan.', urgent=True)
     pacer('Water break?')
@@ -92,52 +91,46 @@ def test_focus_holds_ordinary_notices_and_lets_urgent_ones_through_in_order():
     assert len(said) == 2 and pacer.waiting() == 2
 
 
-def test_after_focus_one_summary_then_the_waiting_notices_in_order():
-    pacer, _, said, clock, focus = focused_pacer()
+def test_after_the_hold_the_summary_then_the_first_notice_without_a_gap():
+    pacer, said, clock, hold = held_pacer()
     pacer('It may rain today.')
     pacer('Water break?')
     clock.now += 100
-    focus[0] = False
+    hold[0] = False
     pacer.pump()
     assert said == ['While you focused, two notices waited.']
-    for _ in range(2):
-        clock.now += 45
-        pacer.pump()
-    assert said[1:] == ['It may rain today.', 'Water break?']
-    focus[0] = True
+    pacer.pump()
+    assert said[-1] == 'It may rain today.'
     clock.now += 45
     pacer.pump()
-    focus[0] = False
+    assert said[-1] == 'Water break?'
+    hold[0] = True
+    clock.now += 45
+    pacer.pump()
+    hold[0] = False
     clock.now += 45
     pacer.pump()
     assert len(said) == 3, 'no summary when nothing waited'
 
 
 def test_one_waiting_notice_is_named_in_the_singular():
-    pacer, _, said, clock, focus = focused_pacer()
+    pacer, said, clock, hold = held_pacer()
     pacer('Water break?')
-    focus[0] = False
+    hold[0] = False
     pacer.pump()
     assert said == ['While you focused, one notice waited.']
 
 
-def test_whats_waiting_and_let_them_through():
-    pacer, doorman, said, clock, focus = focused_pacer()
-    assert doorman.intercept("What's waiting?") == 'Nothing is waiting.'
-    pacer('It may rain today.')
+def test_a_summary_not_yet_said_is_dropped_when_the_hold_starts_again():
+    pacer, said, clock, hold = held_pacer()
+    pacer('Reminder: call mom.', urgent=True)
     pacer('Water break?')
-    assert doorman.intercept('anything waiting') == (
-        "Two notices are waiting for the end of your focus block. Say 'let them through' to hear them now.")
-    assert doorman.intercept('Let them through.') == 'Okay.'
-    assert said == ['It may rain today.']
+    hold[0] = False
+    pacer.pump()  # summary due, but the gap after the reminder has not passed
+    hold[0] = True
     clock.now += 45
     pacer.pump()
-    assert said[-1] == 'Water break?'
-    pacer('Stretch?')
-    clock.now += 45
-    pacer.pump()
-    assert said[-1] == 'Water break?', 'the release covered only what was waiting'
-    assert doorman.intercept('what is the weather') is None
+    assert said == ['Reminder: call mom.']
 
 
 def test_a_hold_check_that_fails_lets_notices_through():
@@ -162,8 +155,101 @@ def test_questions_are_counted_and_on_said_still_runs_when_speech_fails():
     assert opened == [1], 'a coach waiting for its question must not wait forever'
 
 
-def test_dedupe_spans_urgent_and_held_notices():
-    pacer, _, said, clock, focus = focused_pacer()
+def test_an_urgent_copy_of_a_held_notice_makes_it_urgent():
+    pacer, said, clock, hold = held_pacer()
+    spoken = []
     pacer('Water break?')
-    pacer('Water break?', urgent=True)
-    assert said == [] and pacer.waiting() == 1
+    pacer('Water break?', urgent=True, on_said=lambda: spoken.append(1))
+    assert said == ['Water break?'] and pacer.waiting() == 0 and spoken == [1]
+
+
+class Wall:
+    def __init__(self):
+        from datetime import datetime
+        self.now = datetime(2026, 10, 30, 14, 0)
+
+    def __call__(self):
+        return self.now
+
+
+def doorman_for(present=True):
+    from datetime import timedelta  # noqa: F401  (tests move the wall clock)
+    from assistant.announcement_pacer import AnnouncementPacer, FocusDoorman
+    said, clock, wall, here = [], Clock(), Wall(), [present]
+    doorman = None
+    pacer = AnnouncementPacer(said.append, gap_seconds=45, clock=clock, hold=lambda: doorman.holding())
+    doorman = FocusDoorman(pacer, clock=wall, present=lambda: here[0])
+    return pacer, doorman, said, clock, wall, here
+
+
+def test_nothing_is_held_until_the_owner_starts_a_block():
+    pacer, doorman, said, clock, wall, here = doorman_for()
+    pacer('It may rain today.')
+    assert said == ['It may rain today.']
+    assert doorman.intercept("what's waiting") is None
+
+
+def test_a_block_holds_for_its_minutes_then_lets_the_notices_in():
+    from datetime import timedelta
+    pacer, doorman, said, clock, wall, here = doorman_for()
+    assert doorman.intercept('Vision, do not disturb') == (
+        "Okay. I'll hold my notices for 50 minutes. Agents and reminders you timed still come in.")
+    pacer('It may rain today.')
+    assert said == []
+    wall.now += timedelta(minutes=49)
+    clock.now += 60
+    pacer.pump()
+    assert said == []
+    wall.now += timedelta(minutes=1)
+    pacer.pump()
+    assert said == ['While you focused, one notice waited.']
+
+
+def test_a_block_for_given_minutes_or_hours_and_ended_early():
+    from datetime import timedelta
+    pacer, doorman, said, clock, wall, here = doorman_for()
+    assert doorman.intercept('focus block for 2 hours').startswith("Okay. I'll hold my notices for 2 hours.")
+    assert doorman.intercept('hold my notices for 25 minutes').startswith("Okay. I'll hold my notices for 25 minutes.")
+    pacer('Water break?')
+    wall.now += timedelta(minutes=10)
+    assert doorman.intercept('end focus block') == 'Okay, the focus block is over.'
+    pacer.pump()
+    assert said == ['While you focused, one notice waited.']
+    assert doorman.intercept('end focus block') is None
+
+
+def test_held_notices_wait_for_the_owner_to_come_back():
+    from datetime import timedelta
+    pacer, doorman, said, clock, wall, here = doorman_for()
+    doorman.intercept('do not disturb for 30 minutes')
+    pacer('It may rain today.')
+    here[0] = False
+    wall.now += timedelta(minutes=31)
+    pacer.pump()
+    assert said == []
+    pacer('Stretch?')  # a new notice while away also waits with them
+    here[0] = True
+    pacer.pump()
+    assert said == ['While you focused, two notices waited.']
+
+
+def test_whats_waiting_and_let_them_through():
+    pacer, doorman, said, clock, wall, here = doorman_for()
+    doorman.intercept('do not disturb')
+    assert doorman.intercept("What's waiting?") == 'Nothing is waiting.'
+    pacer('It may rain today.')
+    pacer('Water break?')
+    assert doorman.intercept('anything waiting') == (
+        "Two notices are waiting for the end of your focus block. Say 'let them through' to hear them now.")
+    assert doorman.intercept('Let them through.') == 'Okay.'
+    assert said == [], 'the reply comes first; the next pump plays them'
+    pacer.pump()
+    assert said == ['It may rain today.']
+    clock.now += 45
+    pacer.pump()
+    pacer('Stretch?')
+    clock.now += 45
+    pacer.pump()
+    assert said == ['It may rain today.', 'Water break?'], 'the release covered only what was waiting'
+    assert doorman.intercept('what is the weather') is None
+

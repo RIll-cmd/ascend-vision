@@ -126,7 +126,7 @@ def test_drop_that_removes_the_last_capture_only_shortly_after(tmp_path):
     assert coach.intercept('Drop that.') == 'Dropped.'
     assert coach.intercept('what did I promise?') == 'No open promises.'
     coach.intercept("I'll fix the login tomorrow")
-    clock.now += timedelta(minutes=3)
+    clock.now += timedelta(minutes=4)
     assert coach.intercept('drop that') is None
 
 
@@ -352,12 +352,30 @@ def test_a_later_question_takes_the_answer(tmp_path):
     assert coach.intercept('yes') is None, 'the slump question was asked last'
 
 
-def test_drop_that_counts_from_when_the_note_is_spoken(tmp_path):
-    coach, clock, voice = coach_for(tmp_path, hold=True)
+def test_the_note_is_urgent_opens_no_question_and_drop_that_lasts_three_minutes(tmp_path):
+    coach, clock, voice = coach_for(tmp_path)
+    voice.question_seq = 0
     coach.intercept("I'll fix the login tomorrow")
-    clock.now += timedelta(minutes=3)
-    voice.release()
+    assert voice.urgent == ["Noted: fix the login, tomorrow. Say 'drop that' if I got it wrong."]
+    clock.now += timedelta(minutes=2, seconds=50)
     assert coach.intercept('drop that') == 'Dropped.'
+
+
+def test_a_held_ordinary_ask_does_not_block_a_clock_time_reminder(tmp_path):
+    coach, clock, voice = coach_for(tmp_path, hold=True)
+    coach.intercept("I'll do the laundry today")
+    coach.intercept('remind me to call mom at 6pm')
+    clock.now = datetime(2026, 10, 28, 17, 0)
+    coach.tick(True)  # the laundry ask waits behind a focus block
+    clock.now = datetime(2026, 10, 28, 18, 1)
+    coach.tick(True)
+    assert voice.urgent[-1] == 'Checking in on call mom. Done?'
+
+
+def test_a_bare_okay_does_not_cross_off(tmp_path):
+    coach, clock, voice = asked(tmp_path)
+    assert coach.intercept('okay') is None
+    assert coach.intercept('yes') == 'Nice. Crossed off.'
 
 
 def test_a_broken_file_is_set_aside_and_closed_promises_go_after_thirty_days(tmp_path):

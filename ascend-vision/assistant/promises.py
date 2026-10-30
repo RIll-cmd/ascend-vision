@@ -132,7 +132,8 @@ _STOP = {'the', 'a', 'an', 'my', 'to', 'with', 'on', 'of', 'for', 'and', 'it', '
 # Answers count only as the whole message; anything longer is chat for the AI.
 _LEAD = r"(?:(?:hey|ok|okay) )?(?:vision )?"
 _FINISHED = r"(?:i did(?: it)?|did it|done|all done|finished|i finished(?: it)?|it's done)"
-_DONE = re.compile(rf"{_LEAD}(?:(?:yes|yeah|yep|yup|sure|ok|okay)(?: {_FINISHED})?|{_FINISHED})")
+_DONE = re.compile(rf"{_LEAD}(?:(?:yes|yeah|yep|yup)(?: {_FINISHED})?|(?:ok|okay|sure) {_FINISHED}|{_FINISHED})")
+DROP_THAT_SECONDS = 180  # the note can wait one pacer gap before it is heard
 _NO = re.compile(rf"{_LEAD}(?:no|nope|nah|not yet|no not yet|nope not yet|not now|not today|no thanks|not really)")
 _KEEP = re.compile(rf"{_LEAD}keep(?: it)?(?: please| on the list)?")
 _DROP = re.compile(rf"{_LEAD}(?:drop(?: it)?|forget(?: about)? it|cancel(?: it)?)")
@@ -228,7 +229,7 @@ class PromiseCoach:
         self.offer_window = offer_window
         self._lock = threading.RLock()
         self._promises = store.load()
-        self._asking: str | None = None  # queued behind other notices, not yet spoken
+        self._asking: set[str] = set()  # queued behind other notices, not yet spoken
         # ('ask' | 'smaller', promise id, spoken at, the pacer's question count then)
         self._offer: tuple[str, str, datetime, int | None] | None = None
         self._captured: tuple[str, datetime] | None = None
@@ -258,10 +259,12 @@ class PromiseCoach:
             return
         with self._lock:
             now = self.clock()
-            if self._asking or self._open_offer(now):
+            if self._open_offer(now):
                 return
+            # One question at a time, except that a reminder for a clock time may pass an ask held by a focus block.
             due = sorted((p for p in self._promises if p.status == 'open' and datetime.fromisoformat(p.next) <= now
-                          and (p.timed or SPEAK_FROM <= now.hour < SPEAK_UNTIL)), key=lambda p: p.next)
+                          and (p.timed or SPEAK_FROM <= now.hour < SPEAK_UNTIL)
+                          and p.id not in self._asking and (p.timed or not self._asking)), key=lambda p: p.next)
             if not due:
                 return
             promise = due[0]
@@ -282,7 +285,7 @@ class PromiseCoach:
                 days = (now.date() - created).days
                 line = (f"{_sentence(promise.what)} has been open {'a day' if days == 1 else f'{days} days'}. "
                         'Keep it, make it smaller, or drop it?')
-            self._asking = promise.id
+            self._asking.add(promise.id)
             self._save()
         self.announce(line, on_said=self._opened('ask', promise.id), urgent=urgent)
 
@@ -290,7 +293,7 @@ class PromiseCoach:
         """The answer window starts when the question is spoken, not when it is queued."""
         def opened() -> None:
             with self._lock:
-                self._asking = None
+                self._asking.discard(promise_id)
                 self._offer = (kind, promise_id, self.clock(), getattr(self.announce, 'question_seq', None))
         return opened
 
@@ -298,22 +301,15 @@ class PromiseCoach:
         with self._lock:
             reply, notice = self._intercept(text)
         if notice:
-            self.announce(notice, on_said=self._noted(self._captured[0]))
+            self.announce(notice, urgent=True)  # it answers what the owner just said; no question is opened
         return reply
-
-    def _noted(self, promise_id: str):
-        """"Drop that" counts from when the note is heard."""
-        def noted() -> None:
-            with self._lock:
-                self._captured = (promise_id, self.clock())
-        return noted
 
     def _intercept(self, text: str) -> tuple[str | None, str | None]:
         said, now = words(text), self.clock()
         if _LIST.fullmatch(said):
             return self._list(now), None
         if (_DROP_THAT.fullmatch(said) and self._captured
-                and (now - self._captured[1]).total_seconds() <= self.offer_window):
+                and (now - self._captured[1]).total_seconds() <= DROP_THAT_SECONDS):
             promise = self._find(self._captured[0])
             self._captured = None
             if promise and promise.status == 'open':

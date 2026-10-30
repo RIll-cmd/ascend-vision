@@ -321,6 +321,7 @@ class SlumpCoach:
         self.backfill_thread: threading.Thread | None = None
         self._offer: tuple[str, datetime] | None = None  # ('check_in' | 'plan', when)
         self._offer_seq = None  # the pacer's question count when the offer was spoken
+        self._unspoken = False  # a ladder question is queued (a focus block may hold it) but not heard yet
         self._step = FOCUS_STEP
         self._focus_due: datetime | None = None
 
@@ -339,7 +340,7 @@ class SlumpCoach:
             self.backfill_thread.start()
         if self._focus_due and now >= self._focus_due:
             self._focus_due = None
-            self.announce("That's twenty-five minutes. Nice work.")
+            self.announce("That's twenty-five minutes. Nice work.", urgent=True)  # its time is the point
         if owner_available:
             self._climb(now)
 
@@ -355,8 +356,8 @@ class SlumpCoach:
     def _climb(self, now: datetime) -> None:
         today = now.date()
         ladder = self.store.ladder()
-        if ladder.last_day == today or not SPEAK_FROM <= now.hour < SPEAK_UNTIL:
-            return
+        if ladder.last_day == today or not SPEAK_FROM <= now.hour < SPEAK_UNTIL or self._unspoken:
+            return  # the ladder climbs only on what the owner actually heard
         if self.sample is not None and self._activity != 'input_active':
             return  # never speak to an empty room
         minutes = self.store.days(today)
@@ -394,7 +395,10 @@ class SlumpCoach:
 
     def _open_offer(self, kind: str):
         """The answer window starts when the line is spoken, not when it is queued behind other notices."""
+        self._unspoken = True
+
         def opened() -> None:
+            self._unspoken = False
             self._offer = (kind, self.clock())
             self._offer_seq = getattr(self.announce, 'question_seq', None)
         return opened

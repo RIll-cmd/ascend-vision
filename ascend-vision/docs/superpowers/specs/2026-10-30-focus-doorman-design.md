@@ -17,7 +17,14 @@ notification access, no auto-replies to other people)*
 
 ## What it does
 
-- While focus mode is on (`manager.mode == 'focus'`), the pacer keeps non-urgent notices queued.
+- **Revised after review:** Vision's `'focus'` mode is its default watching state (it starts in it), so it cannot
+  mean "do not disturb". The owner starts a block explicitly: "do not disturb", "focus block" or "hold my notices",
+  optionally "for 25 minutes" / "for 2 hours" (default 50 minutes, 5 to 240). "end focus block" ends it early.
+  Reply: "Okay. I'll hold my notices for 50 minutes. Agents and reminders you timed still come in."
+- During a block the pacer keeps non-urgent notices queued. When it ends, they still wait while away mode says the
+  owner is not at the PC, so nothing plays to an empty room.
+- Slump check-ins climb only on questions the owner heard; the 25-minute focus timer line and the promise
+  "Noted" line are urgent.
 - Urgent notices still come through, paced as before:
   - Agent Room lines (agents are blocked until the owner answers), unless `focus_doorman.let_room_through: false`.
   - Promise reminders the owner set for a clock time or a duration ("at 6", "in 20 minutes").

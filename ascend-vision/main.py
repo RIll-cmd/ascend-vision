@@ -719,9 +719,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         # Notices Vision says on its own wait their turn; replies and conversations use announce_local directly.
         doorman_config = getattr(config, 'focus_doorman', None)
         doorman_on = doorman_config is not None and doorman_config.enabled
+        # A focus block is one the owner asks for ("do not disturb"); Vision's own 'focus' mode is just watching.
         announce_paced = AnnouncementPacer(
-            announce_local, hold=(lambda: manager.mode == 'focus') if doorman_on else None)
-        focus_doorman = FocusDoorman(announce_paced) if doorman_on else None
+            announce_local, hold=(lambda: focus_doorman.holding()) if doorman_on else None)
+        focus_doorman = FocusDoorman(
+            announce_paced, present=lambda: away_mode is None or away_mode.state == 'active') if doorman_on else None
 
         away_mode = None
         away_mode_config = getattr(config, 'away_mode', None)

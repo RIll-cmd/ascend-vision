@@ -208,7 +208,7 @@ def coach_for(path, clock, **kwargs):
     store = SlumpStore(path / 'slump.db')
     said = []
 
-    def announce(text, on_said=None):  # speaks at once, like an empty pacer queue
+    def announce(text, on_said=None, urgent=False):  # speaks at once, like an empty pacer queue
         said.append(text)
         if on_said:
             on_said()
@@ -289,6 +289,39 @@ def test_a_focus_plan_checks_in_after_twenty_five_minutes(tmp_path):
     clock.later(60)
     coach.tick(True)
     assert said[-1] == "That's twenty-five minutes. Nice work."
+
+
+def test_a_check_in_still_waiting_to_be_spoken_holds_the_ladder(tmp_path):
+    clock = Clock().at(0, 10)
+    store = SlumpStore(tmp_path / 'slump.db')
+    queued, notes = [], []
+    coach = SlumpCoach(store, announce=lambda text, on_said=None, urgent=False: queued.append((text, urgent)),
+                       notify=notes.append, clock=clock)
+    seed(store)
+    for day in range(4):
+        clock.at(day, 10)
+        seed(store)
+        coach.tick(True)
+    assert len(queued) == 1 and notes == [], 'no plan and no phone push before the check-in is heard'
+
+
+def test_the_twenty_five_minute_line_is_urgent(tmp_path):
+    clock = Clock().at(0, 10)
+    store = SlumpStore(tmp_path / 'slump.db')
+    calls = []
+
+    def announce(text, on_said=None, urgent=False):
+        calls.append((text, urgent))
+        if on_said:
+            on_said()
+    coach = SlumpCoach(store, announce=announce, clock=clock)
+    seed(store, high={'room_sessions': 2, 'active_minutes': 300}, low={'room_sessions': 0, 'active_minutes': 60})
+    coach.tick(True)
+    coach.intercept('yes')
+    coach.intercept('okay')
+    clock.later(25 * 60)
+    coach.tick(True)
+    assert calls[-1] == ("That's twenty-five minutes. Nice work.", True)
 
 
 def test_the_next_slump_day_offers_the_step_without_asking(tmp_path):
@@ -458,7 +491,7 @@ def test_the_offer_window_opens_when_the_line_is_spoken(tmp_path):
     clock = Clock().at(0, 10)
     store = SlumpStore(tmp_path / 'slump.db')
     queued = []
-    coach = SlumpCoach(store, announce=lambda text, on_said=None: queued.append(on_said), clock=clock)
+    coach = SlumpCoach(store, announce=lambda text, on_said=None, urgent=False: queued.append(on_said), clock=clock)
     seed(store)
     coach.tick(True)
     assert coach.intercept('yes') is None
