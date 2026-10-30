@@ -715,9 +715,13 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 except Exception as exc:
                     LOG.debug('Vision notice not shown in chat (%s)', type(exc).__name__)
 
-        from assistant.announcement_pacer import AnnouncementPacer
+        from assistant.announcement_pacer import AnnouncementPacer, FocusDoorman
         # Notices Vision says on its own wait their turn; replies and conversations use announce_local directly.
-        announce_paced = AnnouncementPacer(announce_local)
+        doorman_config = getattr(config, 'focus_doorman', None)
+        doorman_on = doorman_config is not None and doorman_config.enabled
+        announce_paced = AnnouncementPacer(
+            announce_local, hold=(lambda: manager.mode == 'focus') if doorman_on else None)
+        focus_doorman = FocusDoorman(announce_paced) if doorman_on else None
 
         away_mode = None
         away_mode_config = getattr(config, 'away_mode', None)
@@ -751,7 +755,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             from integrations.agent_room import RoomClient, RoomWatcher
             room_dialog = RoomDialog(wake_word=agent_room_config.wake_word)
             room_client = RoomClient(agent_room_config.base_url)
-            room_watcher = RoomWatcher(room_client, room_dialog, announce_paced, agent_room_config.poll_seconds)
+            # The agents are blocked until the owner answers, so their lines may pass the focus doorman.
+            room_urgent = doorman_on and doorman_config.let_room_through
+            room_watcher = RoomWatcher(room_client, room_dialog,
+                                       lambda line: announce_paced(line, urgent=room_urgent),
+                                       agent_room_config.poll_seconds)
             resources.callback(room_watcher.close)
             room_watcher.start()
 
@@ -845,8 +853,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
 
         def local_intercept(text):
             # Away/sleep first (it blocks everything while asleep), then eyes, weather, GitHub, food, promises, slumps.
-            for handler in (away_mode, eye_calibrator, weather_coach, github_coach, nutrition_coach, promise_coach,
-                            slump_coach):
+            for handler in (away_mode, eye_calibrator, focus_doorman, weather_coach, github_coach, nutrition_coach,
+                            promise_coach, slump_coach):
                 if handler is not None:
                     answer = handler.intercept(text)
                     if answer:

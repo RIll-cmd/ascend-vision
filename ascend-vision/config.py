@@ -515,6 +515,18 @@ class PromisesConfig:
 
 
 @dataclass(frozen=True)
+class FocusDoormanConfig:
+    """In focus mode Vision's ordinary notices wait; agents waiting and clock-time reminders still come in."""
+    enabled: bool = True
+    let_room_through: bool = True
+
+    def __post_init__(self):
+        for name in ('enabled', 'let_room_through'):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f'focus_doorman.{name} must be a YAML boolean')
+
+
+@dataclass(frozen=True)
 class WeatherConfig:
     """Daily weather briefing from Open-Meteo (free, no key) for the owner's places."""
     enabled: bool = True
@@ -792,6 +804,7 @@ class Config:
     agent_room: AgentRoomConfig = field(default_factory=AgentRoomConfig)
     slump: SlumpConfig = field(default_factory=SlumpConfig)
     promises: PromisesConfig = field(default_factory=PromisesConfig)
+    focus_doorman: FocusDoormanConfig = field(default_factory=FocusDoormanConfig)
     github: GitHubCoachConfig = field(default_factory=GitHubCoachConfig)
     phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
     browser_automation: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
@@ -818,7 +831,8 @@ def load_config(path: Path) -> Config:
                  'screen_audit': ScreenAuditConfig, 'phone_chat': PhoneChatConfig,
                  'distraction_watch': DistractionWatchConfig, 'away_mode': AwayModeConfig,
                  'weather': WeatherConfig, 'github': GitHubCoachConfig, 'agent_room': AgentRoomConfig,
-                 'slump': SlumpConfig, 'promises': PromisesConfig, 'browser_automation': BrowserAutomationConfig}
+                 'slump': SlumpConfig, 'promises': PromisesConfig,
+                 'focus_doorman': FocusDoormanConfig, 'browser_automation': BrowserAutomationConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')
     values = {}

@@ -221,6 +221,7 @@ class PromiseCoach:
                 self._save()
                 return
             promise.asks += 1
+            urgent = promise.timed  # a clock time the owner chose gets past focus mode
             promise.timed = False  # asked again on later days, in daytime only
             promise.next = _at_ten(now.date() + timedelta(days=1)).isoformat()
             created = datetime.fromisoformat(promise.created).date()
@@ -234,7 +235,7 @@ class PromiseCoach:
                         'Keep it, make it smaller, or drop it?')
             self._asking = promise.id
             self._save()
-        self.announce(line, on_said=self._opened('ask', promise.id))
+        self.announce(line, on_said=self._opened('ask', promise.id), urgent=urgent)
 
     def _opened(self, kind: str, promise_id: str):
         """The answer window starts when the question is spoken, not when it is queued."""

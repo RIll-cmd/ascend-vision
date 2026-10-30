@@ -279,3 +279,15 @@ def test_promises_config_defaults_and_validation(tmp_path):
     path = tmp_path / 'config.yaml'
     path.write_text('promises:\n  enabled: false\n', encoding='utf-8')
     assert load_config(path).promises.enabled is False
+
+
+def test_focus_doorman_config_defaults_and_validation(tmp_path):
+    from config import Config, FocusDoormanConfig, load_config
+
+    assert Config().focus_doorman == FocusDoormanConfig(enabled=True, let_room_through=True)
+    for name in ('enabled', 'let_room_through'):
+        with pytest.raises(ValueError, match=f'focus_doorman.{name}'):
+            FocusDoormanConfig(**{name: 'no'})
+    path = tmp_path / 'config.yaml'
+    path.write_text('focus_doorman:\n  let_room_through: false\n', encoding='utf-8')
+    assert load_config(path).focus_doorman.let_room_through is False

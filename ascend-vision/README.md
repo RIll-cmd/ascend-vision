@@ -48,6 +48,8 @@ Everything has a default. Edit `config.yaml` only if you need to:
 | Stop slump check-ins | `slump.enabled: false` |
 | Keep slump check-ins but never push the phone | `slump.phone_nudge: false` |
 | Stop promise check-ins | `promises.enabled: false` |
+| Let every notice through during focus mode | `focus_doorman.enabled: false` |
+| Hold agent room announcements during focus too | `focus_doorman.let_room_through: false` |
 
 While a gate waits, say the wake word, then the answer ("Vision, approve"); the
 follow-up "yes" needs no wake word for 20 seconds. Phone messages and voice notes
@@ -69,6 +71,11 @@ once whether it is done; if not, it asks again the next day, then offers to keep
 make it smaller or drop it, and goes quiet after five asks. Answer "done", "not yet",
 "smaller" or "drop it"; say "what did I promise?", "done with the login" or, right
 after Vision notes one, "drop that".
+
+In focus mode, Vision's own notices (weather, GitHub, food, check-ins) wait until the
+block ends; then it says how many waited and plays them. Agent room announcements and
+reminders you set for a clock time still come in. Ask "what's waiting?" or say "let
+them through" to hear them early.
 
 Advanced and experimental features (phone chat, Discord, browser automation,
 proactive check-ins, Core link) are off by default and are described below.

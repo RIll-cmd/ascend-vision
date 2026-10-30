@@ -85,9 +85,11 @@ class Voice:
     """The pacer stand-in: says each line at once (or holds it when ``hold``), then runs on_said."""
 
     def __init__(self, hold=False):
-        self.said, self.held, self.hold = [], [], hold
+        self.said, self.held, self.hold, self.urgent = [], [], hold, []
 
-    def __call__(self, text, on_said=None):
+    def __call__(self, text, on_said=None, urgent=False):
+        if urgent:
+            self.urgent.append(text)
         if self.hold:
             self.held.append((text, on_said))
             return
@@ -213,6 +215,18 @@ def test_date_only_promises_wait_for_daytime_but_clock_times_do_not(tmp_path):
     clock.now = datetime(2026, 10, 29, 8, 0)
     coach.tick(True)
     assert voice.said[-1] == 'Checking in on pack. Done?'
+
+
+def test_only_a_reminder_set_for_a_clock_time_gets_past_focus(tmp_path):
+    coach, clock, voice = coach_for(tmp_path)
+    coach.intercept('remind me to stretch in 5 minutes')
+    coach.intercept('remind me to call mom tomorrow')
+    clock.now = datetime(2026, 10, 29, 10, 0)
+    coach.tick(True)
+    coach.intercept('not yet')
+    coach.tick(True)
+    assert voice.said == ['Checking in on stretch. Done?', 'Checking in on call mom. Done?']
+    assert voice.urgent == ['Checking in on stretch. Done?']
 
 
 def test_nothing_is_asked_while_the_owner_is_away(tmp_path):
