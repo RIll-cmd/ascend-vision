@@ -723,7 +723,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         # A focus block is one the owner asks for ("do not disturb"); Vision's own 'focus' mode is just watching.
         # Coach questions also wait while a how-to records, so the owner's answers never become steps.
         announce_paced = AnnouncementPacer(announce_local, hold=lambda: (
-            (how_to is not None and how_to.recording) or (focus_doorman is not None and focus_doorman.holding())))
+            (how_to is not None and how_to.recording) or (focus_doorman is not None and focus_doorman.holding())),
+            also_waiting=lambda: doorman_inbox.waiting() if doorman_inbox is not None else 0)
         focus_doorman = FocusDoorman(
             announce_paced, present=lambda: away_mode is None or away_mode.state == 'active',
             state_path=Path(config.storage.database).parent / 'focus_block.json') if doorman_on else None
@@ -732,7 +733,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             from assistant.doorman_inbox import Inbox
             # Messages people sent Vision's Discord bot (its own process); a focus block holds the routine ones.
             doorman_inbox = Inbox(Path(config.storage.database).parent, announce=announce_paced,
-                                  holding=focus_doorman.holding)
+                                  holding=focus_doorman.messages_held, in_block=focus_doorman.holding)
 
         away_mode = None
         away_mode_config = getattr(config, 'away_mode', None)

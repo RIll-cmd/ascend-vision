@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections import deque
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -28,8 +29,10 @@ def _count(n: int) -> str:
 
 class AnnouncementPacer:
     def __init__(self, say: Callable[[str], None], gap_seconds: float = 45.0, clock: Callable[[], float] = time.monotonic,
-                 hold: Callable[[], bool] | None = None):
+                 hold: Callable[[], bool] | None = None, also_waiting: Callable[[], int] | None = None):
         self._say, self._gap, self._clock, self._hold = say, gap_seconds, clock, hold
+        self._also = also_waiting  # messages held elsewhere (the Discord inbox on disk), counted in the summary
+        self._summary_extra = 0
         self._queue: deque[tuple[str, Callable[[], None] | None, bool]] = deque()
         self._lock = threading.Lock()
         self._last = float('-inf')
@@ -61,6 +64,12 @@ class AnnouncementPacer:
         with self._lock:
             return sum(1 for _, _, urgent in self._queue if not urgent)
 
+    def extra_waiting(self) -> int:
+        try:
+            return int(self._also()) if self._also else 0
+        except Exception:
+            return 0
+
     def release_held(self) -> None:
         """Let what is waiting now come in, still one at a time; later notices wait again."""
         with self._lock:
@@ -69,10 +78,11 @@ class AnnouncementPacer:
     def pump(self) -> None:
         """Speak the next notice that may come in if the gap has passed; call this regularly."""
         holding = self.holding()
+        extra = self.extra_waiting() if self._was_holding and not holding else 0
         with self._lock:
             held = sum(1 for _, _, urgent in self._queue if not urgent)
-            if self._was_holding and not holding and held:
-                self._summary_due = True
+            if self._was_holding and not holding and (held or extra):
+                self._summary_due, self._summary_extra = True, extra
             self._was_holding = holding
             if holding:
                 self._summary_due = False  # a new block began before the summary was said
@@ -82,7 +92,7 @@ class AnnouncementPacer:
                 return
             if self._summary_due:
                 self._summary_due = False
-                summary = f"While you focused, {_count(held)} notice{'' if held == 1 else 's'} waited."
+                summary = f'While you focused, {waiting_words(held, self._summary_extra)} waited.'
             else:
                 summary = None
                 index = next((i for i, (_, _, urgent) in enumerate(self._queue)
@@ -113,6 +123,13 @@ class AnnouncementPacer:
             LOG.exception('Paced notice failed')
 
 
+def waiting_words(notices: int, messages: int) -> str:
+    """'one notice and two Discord messages'"""
+    parts = ([f"{_count(notices)} notice{'' if notices == 1 else 's'}"] if notices else []) + (
+        [f"{_count(messages)} Discord message{'' if messages == 1 else 's'}"] if messages else [])
+    return ' and '.join(parts)
+
+
 _LEAD = r"(?:(?:hey|ok|okay) )?(?:vision )?"
 _AMOUNT = {'a': 1, 'an': 1, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'ten': 10, 'fifteen': 15,
            'twenty': 20, 'twenty five': 25, 'thirty': 30, 'forty': 40, 'forty five': 45, 'fifty': 50, 'sixty': 60,
@@ -135,6 +152,7 @@ class FocusDoorman:
         self.default_minutes, self.max_minutes = default_minutes, max_minutes
         self._until = None
         self._leftover = False  # the block ended with notices waiting
+        self._let_messages = False  # "let them through" also lets held Discord messages in
         self._lock = threading.Lock()  # the main loop and the chat thread both ask
         self._share()  # a block left by a crash must not keep the bot saying "in a focus block"
 
@@ -150,9 +168,11 @@ class FocusDoorman:
         try:
             if self._until is None:
                 self.state_path.unlink(missing_ok=True)
-            else:
+            else:  # written whole, so the bot never reads half a file
                 self.state_path.parent.mkdir(parents=True, exist_ok=True)
-                self.state_path.write_text(json.dumps({'until': self._until.isoformat()}), encoding='utf-8')
+                temporary = self.state_path.with_name(self.state_path.name + '.tmp')
+                temporary.write_text(json.dumps({'until': self._until.isoformat()}), encoding='utf-8')
+                os.replace(temporary, self.state_path)
         except OSError as exc:
             LOG.warning('Focus block state not shared (%s)', type(exc).__name__)
 
@@ -167,8 +187,12 @@ class FocusDoorman:
             self._expire()
             return self._until
 
+    def messages_held(self) -> bool:
+        """Whether routine Discord messages should stay on disk for now."""
+        return self.holding() and not self._let_messages
+
     def holding(self) -> bool:
-        waiting, here = self.pacer.waiting(), self._here()
+        waiting, here = self.pacer.waiting() + self.pacer.extra_waiting(), self._here()
         with self._lock:
             self._expire()
             if self._until is not None:
@@ -193,6 +217,7 @@ class FocusDoorman:
             minutes = max(5, min(self.max_minutes, minutes))
             with self._lock:
                 self._until = self.clock() + timedelta(minutes=minutes)
+                self._let_messages = False
                 self._share()
             hours = minutes // 60
             span = (f"{hours} hour{'' if hours == 1 else 's'}" if minutes % 60 == 0 else f'{minutes} minutes')
@@ -208,15 +233,17 @@ class FocusDoorman:
         release = re.search(r'\blet them (?:through|in)\b', said)
         if not (asked or release) or not self.holding():
             return None
-        waiting = self.pacer.waiting()
-        if not waiting:
+        notices, messages = self.pacer.waiting(), self.pacer.extra_waiting()
+        if not notices + messages:
             return 'Nothing is waiting.'
         if release:
             self.pacer.release_held()
+            self._let_messages = True
             return 'Okay.'
-        if waiting == 1:
-            return "One notice is waiting for the end of your focus block. Say 'let them through' to hear it now."
-        return (f"{_count(waiting).title()} notices are waiting for the end of your focus block. "
+        said = waiting_words(notices, messages)
+        if notices + messages == 1:
+            return f"{said[:1].upper()}{said[1:]} is waiting for the end of your focus block. Say 'let them through' to hear it now."
+        return (f"{said[:1].upper()}{said[1:]} are waiting for the end of your focus block. "
                 "Say 'let them through' to hear them now.")
 
 

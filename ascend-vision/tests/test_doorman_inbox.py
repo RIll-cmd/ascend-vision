@@ -145,3 +145,68 @@ def test_a_doorman_starting_up_clears_a_block_left_by_a_crash(tmp_path):
     block_until(tmp_path, NOW + timedelta(hours=1))
     FocusDoorman(AnnouncementPacer(lambda text: None), clock=Clock(), state_path=state)
     assert not state.exists()
+
+
+# Polish: the summary and "what's waiting" count Discord messages; age; negation
+
+def doorman_with_inbox(tmp_path):
+    from assistant.announcement_pacer import AnnouncementPacer, FocusDoorman
+    said, wall = [], Clock(NOW)
+    holder = {}
+    inbox = Inbox(tmp_path, announce=lambda text, **kw: holder['pacer'](text, **kw), clock=wall,
+                  holding=lambda: holder['doorman'].messages_held(), in_block=lambda: holder['doorman'].holding())
+    pacer = AnnouncementPacer(said.append, gap_seconds=0, clock=lambda: 0.0,
+                              hold=lambda: holder['doorman'].holding(), also_waiting=inbox.waiting)
+    doorman = FocusDoorman(pacer, clock=wall, state_path=tmp_path / 'focus_block.json')
+    holder.update(pacer=pacer, doorman=doorman)
+    return said, wall, inbox, pacer, doorman
+
+
+def test_the_end_of_block_summary_counts_held_discord_messages(tmp_path):
+    said, wall, inbox, pacer, doorman = doorman_with_inbox(tmp_path)
+    doorman.intercept('do not disturb for 30 minutes')
+    pacer('It may rain later.')
+    desk = Reception(tmp_path, clock=wall)
+    desk.take('1', 'Alex', 'dinner at 8?')
+    desk.take('2', 'Sam', 'got the keys')
+    inbox.tick()
+    assert said == []
+    assert doorman.intercept("what's waiting") == ("One notice and two Discord messages are waiting for the end of "
+                                                   "your focus block. Say 'let them through' to hear them now.")
+    wall.now += timedelta(minutes=31)
+    pacer.pump()
+    inbox.tick()
+    pacer.pump()
+    pacer.pump()
+    assert said[0] == 'While you focused, one notice and two Discord messages waited.'
+    assert set(said[1:]) == {'It may rain later.', 'Message from Alex on Discord, 31 minutes ago: dinner at 8?',
+                             'Message from Sam on Discord, 31 minutes ago: got the keys'}
+
+
+def test_let_them_through_includes_discord_messages(tmp_path):
+    said, wall, inbox, pacer, doorman = doorman_with_inbox(tmp_path)
+    doorman.intercept('do not disturb')
+    Reception(tmp_path, clock=wall).take('1', 'Alex', 'dinner at 8?')
+    inbox.tick()
+    assert doorman.intercept('let them through') == 'Okay.'
+    inbox.tick()
+    pacer.pump()
+    assert said == ['Message from Alex on Discord: dinner at 8?']
+
+
+def test_old_messages_say_how_old_they_are(tmp_path):
+    said = []
+    wall = Clock(NOW)
+    Reception(tmp_path, clock=wall).take('1', 'Alex', 'call me back')
+    wall.now += timedelta(days=1, hours=2)
+    Inbox(tmp_path, announce=lambda text, **kw: said.append(text), clock=wall).tick()
+    assert said == ['Urgent message from Alex on Discord, yesterday: call me back']
+
+
+def test_negated_or_punctuated_urgent_words(tmp_path):
+    desk = Reception(tmp_path, clock=Clock(), urgent_words=('help!',))
+    block_until(tmp_path, NOW + timedelta(minutes=5))
+    assert 'urgent' not in desk.take('1', 'A', 'this is not urgent, whenever')
+    assert 'urgent' not in desk.take('2', 'A', 'no rush, not right now')
+    assert 'urgent' in desk.take('3', 'A', 'help! the build is red')
+    assert 'urgent' in desk.take('4', 'A', 'URGENT: server down')

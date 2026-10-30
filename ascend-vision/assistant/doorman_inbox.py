@@ -67,7 +67,9 @@ class Reception:
                 return 'Vision is not taking more messages right now. Please try again later.'
             self._recent[sender_id] = recent + [now]
             lowered = f' {text.lower()} '
-            urgent = (any(re.search(rf'\b{re.escape(w)}\b', lowered) for w in self.urgent_words)
+            # "not urgent" and "not right now" are not urgent; "help!" matches with its punctuation.
+            urgent = (any(re.search(rf'(?<![a-z0-9])(?<!not )(?<!no ){re.escape(w)}(?![a-z0-9])', lowered)
+                          for w in self.urgent_words)
                       or sender_id in self.urgent_senders)
             line = json.dumps({'at': now.isoformat(), 'sender': sender_id, 'name': name, 'text': text,
                                'urgent': urgent})
@@ -85,8 +87,34 @@ class Reception:
 class Inbox:
     """Vision side: speaks each waiting message once. While a focus block holds, routine ones stay on disk."""
 
-    def __init__(self, folder: Path, *, announce, holding=lambda: False):
-        self.folder, self.announce, self.holding = Path(folder), announce, holding
+    def __init__(self, folder: Path, *, announce, holding=lambda: False, clock=datetime.now, in_block=lambda: False):
+        self.folder, self.announce, self.holding, self.clock = Path(folder), announce, holding, clock
+        self.in_block = in_block  # messages the owner let through during a block must pass the pacer's hold
+
+    def waiting(self) -> int:
+        """Messages on disk not yet spoken (the summary at the end of a focus block counts them)."""
+        count = 0
+        for name in (READING, INBOX, MORE):
+            try:
+                count += sum(1 for line in (self.folder / name).read_text(encoding='utf-8').splitlines() if line.strip())
+            except OSError:
+                pass
+        return count
+
+    def _age(self, stamp) -> str:
+        try:
+            minutes = (self.clock() - datetime.fromisoformat(str(stamp))).total_seconds() / 60
+        except (TypeError, ValueError):
+            return ''
+        if minutes < 10:
+            return ''
+        if minutes < 60:
+            return f', {int(minutes)} minutes ago'
+        if minutes < 24 * 60:
+            hours = int(minutes // 60)
+            return f", {hours} hour{'' if hours == 1 else 's'} ago"
+        days = int(minutes // (24 * 60))
+        return ', yesterday' if days == 1 else f', {days} days ago'
 
     def tick(self) -> None:
         inbox, reading = self.folder / INBOX, self.folder / READING
@@ -112,15 +140,20 @@ class Inbox:
         except OSError as exc:
             LOG.info('Doorman inbox not updated (%s)', type(exc).__name__)
             return  # nothing is spoken twice
+        try:
+            let_through = bool(self.in_block())
+        except Exception:
+            let_through = False
         for item in speak:
             who = _clean(item.get('name', ''), MAX_NAME + 40) or 'someone'
             text = _clean(item.get('text', ''), 300)
             if not text:
                 continue
+            age = self._age(item.get('at'))
             if item.get('urgent') is True:
-                self.announce(f'Urgent message from {who} on Discord: {text}', urgent=True)
+                self.announce(f'Urgent message from {who} on Discord{age}: {text}', urgent=True)
             else:
-                self.announce(f'Message from {who} on Discord: {text}')
+                self.announce(f'Message from {who} on Discord{age}: {text}', urgent=let_through)
 
     @staticmethod
     def _read(path: Path) -> list[dict]:

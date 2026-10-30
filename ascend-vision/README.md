@@ -93,8 +93,10 @@ During a block Vision also holds its phone pushes while you are at the PC. Peopl
 message Vision's Discord bot get a front-desk answer ("In a focus block until 3:40 pm.
 I'll pass it on.") and their message waits like any notice; one with "urgent",
 "emergency", "asap", "call me" (or your `focus_doorman.urgent_words`), or from someone
-in `focus_doorman.urgent_senders`, comes through now. Their messages are only read
-aloud, never sent to the AI; set `focus_doorman.take_messages: false` to turn this off.
+in `focus_doorman.urgent_senders` (Discord user ids), comes through now. When the block
+ends Vision says how many notices and Discord messages waited, then reads them, each
+with how long ago it came in. Their messages are only read aloud, never sent to the AI;
+set `focus_doorman.take_messages: false` to turn this off.
 
 Say "Vision, watch me" (or "watch me set up the printer"), do the task while you talk
 it through, then say "done recording". Vision takes a screenshot with each thing you
