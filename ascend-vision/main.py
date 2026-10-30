@@ -720,8 +720,9 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         doorman_config = getattr(config, 'focus_doorman', None)
         doorman_on = doorman_config is not None and doorman_config.enabled
         # A focus block is one the owner asks for ("do not disturb"); Vision's own 'focus' mode is just watching.
-        announce_paced = AnnouncementPacer(
-            announce_local, hold=(lambda: focus_doorman.holding()) if doorman_on else None)
+        # Coach questions also wait while a how-to records, so the owner's answers never become steps.
+        announce_paced = AnnouncementPacer(announce_local, hold=lambda: (
+            (how_to is not None and how_to.recording) or (focus_doorman is not None and focus_doorman.holding())))
         focus_doorman = FocusDoorman(
             announce_paced, present=lambda: away_mode is None or away_mode.state == 'active') if doorman_on else None
 
@@ -991,6 +992,12 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 feedback.speak_announcement("Voice alerts unmuted.")
 
         def on_unmatched_speech(text: str):
+            if how_to is not None and how_to.recording and local_conversation is not None:
+                try:  # narration goes straight to the recorder, past gates, habits and Ascend commands
+                    local_conversation.enqueue(text.strip(), source='voice')
+                except (ValueError, RuntimeError, sqlite3.Error):
+                    LOG.exception('Could not queue how-to narration')
+                return
             # A waiting agent room gate gets first look, so "approve" or "option two" reaches it.
             lines = answer_room(text)
             if lines is not None:
@@ -1020,6 +1027,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 config.voice_commands,
                 callback=on_voice_command,
                 unmatched_callback=on_unmatched_speech,
+                dictating=lambda: how_to is not None and how_to.recording,
                 is_speaking=getattr(feedback, 'is_speaking', None)
             )
         if voice_listener is not False and voice_listener is not None:

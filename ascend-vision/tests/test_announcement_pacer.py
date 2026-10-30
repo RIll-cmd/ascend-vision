@@ -253,3 +253,12 @@ def test_whats_waiting_and_let_them_through():
     assert said == ['It may rain today.', 'Water break?'], 'the release covered only what was waiting'
     assert doorman.intercept('what is the weather') is None
 
+
+
+def test_a_block_length_in_words():
+    pacer, doorman, said, clock, wall, here = doorman_for()
+    assert doorman.intercept('do not disturb for five minutes').startswith("Okay. I'll hold my notices for 5 minutes.")
+    assert doorman.intercept('focus block for forty five minutes').startswith(
+        "Okay. I'll hold my notices for 45 minutes.")
+    assert doorman.intercept('hold my notices for half an hour').startswith(
+        "Okay. I'll hold my notices for 30 minutes.")

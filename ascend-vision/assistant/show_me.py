@@ -23,9 +23,18 @@ CHANGE_CHECK_SECONDS = 15
 CHANGE_THRESHOLD = 8.0  # mean grey-level difference of a small thumbnail
 MAX_WIDTH = 1600
 _LEAD = r"(?:(?:hey|ok|okay) )?(?:vision )?"
-_START = re.compile(rf"{_LEAD}(?:watch me|show me once|record (?:a )?how to)(?: (?:do |how to |how i )?(?P<title>.+))?")
-_STOP = re.compile(rf"{_LEAD}(?:done|stop|finish|end) recording")
-_CANCEL = re.compile(rf"{_LEAD}cancel (?:the )?recording")
+# "watch me" alone, or followed by a task ("watch me set up the printer"), never "watch me play this song".
+_VERBS = (r"(?:do|set ?up|fix|make|install|configure|deploy|build|update|upgrade|renew|create|clean|back ?up|reset"
+          r"|change|add|remove|test|run|release|publish|export|import|connect|move|write|send|prepare|check|turn"
+          r"|enable|disable|sign|log|order|pay|book|file|print|scan|edit|rename|restore|repair|replace)")
+_START = re.compile(rf"{_LEAD}(?:watch me|show me once|record (?:a )?how to|record how i)"
+                    rf"(?: (?:how to |how i )?{_VERBS}\b.*)?")
+_START_PHRASE = re.compile(r"(?:watch me|show me once|record (?:a )?how[- ]?to|record how i)[\s,:]*"
+                           r"(?:(?:how to|how i)\s+)?", re.I)
+_STOP = re.compile(r"\b(?:done|stop|finish|end)(?:ed|ped)? (?:the )?recording\b")
+_CANCEL = re.compile(r"\bcancel (?:the )?recording\b")
+SHORT_COMMAND = 6  # words; a longer line with "stop recording" in it is narration
+MAX_AI_CHARS = 12000  # a longer transcript is written line by line rather than cut
 WRITE_PROMPT = (
     'You turn a spoken walkthrough into a clear how-to guide. The user message lists numbered lines the person said '
     'while doing the task. Reply with JSON only: {"title": short title, "summary": one sentence, '
@@ -37,7 +46,7 @@ WRITE_PROMPT = (
 def _one_line(text: str, limit: int) -> str:
     """Plain text on one line: narration must not add headings, images or links to the guide."""
     flat = ' '.join(str(text).split())[:limit]
-    return flat.replace('![', '!\\[').replace('](', ']\\(')
+    return flat.replace('<', '&lt;').replace('![', '!\\[').replace('](', ']\\(')
 
 
 def _sentence(text: str) -> str:
@@ -75,7 +84,7 @@ def make_writer(router):
     """Ask the configured AI for the steps; only the transcript text is sent."""
     def write(lines: list[str]):
         numbered = '\n'.join(f'{i}. {line}' for i, line in enumerate(lines, 1))
-        return router.generate_structured_response(numbered[:12000], system_prompt=WRITE_PROMPT,
+        return router.generate_structured_response(numbered, system_prompt=WRITE_PROMPT,
                                                    task='reasoning', max_tokens=1500)
     return write
 
@@ -126,21 +135,43 @@ class HowToRecorder:
         said = words(text)
         with self._lock:
             if not self.recording:
-                started = _START.fullmatch(said)
-                if not started:
+                if not _START.fullmatch(said):
                     return None
-                self._begin(started['title'])
+                phrase = _START_PHRASE.search(text)
+                title = text[phrase.end():].strip(' .!?,"\'') if phrase else ''
+                try:
+                    self._begin(title or None)
+                except OSError as exc:
+                    LOG.warning('How-to folder not writable (%s)', type(exc).__name__)
+                    self._reset()
+                    return "I couldn't start recording: the how-to folder is not writable."
                 return "Recording. Talk me through each step, and say 'done recording' when you finish."
-            if _CANCEL.fullmatch(said):
+            short = len(said.split()) <= SHORT_COMMAND
+            if short and _CANCEL.search(said):
                 shutil.rmtree(self._dir, ignore_errors=True)
                 self._reset()
                 return 'Recording thrown away.'
-            if _STOP.fullmatch(said):
+            if short and _STOP.search(said):
+                if not self._lines:
+                    shutil.rmtree(self._dir, ignore_errors=True)
+                    self._reset()
+                    return 'Nothing was said, so I kept nothing.'
                 self._finish()
                 return 'Got it. Writing the guide now.'
             self._lines.append(text.strip())
             self._shoot(len(self._lines))
+            self._draft()
             return SILENT_ACK
+
+    def _draft(self) -> None:
+        """A plain guide on disk after every line, so quitting Vision mid-recording loses nothing."""
+        guide = fallback_steps(self._lines)
+        try:
+            (self._dir / 'guide.md').write_text(
+                render_guide(self._title or 'How-to', '', guide['steps'], [], self._shots, self._shots.get(0, [])),
+                encoding='utf-8')
+        except OSError as exc:
+            LOG.debug('How-to draft not saved (%s)', type(exc).__name__)
 
     def tick(self) -> None:
         with self._lock:
@@ -157,7 +188,6 @@ class HowToRecorder:
                 self._shoot(len(self._lines), only_if_changed=True)
 
     def _begin(self, title: str | None) -> None:
-        self.recording = True
         self._title = title.strip() if title else None
         self._started = self._last_check = self.clock()
         base = f"{self._started:%Y-%m-%d}-{_slug(self._title or 'how-to')}"
@@ -165,6 +195,7 @@ class HowToRecorder:
         while self._dir.exists():
             self._dir, n = self.folder / f'{base}-{n}', n + 1
         self._dir.mkdir(parents=True)
+        self.recording = True  # only once the folder exists
         self._shoot(0)
 
     def _shoot(self, line: int, only_if_changed: bool = False) -> None:
@@ -194,7 +225,7 @@ class HowToRecorder:
 
     def _write(self, folder: Path, title: str | None, lines: list[str], shots: dict[int, list[str]]) -> None:
         guide = None
-        if self.write_steps is not None and lines:
+        if self.write_steps is not None and lines and sum(len(line) + 6 for line in lines) <= MAX_AI_CHARS:
             try:
                 guide = parse_steps(self.write_steps(lines), len(lines))
             except Exception as exc:

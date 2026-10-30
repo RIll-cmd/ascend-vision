@@ -164,7 +164,67 @@ def test_same_title_same_day_gets_its_own_folder(tmp_path):
         '2026-10-30-back-up-the-phone', '2026-10-30-back-up-the-phone-2']
 
 
+import pytest
+
+
+@pytest.mark.parametrize('chat', ['watch me play this song', 'Hey, watch me now', 'Show me once more'])
+def test_ordinary_chat_does_not_start_a_recording(tmp_path, chat):
+    recorder, *_ = recorder_for(tmp_path)
+    assert recorder.intercept(chat) is None and not recorder.recording
+
+
+@pytest.mark.parametrize('stop', ["I'm done recording", 'Stop the recording', 'Done recording, thanks'])
+def test_natural_ways_to_stop(tmp_path, stop):
+    recorder, *_ = recorder_for(tmp_path)
+    recorder.intercept('watch me')
+    recorder.intercept('open the app')
+    assert recorder.intercept(stop) == 'Got it. Writing the guide now.' and not recorder.recording
+
+
+def test_the_title_keeps_the_owners_own_words(tmp_path):
+    recorder, clock, screen, said = recorder_for(tmp_path)
+    recorder.intercept('Watch me set up printer 2 for the SSL cert.')
+    recorder.intercept('open the panel')
+    recorder.intercept('done recording')
+    assert (guide_dir(tmp_path) / 'guide.md').read_text(encoding='utf-8').startswith(
+        '# Set up printer 2 for the SSL cert\n')
+
+
+def test_a_transcript_too_long_for_the_ai_is_written_line_by_line(tmp_path):
+    asked = []
+    recorder, *_ = recorder_for(tmp_path, write_steps=lambda lines: asked.append(lines) or None, max_shots=1)
+    recorder.intercept('watch me')
+    for n in range(400):
+        recorder.intercept(f'step number {n} of the long procedure we follow')
+    recorder.intercept('done recording')
+    assert asked == [] and '400. Step number 399' in (guide_dir(tmp_path) / 'guide.md').read_text(encoding='utf-8')
+
+
+def test_a_guide_is_on_disk_after_every_line_in_case_vision_quits(tmp_path):
+    recorder, *_ = recorder_for(tmp_path)
+    recorder.intercept('watch me back up the phone')
+    recorder.intercept('plug it in')
+    guide = (guide_dir(tmp_path) / 'guide.md').read_text(encoding='utf-8')
+    assert '1. Plug it in' in guide
+
+
+def test_a_folder_that_cannot_be_made_does_not_leave_it_recording(tmp_path):
+    (tmp_path / 'howto').write_text('a file, not a folder')
+    recorder, *_ = recorder_for(tmp_path)
+    assert recorder.intercept('watch me') == "I couldn't start recording: the how-to folder is not writable."
+    assert not recorder.recording and recorder.intercept('hello') is None
+
+
+def test_stopping_with_nothing_said_keeps_nothing(tmp_path):
+    recorder, clock, screen, said = recorder_for(tmp_path)
+    recorder.intercept('watch me')
+    assert recorder.intercept('done recording') == 'Nothing was said, so I kept nothing.'
+    assert said == [] and not any((tmp_path / 'howto').iterdir())
+
+
 def test_narration_cannot_break_the_guide_structure():
     guide = render_guide('T', '', [{'text': '# not a heading\n![x](http://evil)', 'from': [1]}], [], {})
     assert '\n# not a heading' not in guide and '![x]' not in guide
+    html = render_guide('T', '', [{'text': '<img src="http://x/a.png"> [a]: http://evil', 'from': [1]}], [], {})
+    assert '<img' not in html and '\n[a]:' not in html
     assert json.dumps(guide)  # plain text

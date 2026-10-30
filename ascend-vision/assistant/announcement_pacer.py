@@ -113,9 +113,12 @@ class AnnouncementPacer:
 
 
 _LEAD = r"(?:(?:hey|ok|okay) )?(?:vision )?"
-_AMOUNT = {'a': 1, 'an': 1, 'one': 1, 'two': 2, 'three': 3, 'four': 4}
+_AMOUNT = {'a': 1, 'an': 1, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'ten': 10, 'fifteen': 15,
+           'twenty': 20, 'twenty five': 25, 'thirty': 30, 'forty': 40, 'forty five': 45, 'fifty': 50, 'sixty': 60,
+           'ninety': 90}
+_NUMBER = '|'.join(sorted(map(re.escape, _AMOUNT), key=len, reverse=True))
 _START = re.compile(rf"{_LEAD}(?:do not disturb|don't disturb me|focus block|start a focus block|hold my notices)"
-                    r"(?: for (?P<n>\d+|a|an|one|two|three|four) (?P<unit>minutes?|hours?))?")
+                    rf"(?: for (?:(?P<half>half an hour)|(?P<n>\d+|{_NUMBER}) (?P<unit>minutes?|hours?)))?")
 _END = re.compile(rf"{_LEAD}(?:(?:end|stop|finish) (?:the )?(?:focus block|do not disturb)|i'm done focusing"
                   r"|stop holding(?: my notices)?)")
 
@@ -130,6 +133,7 @@ class FocusDoorman:
         self.default_minutes, self.max_minutes = default_minutes, max_minutes
         self._until = None
         self._leftover = False  # the block ended with notices waiting
+        self._lock = threading.Lock()  # the main loop and the chat thread both ask
 
     def _here(self) -> bool:
         try:
@@ -138,31 +142,40 @@ class FocusDoorman:
             return True
 
     def holding(self) -> bool:
-        if self._until is not None and self.clock() >= self._until:
-            self._until, self._leftover = None, True
-        if self._until is not None:
-            return True
-        if self._leftover and self.pacer.waiting() and not self._here():
-            return True  # never play what waited to an empty room
-        self._leftover = False
-        return False
+        waiting, here = self.pacer.waiting(), self._here()
+        with self._lock:
+            if self._until is not None and self.clock() >= self._until:
+                self._until, self._leftover = None, True
+            if self._until is not None:
+                return True
+            if self._leftover and waiting and not here:
+                return True  # never play what waited to an empty room
+            self._leftover = False
+            return False
 
     def intercept(self, text: str) -> str | None:
         from datetime import timedelta
         said = ' '.join(re.sub(r"[^a-z0-9' ]", ' ', text.lower()).split())  # keeps "25 minutes"
         started = _START.fullmatch(said)
         if started:
-            amount = _AMOUNT.get(started['n'], None) or int(started['n']) if started['n'] else None
-            minutes = self.default_minutes if amount is None else amount * (60 if started['unit'].startswith('h') else 1)
+            if started['half']:
+                minutes = 30
+            elif started['n']:
+                amount = _AMOUNT.get(started['n']) or int(started['n'])
+                minutes = amount * (60 if started['unit'].startswith('h') else 1)
+            else:
+                minutes = self.default_minutes
             minutes = max(5, min(self.max_minutes, minutes))
-            self._until = self.clock() + timedelta(minutes=minutes)
+            with self._lock:
+                self._until = self.clock() + timedelta(minutes=minutes)
             hours = minutes // 60
             span = (f"{hours} hour{'' if hours == 1 else 's'}" if minutes % 60 == 0 else f'{minutes} minutes')
             return f"Okay. I'll hold my notices for {span}. Agents and reminders you timed still come in."
         if _END.fullmatch(said):
-            if self._until is None:
-                return None
-            self._until, self._leftover = None, True
+            with self._lock:
+                if self._until is None:
+                    return None
+                self._until, self._leftover = None, True
             return 'Okay, the focus block is over.'
         asked = re.search(r"\b(?:what's|what is|anything) waiting\b", said)
         release = re.search(r'\blet them (?:through|in)\b', said)

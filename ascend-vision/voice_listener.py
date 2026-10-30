@@ -169,12 +169,15 @@ class VoiceCommandListener:
         is_speaking: Callable[[], bool] | None = None,
         *,
         model=None,
-        stream_factory=None
+        stream_factory=None,
+        dictating: Callable[[], bool] | None = None
     ):
         self.config = config
         self.callback = callback
         self.unmatched_callback = unmatched_callback
         self.is_speaking = is_speaking
+        # While true (a how-to is recording) every line is narration: no commands, no chat cooldown.
+        self.dictating = dictating
         self._model = model
         self._stream_factory = stream_factory
         self._last_chat_time: float | None = None
@@ -200,6 +203,38 @@ class VoiceCommandListener:
         self._current_rms: float = 0.0
         from collections import deque
         self._waveform_history = deque(maxlen=40)
+
+    def _is_dictating(self) -> bool:
+        try:
+            return self.dictating is not None and bool(self.dictating())
+        except Exception:
+            return False
+
+    def _dispatch(self, text: str) -> None:
+        """A heard line goes to a command, or to conversation (at most one line per chat cooldown)."""
+        dictating = self._is_dictating()
+        cmd = None if dictating else self.parser.parse(text)
+        if cmd is not None:
+            LOG.info('VOICE_COMMAND_DETECTED: action=%s text="%s"', cmd.action, cmd.raw_text)
+            if self.callback is not None:
+                try:
+                    self.callback(cmd)
+                except Exception as err:
+                    LOG.error('Voice command callback failed: %s', err)
+        elif self.unmatched_callback is not None:
+            now = time.monotonic()
+            cooldown = getattr(self.config, 'chat_cooldown_seconds', 5.0)
+            if not dictating and self._last_chat_time is not None and (now - self._last_chat_time) < cooldown:
+                LOG.debug('Chat cooldown active (%.1fs remaining); ignoring: "%s"',
+                          cooldown - (now - self._last_chat_time), text)
+            else:
+                if not dictating:  # narration never starts the cooldown for the chat after it
+                    self._last_chat_time = now
+                LOG.info('ROUTING_TO_CONVERSATION: "%s"', text)
+                try:
+                    self.unmatched_callback(text)
+                except Exception as err:
+                    LOG.error('Conversational handler callback failed: %s', err)
 
     @property
     def is_recording(self) -> bool:
@@ -335,27 +370,7 @@ class VoiceCommandListener:
                         self._last_heard_text = text
                         self._last_heard_time = time.monotonic()
                         LOG.info('HEARD_SPEECH: "%s"', text)
-                        cmd = self.parser.parse(text)
-                        if cmd is not None:
-                            LOG.info('VOICE_COMMAND_DETECTED: action=%s text="%s"', cmd.action, cmd.raw_text)
-                            if self.callback is not None:
-                                try:
-                                    self.callback(cmd)
-                                except Exception as err:
-                                    LOG.error('Voice command callback failed: %s', err)
-                        elif self.unmatched_callback is not None:
-                            now = time.monotonic()
-                            cooldown = getattr(self.config, 'chat_cooldown_seconds', 5.0)
-                            if self._last_chat_time is not None and (now - self._last_chat_time) < cooldown:
-                                LOG.debug('Chat cooldown active (%.1fs remaining); ignoring: "%s"',
-                                          cooldown - (now - self._last_chat_time), text)
-                            else:
-                                self._last_chat_time = now
-                                LOG.info('ROUTING_TO_CONVERSATION: "%s"', text)
-                                try:
-                                    self.unmatched_callback(text)
-                                except Exception as err:
-                                    LOG.error('Conversational handler callback failed: %s', err)
+                        self._dispatch(text)
             except Exception as exc:
                 LOG.warning('Error in voice transcription loop: %s', exc)
 

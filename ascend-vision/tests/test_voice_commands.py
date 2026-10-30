@@ -773,3 +773,17 @@ def test_voice_command_config_conversational_schema():
         VoiceCommandConfig(max_reply_words=2)  # too low
     with pytest.raises(ValueError):
         VoiceCommandConfig(chat_cooldown_seconds=0.1)  # too low
+
+
+def test_dictation_sends_every_line_as_speech_past_commands_and_the_cooldown():
+    from config import VoiceCommandConfig
+    commands, speech, dictating = [], [], [True]
+    listener = VoiceCommandListener(VoiceCommandConfig(), callback=commands.append,
+                                    unmatched_callback=speech.append, dictating=lambda: dictating[0])
+    for line in ('Open Settings.', 'Pause the print queue', 'Done recording.'):
+        listener._dispatch(line)
+    assert speech == ['Open Settings.', 'Pause the print queue', 'Done recording.'] and commands == []
+    dictating[0] = False
+    listener._dispatch('Tell me a joke')
+    listener._dispatch('Tell me another')
+    assert speech[3:] == ['Tell me a joke'], 'the chat cooldown is back once dictation ends'
