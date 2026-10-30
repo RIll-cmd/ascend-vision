@@ -2,9 +2,22 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from assistant.activity_summary import (
     ActivityHistoryStore, ActivitySummaryRecorder, render_daily_summary,
 )
+
+
+@pytest.fixture(autouse=True)
+def pinned_store_clock(monkeypatch):
+    """These tests use fixed September dates; the 30-day retention must not age them out."""
+    real_init = ActivityHistoryStore.__init__
+
+    def init(self, path, **kwargs):
+        kwargs.setdefault("now", lambda: datetime(2026, 9, 28, 12, tzinfo=timezone.utc))
+        real_init(self, path, **kwargs)
+    monkeypatch.setattr(ActivityHistoryStore, "__init__", init)
 
 
 def snapshot(*, generated_at, focus="focus", intent="none", category="development",

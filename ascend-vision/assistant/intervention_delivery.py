@@ -55,7 +55,7 @@ class InterventionDelivery:
                 "CREATE TABLE IF NOT EXISTS DeliveredIntent (intentId TEXT PRIMARY KEY, createdAt REAL NOT NULL)"
             )
             self._receipt_db.execute(
-                "DELETE FROM DeliveredIntent WHERE createdAt < ?", (time.time() - 30 * 24 * 60 * 60,)
+                "DELETE FROM DeliveredIntent WHERE createdAt < ?", (self._now().timestamp() - 30 * 24 * 60 * 60,)
             )
             self._receipt_db.commit()
 
