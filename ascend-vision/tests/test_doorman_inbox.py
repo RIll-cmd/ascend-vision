@@ -64,7 +64,7 @@ def test_text_is_cleaned_and_capped_and_each_sender_is_limited(tmp_path):
 
 def test_the_inbox_speaks_each_message_once(tmp_path):
     said = []
-    inbox = Inbox(tmp_path, announce=lambda text, **kw: said.append((text, kw.get('urgent', False))))
+    inbox = Inbox(tmp_path, announce=lambda text, **kw: said.append((text, kw.get('urgent', False))), clock=Clock())
     inbox.tick()
     assert said == []
     desk = Reception(tmp_path, clock=Clock())
@@ -85,7 +85,7 @@ def test_a_reading_file_left_by_a_crash_is_read_first(tmp_path):
     (tmp_path / 'doorman_inbox.reading.jsonl').write_text(
         json.dumps({'at': NOW.isoformat(), 'sender': '1', 'name': 'Old', 'text': 'from before', 'urgent': False}) + '\n')
     Reception(tmp_path, clock=Clock()).take('2', 'New', 'now')
-    Inbox(tmp_path, announce=lambda text, **kw: said.append(text)).tick()
+    Inbox(tmp_path, announce=lambda text, **kw: said.append(text), clock=Clock()).tick()
     assert said == ['Message from Old on Discord: from before', 'Message from New on Discord: now']
 
 
@@ -123,13 +123,13 @@ def test_there_is_a_total_cap_and_quiet_senders_are_forgotten(tmp_path):
 
 def test_during_a_block_routine_messages_stay_on_disk_and_urgent_ones_are_spoken(tmp_path):
     said, holding = [], [True]
-    inbox = Inbox(tmp_path, announce=lambda text, **kw: said.append(text), holding=lambda: holding[0])
+    inbox = Inbox(tmp_path, announce=lambda text, **kw: said.append(text), holding=lambda: holding[0], clock=Clock())
     desk = Reception(tmp_path, clock=Clock())
     desk.take('1', 'Alex', 'dinner at 8?')
     desk.take('2', 'Sam', 'urgent: call me')
     inbox.tick()
     assert said == ['Urgent message from Sam on Discord: urgent: call me']
-    restarted = Inbox(tmp_path, announce=lambda text, **kw: said.append(text), holding=lambda: holding[0])
+    restarted = Inbox(tmp_path, announce=lambda text, **kw: said.append(text), holding=lambda: holding[0], clock=Clock())
     restarted.tick()
     assert len(said) == 1  # a restart during the block loses nothing and repeats nothing
     holding[0] = False
