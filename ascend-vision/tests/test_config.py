@@ -332,6 +332,16 @@ def test_read_for_me_config_defaults_and_validation(tmp_path):
     assert load_config(path).read_for_me.downloads == 'E:/Downloads'
 
 
+def test_release_notes_config_defaults_and_validation():
+    from config import Config, ReleaseNotesConfig
+
+    assert Config().release_notes == ReleaseNotesConfig(enabled=True, folder='')
+    with pytest.raises(ValueError, match='release_notes.enabled'):
+        ReleaseNotesConfig(enabled=0)
+    with pytest.raises(ValueError, match='release_notes.folder'):
+        ReleaseNotesConfig(folder=1)
+
+
 def test_focus_doorman_config_defaults_and_validation(tmp_path):
     from config import Config, FocusDoormanConfig, load_config
 

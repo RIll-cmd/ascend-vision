@@ -55,7 +55,7 @@ def test_fallback_story_and_story_checks():
     assert story['post'] == 'New in ascend hub: thing 0, thing 1 and thing 2.'
     assert parse_story({'whats_new': ['A'], 'post': 'p'}) == {'whats_new': ['A'], 'post': 'p'}
     for bad in (None, [], {'whats_new': 'A', 'post': 'p'}, {'whats_new': [], 'post': 'p'},
-                {'whats_new': ['A'] * 6, 'post': 'p'}, {'whats_new': ['A'], 'post': 'x' * 281}):
+                {'whats_new': ['A'], 'post': 'x' * 281}):
         assert parse_story(bad) is None
 
 
@@ -99,7 +99,7 @@ def test_unknown_repo_and_the_newest_repo_by_default(tmp_path):
     make_repo(tmp_path / 'old', ['feat: old thing'])
     make_repo(tmp_path / 'new', ['feat: new thing'])
     notes, said, jobs = notes_for(tmp_path, [tmp_path / 'old', tmp_path / 'new'])
-    assert notes.intercept('write release notes for the moon') == "I don't know a repo called the moon."
+    assert notes.intercept('write release notes for the moon') is None
     assert notes.intercept('write the release notes').startswith('Writing the release notes for ')
 
 
@@ -116,6 +116,33 @@ def test_the_ai_story_is_used_and_the_owner_is_never_quoted_wrong(tmp_path):
     assert asked == [('app', ['crash on start', 'dark mode'])]
     text = (tmp_path / 'notes' / 'app-2026-10-30.md').read_text(encoding='utf-8')
     assert '- You can switch to dark mode.' in text and 'Dark mode is here' in text
+
+
+def test_a_quiet_repo_with_no_notes_yet_gets_its_last_commits(tmp_path):
+    git = make_repo(tmp_path / 'quiet', [])
+    (tmp_path / 'quiet' / 'a.txt').write_text('a')
+    git('add', '.')
+    subprocess.run(['git', 'commit', '-q', '-m', 'feat: old work'], cwd=tmp_path / 'quiet', check=True,
+                   env={**__import__('os').environ, 'GIT_COMMITTER_DATE': '2026-08-01T10:00:00',
+                        'GIT_AUTHOR_DATE': '2026-08-01T10:00:00'})
+    notes, said, jobs = notes_for(tmp_path, [tmp_path / 'quiet'])
+    notes.intercept('write release notes for quiet')
+    finish(jobs)
+    assert said == ['Release notes for quiet are ready: 1 change, 1 new and no fixes.']
+
+
+def test_unknown_names_go_to_chat_and_partial_names_match(tmp_path):
+    make_repo(tmp_path / 'ascend-vision', ['feat: wake word'])
+    notes, said, jobs = notes_for(tmp_path, [tmp_path / 'ascend-vision'])
+    assert notes.intercept('write release notes for the new login page') is None
+    assert notes.intercept('write some release notes for vision please') == (
+        'Writing the release notes for ascend vision.')
+
+
+def test_odd_bytes_in_a_subject_keep_the_commit_and_long_ai_lists_are_trimmed():
+    commits = parse_log(f'a1{SEP}feat: odd {SEP} subject{SEP}2026-10-29T10:00:00Z{END}')
+    assert [c.subject for c in commits] == ['odd   subject']
+    assert parse_story({'whats_new': ['A'] * 7, 'post': 'p'}) == {'whats_new': ['A'] * 5, 'post': 'p'}
 
 
 def test_markdown_in_subjects_stays_plain():

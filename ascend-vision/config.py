@@ -585,6 +585,19 @@ class ReadForMeConfig:
 
 
 @dataclass(frozen=True)
+class ReleaseNotesConfig:
+    """"Vision, write release notes for <repo>": changelog, what's new and a post from the commits."""
+    enabled: bool = True
+    folder: str = ''  # '' keeps the notes in data/release-notes
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('release_notes.enabled must be a YAML boolean')
+        if not isinstance(self.folder, str):
+            raise ValueError('release_notes.folder must be a string')
+
+
+@dataclass(frozen=True)
 class WeatherConfig:
     """Daily weather briefing from Open-Meteo (free, no key) for the owner's places."""
     enabled: bool = True
@@ -867,6 +880,7 @@ class Config:
     revival: RevivalConfig = field(default_factory=RevivalConfig)
     prompt_coach: PromptCoachConfig = field(default_factory=PromptCoachConfig)
     read_for_me: ReadForMeConfig = field(default_factory=ReadForMeConfig)
+    release_notes: ReleaseNotesConfig = field(default_factory=ReleaseNotesConfig)
     github: GitHubCoachConfig = field(default_factory=GitHubCoachConfig)
     phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
     browser_automation: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
@@ -896,6 +910,7 @@ def load_config(path: Path) -> Config:
                  'slump': SlumpConfig, 'promises': PromisesConfig,
                  'focus_doorman': FocusDoormanConfig, 'show_me': ShowMeConfig, 'revival': RevivalConfig,
                  'prompt_coach': PromptCoachConfig, 'read_for_me': ReadForMeConfig,
+                 'release_notes': ReleaseNotesConfig,
                  'browser_automation': BrowserAutomationConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')

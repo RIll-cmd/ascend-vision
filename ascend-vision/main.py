@@ -907,6 +907,29 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             except Exception as exc:
                 LOG.warning('Prompt coaching unavailable (%s)', type(exc).__name__)
 
+        release_notes = None
+        release_config = getattr(config, 'release_notes', None)
+        if release_config is not None and release_config.enabled:
+            try:
+                from assistant.release_notes import ReleaseNotes, make_story_writer
+                from assistant.revival import command_runner, default_repos
+                from llm_router import LLMRouter
+                notes_git = command_runner('git')
+
+                def notes_repos():
+                    if revival_config is not None and revival_config.repos:
+                        return [Path(r) for r in revival_config.repos]
+                    common = notes_git(Path(__file__).resolve().parent, 'rev-parse', '--path-format=absolute',
+                                       '--git-common-dir')
+                    return default_repos(Path(common.strip()).parent) if common else []
+                release_notes = ReleaseNotes(
+                    repos=notes_repos, run_git=notes_git, write_story=make_story_writer(LLMRouter(config.llm)),
+                    folder=Path(release_config.folder) if release_config.folder
+                    else Path(config.storage.database).parent / 'release-notes',
+                    announce=announce_paced)
+            except Exception as exc:
+                LOG.warning('Release notes unavailable (%s)', type(exc).__name__)
+
         nutrition_coach = None
         try:
             from assistant.nutrition import NutritionStore
@@ -939,7 +962,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             # While a how-to is recording, every line is narration, so the recorder comes right after away mode.
             for handler in (away_mode, how_to, document_reader, eye_calibrator, focus_doorman, weather_coach,
                             github_coach,
-                            nutrition_coach, promise_coach, revival_coach, prompt_coach, slump_coach):
+                            nutrition_coach, promise_coach, revival_coach, prompt_coach, release_notes,
+                            slump_coach):
                 if handler is not None:
                     try:
                         answer = handler.intercept(text)

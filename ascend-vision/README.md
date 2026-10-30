@@ -54,6 +54,7 @@ Everything has a default. Edit `config.yaml` only if you need to:
 | Stop the weekly "something you left" check-in, or pick which repos it reads | `revival.enabled: false`, `revival.repos: ['D:/ascend_hub']` |
 | Stop the weekly prompt coaching, or read the Agent Room from another folder | `prompt_coach.enabled: false`, `prompt_coach.room_data: 'E:/hub/.sites-runtime/agent-room'` |
 | Turn off "read this for me", or read PDFs from another folder | `read_for_me.enabled: false`, `read_for_me.downloads: 'E:/Downloads'` |
+| Turn off release notes, or keep them somewhere else | `release_notes.enabled: false`, `release_notes.folder: 'D:/notes'` |
 
 While a gate waits, say the wake word, then the answer ("Vision, approve"); the
 follow-up "yes" needs no wake word for 20 seconds. Phone messages and voice notes
@@ -108,6 +109,13 @@ sends that one image or PDF to Google Gemini, then says what it is and the two m
 serious red flags (automatic renewal, fees, cancellation notice, deadlines...), and keeps
 the full notes in `data/readings/`. It is a first look, not legal advice. Nothing is sent
 unless you ask.
+
+Say "write release notes for ascend hub" (or just "write release notes" for the repo you
+committed to last; "vision" is enough for ascend-vision). Vision groups the commits since
+its last notes for that repo (or the last tag, or the last two weeks, or at least the last
+20 commits) into New, Fixes, Docs and Other, asks the AI for a short "what's new" list and
+a post you could share, and saves it to `data/release-notes/`. It never writes into the
+repo, tags or posts anything.
 
 Advanced and experimental features (phone chat, Discord, browser automation,
 proactive check-ins, Core link) are off by default and are described below.

@@ -23,8 +23,9 @@ MAX_COMMITS = 200
 RECENT = '14 days ago'
 GROUPS = (('New', 'feat'), ('Fixes', 'fix'), ('Docs', 'docs'), ('Other', 'other'))
 _CONVENTIONAL = re.compile(r'^(\w+)(?:\([^)]*\))?!?:\s*(.+)$')
-_ASK = re.compile(r"(?:(?:hey|ok|okay) )?(?:vision )?(?:write|make|draft) (?:the |some )?release notes"
-                  r"(?: for (?P<repo>.+))?")
+_ASK = re.compile(r"(?:(?:hey|ok|okay) )?(?:vision )?(?:can you )?(?:write|make|draft) (?:the |some )?release notes"
+                  r"(?: for (?P<repo>[a-z' ]{1,40}?))?(?: please)?")
+LAST_FEW = 20  # a repo with no notes yet and nothing in two weeks still gets its latest commits
 STORY_PROMPT = (
     'You turn commit subjects into release notes for the people who use the app, not for developers. Reply with '
     'JSON only: {"whats_new": [1 to 5 short plain sentences about what people can do now or what got better], '
@@ -45,9 +46,10 @@ def parse_log(text: str) -> list[Commit]:
     commits = []
     for record in text.split(END):
         fields = record.strip('\n').split(SEP)
-        if len(fields) != 3 or not fields[0].strip():
+        if len(fields) < 3 or not fields[0].strip():
             continue
-        sha, subject, date = (f.strip() for f in fields)
+        # A subject holding the separator byte keeps its commit: the middle fields are the subject.
+        sha, subject, date = fields[0].strip(), ' '.join(fields[1:-1]).strip(), fields[-1].strip()
         found = _CONVENTIONAL.match(subject)
         if found:
             kind = found[1].lower() if found[1].lower() in ('feat', 'fix', 'docs') else 'other'
@@ -85,8 +87,10 @@ def parse_story(answer) -> dict | None:
     if not isinstance(answer, dict):
         return None
     items, post = answer.get('whats_new'), answer.get('post')
-    if (not isinstance(items, list) or not 1 <= len(items) <= 5
-            or any(not isinstance(i, str) or not 0 < len(i.strip()) <= 200 for i in items)):
+    if not isinstance(items, list):
+        return None
+    items = items[:5]  # a long list is trimmed, not thrown away
+    if not items or any(not isinstance(i, str) or not 0 < len(i.strip()) <= 200 for i in items):
         return None
     if not isinstance(post, str) or not 0 < len(post.strip()) <= 280:
         return None
@@ -140,7 +144,9 @@ class ReleaseNotes:
     def _pick(self, name: str | None) -> Path | None:
         repos = [Path(r) for r in self.repos()]
         if name:
-            repos = [r for r in repos if _key(r.name) == _key(name)]
+            exact = [r for r in repos if _key(r.name) == _key(name)]
+            # "vision" means ascend-vision: a part of the name is enough when nothing matches exactly.
+            repos = exact or ([r for r in repos if _key(name) in _key(r.name)] if len(_key(name)) >= 3 else [])
         return max(repos, key=self._newest, default=None)
 
     def intercept(self, text: str) -> str | None:
@@ -151,8 +157,8 @@ class ReleaseNotes:
             if self._busy:
                 return 'Still writing the last ones.'
             repo = self._pick(asked['repo'])
-            if repo is None:
-                return f"I don't know a repo called {asked['repo']}." if asked['repo'] else "I don't see any repos."
+            if repo is None:  # "release notes for the new login page" is chat, not a repo
+                return None if asked['repo'] else "I don't see any repos."
             self._busy = True
         self.run(lambda: self._write(repo))
         return f'Writing the release notes for {_spoken(repo.name)}.'
@@ -164,14 +170,14 @@ class ReleaseNotes:
         except (OSError, ValueError):
             return {}
 
-    def _range(self, repo: Path, last: str | None) -> list[str]:
+    def _range(self, repo: Path, last: str | None, head: str) -> list[str]:
         if (isinstance(last, str) and re.fullmatch(r'[0-9a-f]{7,64}', last)
-                and self.run_git(repo, 'merge-base', '--is-ancestor', last, 'HEAD') is not None):
-            return [f'{last}..HEAD']
-        tag = (self.run_git(repo, 'describe', '--tags', '--abbrev=0') or '').strip()
+                and self.run_git(repo, 'merge-base', '--is-ancestor', last, head) is not None):
+            return [f'{last}..{head}']
+        tag = (self.run_git(repo, 'describe', '--tags', '--abbrev=0', head) or '').strip()
         if tag:
-            return [f'{tag}..HEAD']
-        return [f'--since={RECENT}', 'HEAD']
+            return [f'{tag}..{head}']
+        return [f'--since={RECENT}', head]
 
     def _write(self, repo: Path) -> None:
         name = _spoken(repo.name)
@@ -186,9 +192,19 @@ class ReleaseNotes:
 
     def _write_notes(self, repo: Path, name: str) -> None:
         state = self._state()
-        log = self.run_git(repo, 'log', '--no-merges', f'--max-count={MAX_COMMITS}',
-                           f'--format=%h{SEP}%s{SEP}%cI{END}', *self._range(repo, state.get(repo.name), ), '--')
-        commits = parse_log(log or '')
+        # Fixed before the slow AI call, so a commit made meanwhile is left for next time, not skipped.
+        head = (self.run_git(repo, 'rev-parse', 'HEAD') or '').strip()
+        if not head:
+            self.announce(f'Nothing new in {name} since the last notes.')
+            return
+        last = state.get(repo.name)
+        span = self._range(repo, last, head)
+        fmt = f'--format=%h{SEP}%s{SEP}%cI{END}'
+        commits = parse_log(self.run_git(repo, 'log', '--no-merges', f'--max-count={MAX_COMMITS}', fmt, *span, '--')
+                            or '')
+        if not commits and last is None and span[0].startswith('--since'):
+            commits = parse_log(self.run_git(repo, 'log', '--no-merges', f'--max-count={LAST_FEW}', fmt, head, '--')
+                                or '')
         if not commits:
             self.announce(f'Nothing new in {name} since the last notes.')
             return
@@ -206,7 +222,6 @@ class ReleaseNotes:
         while path.exists():
             path, n = self.folder / f'{base}-{n}.md', n + 1
         path.write_text(render_notes(name, now, commits, story), encoding='utf-8')
-        head = (self.run_git(repo, 'rev-parse', 'HEAD') or '').strip()
         if head:
             state[repo.name] = head
             temporary = self.folder / 'state.json.tmp'
