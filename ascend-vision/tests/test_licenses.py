@@ -168,3 +168,52 @@ def test_many_packages_to_watch_do_not_crash(tmp_path):
     check.intercept('check the licenses')
     assert said[-1].startswith("The last Agent Room session, 'Add a date picker', added 14 packages. 14 to watch:")
     assert '12 more in the notes.' in said[-1]
+
+
+# Polish: offline is not "no license", odd requirement forms, local packages stay local
+
+def test_offline_registries_are_said_plainly(tmp_path):
+    def offline(eco, name):
+        raise OSError('no network')
+    said = []
+    check = LicenseCheck(room(tmp_path, SESSIONS), run_git=None, fetch=None, announce=said.append,
+                         folder=tmp_path / 'readings', clock=lambda: NOW, run=lambda job: job(),
+                         added=lambda repo, base, branch: [('npm', 'a'), ('pypi', 'b')], lookup=offline)
+    check.intercept('check the licenses')
+    assert said == ["I couldn't reach npm or PyPI to check the 2 packages the last Agent Room session added."]
+
+
+def test_one_unreachable_lookup_is_named(tmp_path):
+    def flaky(eco, name):
+        if name == 'b':
+            raise OSError('timeout')
+        return 'MIT'
+    check, said = check_for(tmp_path, SESSIONS, [('npm', 'a'), ('pypi', 'b')], {})
+    check.lookup = flaky
+    check.intercept('check the licenses')
+    assert said[-1] == ("The last Agent Room session, 'Add a date picker', added 2 packages. One to watch: "
+                        "medium, b could not be checked. Notes saved.")
+
+
+def test_requirement_forms_aliases_and_local_packages():
+    files = {
+        '': 'package.json\nrequirements.txt\npyproject.toml\n',
+        'package.json': json.dumps({'dependencies': {'mine': 'workspace:*', 'local': 'file:../x', 'gh': 'github:a/b',
+                                                     'url': 'https://x/y.tgz', 'alias': 'npm:real-pkg@^2',
+                                                     'linked': 'link:../z', 'plain': '^1'}}),
+        'requirements.txt': 'mylib @ https://example.com/mylib.whl\nrequests[socks]==2 \\\n  --hash=sha256:x\n',
+        'pyproject.toml': '[tool.poetry.group.dev.dependencies]\npytest = "*"\n',
+    }
+    assert manifest_packages(lambda path: files.get(path)) == {
+        ('npm', 'real-pkg'), ('npm', 'plain'), ('pypi', 'mylib'), ('pypi', 'requests'), ('pypi', 'pytest')}
+
+
+def test_a_failed_thread_start_does_not_leave_it_busy(tmp_path):
+    check, said = check_for(tmp_path, SESSIONS, [], {})
+
+    def broken(job):
+        raise RuntimeError('cannot start thread')
+    check.run = broken
+    assert check.intercept('check the licenses') == "I couldn't start the license check."
+    check.run = lambda job: job()
+    assert check.intercept('check the licenses') == 'Checking the licenses now.'

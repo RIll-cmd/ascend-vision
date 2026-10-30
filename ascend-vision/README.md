@@ -134,7 +134,9 @@ are my prompts?" any time.
 Say "read this for me" (the screen your active window is on), "read what I'm holding" (a page held to the camera)
 or "read my latest download" (the newest PDF in Downloads from the last week), or name
 one: "read the lease pdf" or "read the pdf called rental agreement" (the newest PDF with
-those words in its name in Downloads, Desktop or Documents). Vision
+those words in its name in Downloads, Desktop or Documents, OneDrive's too). You can
+also drop a PDF or a picture into `data/drop-to-read/`: Vision reads it within a few
+seconds and moves it to `data/drop-to-read/read/`. Vision
 sends that one image or PDF to Google Gemini, then says what it is and the two most
 serious red flags (automatic renewal, fees, cancellation notice, deadlines...), and keeps
 the full notes in `data/readings/`. It is a first look, not legal advice. Nothing is sent
@@ -144,7 +146,9 @@ Say "check the licenses" and Vision looks at the packages the newest Agent Room 
 added (`package.json`, `requirements*.txt`, `pyproject.toml`, compared with where the
 session started), looks each license up on npm or PyPI (only the package names are
 sent), and names the ones to look at twice: GPL, AGPL, SSPL, non-commercial or no license
-high; LGPL, MPL or unknown medium. Notes go to `data/readings/`.
+high; LGPL, MPL or unknown medium. Local, git and URL dependencies are never looked up,
+and if the registries can't be reached it says so instead of guessing. Notes go to
+`data/readings/`.
 
 Say "write release notes for ascend hub" (or just "write release notes" for the repo you
 committed to last; "vision" is enough for ascend-vision). Vision groups the commits since

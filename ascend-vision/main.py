@@ -882,6 +882,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     else Path(config.storage.database).parent / 'readings',
                     folders=pdf_folders(Path(read_config.downloads) if read_config.downloads
                                         else Path.home() / 'Downloads', Path.home()))
+                document_reader.drop = Path(config.storage.database).parent / 'drop-to-read'
             except Exception as exc:
                 LOG.warning('Document reading unavailable (%s)', type(exc).__name__)
             try:
@@ -1936,6 +1937,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         how_to.tick()
                     except Exception as exc:
                         LOG.debug('How-to screenshot skipped (%s)', type(exc).__name__)
+                if document_reader is not None:
+                    try:
+                        document_reader.tick()
+                    except Exception as exc:
+                        LOG.debug('Drop folder check skipped (%s)', type(exc).__name__)
                 if doorman_inbox is not None:
                     try:
                         doorman_inbox.tick()

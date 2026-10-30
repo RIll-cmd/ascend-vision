@@ -25,6 +25,8 @@ MAX_PDF_BYTES = 20 * 1024 * 1024
 PDF_DAYS = 7
 SEVERITIES = ('high', 'medium', 'low')
 LEGAL_WORDS = re.compile(r'\b(?:contract|lease|terms|agreement|policy|conditions|waiver|nda)\b')
+DROP_TYPES = {'.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+              '.webp': 'image/webp'}
 MIN_FRAME = 64  # assistant-only mode keeps a 1x1 placeholder instead of a camera frame
 PARTIAL = ('.part', '.crdownload', '.download', '.tmp')
 NUMBERS = ('No', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight')
@@ -50,7 +52,7 @@ READ_PROMPT = (
     '"summary": two short plain sentences, '
     '"red_flags": [{"severity": "high" | "medium" | "low", "text": one plain sentence}] (at most 8, most severe '
     'first; look for automatic renewal, cancellation notice, fees and penalties, price changes, liability, '
-    'termination, data sharing, arbitration, deadlines), '
+    'termination, data sharing, arbitration, license terms, deadlines), '
     '"dates": [deadlines or dates that matter, as short text] (at most 5)}. '
     'If the image shows no document, reply {"kind": "none", "summary": "I can\'t see a document.", '
     '"red_flags": [], "dates": []}.')
@@ -101,7 +103,7 @@ def spoken_answer(reading: dict) -> str:
             said += f' {NUMBERS[len(flags) - 2]} more in the notes.'
     else:
         said = f'{first} Nothing stood out as a red flag.'
-    if LEGAL_WORDS.search(reading['kind']):
+    if flags or LEGAL_WORDS.search(reading['kind']):
         said += " I'm not a lawyer, so for anything big, ask one."
     return said
 
@@ -144,7 +146,7 @@ def latest_pdf(folder: Path, now: datetime) -> Path | None:
 
 def find_pdf(folders, wanted: str, now: datetime) -> Path | None:
     """The newest PDF (top level of each folder, any age) whose name holds every word asked for."""
-    asked = set(re.findall(r'[a-z0-9]+', wanted.lower()))
+    asked = set(re.findall(r'[a-z0-9]+', wanted.lower()))  # each word anywhere in the name: "LeaseAgreement" too
     best = None
     for folder in folders:
         try:
@@ -155,7 +157,8 @@ def find_pdf(folders, wanted: str, now: datetime) -> Path | None:
             try:
                 if path.suffix.lower() != '.pdf' or not path.is_file():
                     continue
-                if not asked <= set(re.findall(r'[a-z0-9]+', path.stem.lower())):
+                joined = re.sub(r'[^a-z0-9]', '', path.stem.lower())
+                if not all(word in joined for word in asked):
                     continue
                 if any(path.with_name(path.name + end).exists() for end in PARTIAL):
                     continue
@@ -240,6 +243,7 @@ class DocumentReader:
         # Where a PDF asked for by name is looked for: Downloads, Desktop and Documents by default.
         self.folders = [Path(f) for f in folders] if folders else [self.downloads]
         self.find = lambda wanted: find_pdf(self.folders, wanted, self.clock())
+        self.drop = None  # a folder: a PDF or picture put in it is read, then moved to drop/read
         self.run = run or (lambda job: threading.Thread(target=job, name='document-reader', daemon=True).start())
         self._lock = threading.Lock()
         self._busy = False
@@ -285,6 +289,49 @@ class DocumentReader:
             self._busy = True
         self.run(lambda: self._read(*job))
         return 'Reading it now.'
+
+    def tick(self) -> None:
+        """Reads the oldest finished file in the drop folder; called from the main loop."""
+        import time
+        if self.drop is None:
+            return
+        try:
+            self.drop.mkdir(parents=True, exist_ok=True)
+            waiting = []
+            for path in self.drop.iterdir():
+                if path.is_file() and path.suffix.lower() in DROP_TYPES and not any(
+                        path.with_name(path.name + end).exists() for end in PARTIAL):
+                    info = path.stat()
+                    if info.st_size and info.st_mtime <= time.time() - 2:  # not still being copied in
+                        waiting.append((info.st_mtime, path, info.st_size))
+        except OSError:
+            return
+        if not waiting:
+            return
+        with self._lock:
+            if self._busy:
+                return
+            _, path, size = min(waiting)
+            done = self.drop / 'read'
+            try:
+                done.mkdir(exist_ok=True)
+                target, n = done / path.name, 2
+                while target.exists():
+                    target, n = done / f'{path.stem}-{n}{path.suffix}', n + 1
+                path.replace(target)
+            except OSError:
+                return
+            if size > MAX_PDF_BYTES:
+                self.announce(f'{path.name} is too big for me to read.')
+                return
+            self._busy = True
+        mime = DROP_TYPES[target.suffix.lower()]
+        self.announce(f'Reading {path.name} from the drop folder.')
+        if mime == 'application/pdf':
+            job = (path.name, lambda: target.read_bytes(), mime, path.name)
+        else:
+            job = (path.name, lambda: _jpeg(Image.open(target).convert('RGB')), 'image/jpeg', path.name)
+        self.run(lambda: self._read(*job))
 
     def _read(self, kind: str, data, mime: str, source: str) -> None:
         try:

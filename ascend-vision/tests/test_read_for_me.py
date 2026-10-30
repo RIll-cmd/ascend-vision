@@ -127,10 +127,11 @@ def test_notes_stay_plain_text():
 def test_spoken_answer_without_flags_or_with_one():
     one = {'kind': 'invoice', 'summary': 'An invoice for 120. Due Friday.', 'red_flags': [
         {'severity': 'medium', 'text': 'a 30 dollar late fee'}], 'dates': []}
-    assert spoken_answer(one) == 'An invoice for 120. One thing to watch: medium, a 30 dollar late fee.'
+    assert spoken_answer(one) == ("An invoice for 120. One thing to watch: medium, a 30 dollar late fee. "
+                                  "I'm not a lawyer, so for anything big, ask one.")
     capital = {**one, 'red_flags': [{'severity': 'high', 'text': 'The plan renews.'},
                                     {'severity': 'low', 'text': 'USD only.'}]}
-    assert spoken_answer(capital).endswith('high, the plan renews; low, USD only.')
+    assert spoken_answer(capital).endswith("high, the plan renews; low, USD only. I'm not a lawyer, so for anything big, ask one.")
 
 
 def test_one_odd_flag_does_not_lose_the_reading():
@@ -291,3 +292,62 @@ def test_pdf_folders_include_onedrive_desktop_and_documents(tmp_path, monkeypatc
         folder.mkdir(parents=True)
     monkeypatch.setenv('OneDrive', str(onedrive))
     assert pdf_folders(home / 'Downloads', home) == [home / 'Downloads', onedrive / 'Desktop', home / 'Documents']
+
+
+# Polish: a drop folder, license terms, always "not a lawyer" with red flags, names inside words
+
+def test_a_file_dropped_in_the_folder_is_read_once_and_moved(tmp_path):
+    drop = tmp_path / 'drop'
+    reader, calls, said, jobs = reader_for(tmp_path)
+    reader.drop = drop
+    reader.tick()
+    assert drop.is_dir() and calls == []  # made so the owner can find it
+    lease = drop / 'lease.pdf'
+    lease.write_bytes(b'%PDF-1.4 lease')
+    os.utime(lease, (0, (datetime.now() - timedelta(seconds=10)).timestamp()))
+    (drop / 'notes.txt').write_text('not a document type')
+    photo = drop / 'photo.jpg'
+    Image.new('RGB', (800, 600), 'white').save(photo)
+    os.utime(photo, (0, (datetime.now() - timedelta(seconds=5)).timestamp()))
+    reader.tick()
+    assert said == ['Reading lease.pdf from the drop folder.']
+    finish(jobs)
+    assert calls[0] == ('lease.pdf', 'application/pdf', len(b'%PDF-1.4 lease'))
+    assert (drop / 'read' / 'lease.pdf').exists() and not lease.exists()
+    reader.tick()
+    finish(jobs)
+    assert calls[1][:2] == ('photo.jpg', 'image/jpeg') and (drop / 'read' / 'photo.jpg').exists()
+    reader.tick()
+    assert len(calls) == 2 and (drop / 'notes.txt').exists()
+
+
+def test_a_file_still_being_written_waits(tmp_path):
+    drop = tmp_path / 'drop'
+    drop.mkdir()
+    (drop / 'big.pdf').write_bytes(b'%PDF')  # modified just now
+    reader, calls, said, jobs = reader_for(tmp_path)
+    reader.drop = drop
+    reader.tick()
+    assert said == [] and (drop / 'big.pdf').exists()
+
+
+def test_license_terms_are_a_red_flag_and_flags_always_get_the_lawyer_line():
+    from assistant.read_for_me import READ_PROMPT
+    assert 'license terms' in READ_PROMPT
+    invoice = {'kind': 'invoice', 'summary': 'A bill for 40 dollars.', 'dates': [],
+               'red_flags': [{'severity': 'medium', 'text': 'a late fee of 5 dollars'}]}
+    assert spoken_answer(invoice).endswith("I'm not a lawyer, so for anything big, ask one.")
+    clean = {'kind': 'receipt', 'summary': 'A coffee receipt.', 'red_flags': [], 'dates': []}
+    assert 'lawyer' not in spoken_answer(clean)
+
+
+def test_pdf_names_match_inside_joined_words(tmp_path):
+    from assistant.read_for_me import find_pdf
+    folder = tmp_path / 'Downloads'
+    folder.mkdir()
+    joined = folder / 'LeaseAgreement2025.pdf'
+    joined.write_bytes(b'%PDF')
+    os.utime(joined, (0, (NOW - timedelta(days=1)).timestamp()))
+    assert find_pdf([folder], 'lease agreement', NOW) == joined
+    assert find_pdf([folder], 'lease 2025', NOW) == joined
+    assert find_pdf([folder], 'tax', NOW) is None

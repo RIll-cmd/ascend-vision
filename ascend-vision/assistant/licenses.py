@@ -14,6 +14,7 @@ import re
 import threading
 import tomllib
 from urllib.parse import quote
+import urllib.error
 import urllib.request
 
 from assistant.answers import words
@@ -40,6 +41,8 @@ def _pypi(name: str) -> str:
 
 def _requirement(line: str) -> str | None:
     line = line.split('#', 1)[0].strip()
+    if '://' in line and '@' in line.split('://', 1)[0]:
+        line = line.split('@', 1)[0]  # "mylib @ https://...": the name comes first
     if not line or line.startswith('-') or '://' in line:
         return None
     found = _REQUIREMENT.match(line)
@@ -64,7 +67,7 @@ def manifest_packages(read) -> set[tuple[str, str]]:
                 data = json.loads(text(path))
                 for section in ('dependencies', 'devDependencies', 'optionalDependencies'):
                     if isinstance(data.get(section), dict):
-                        found |= {('npm', dep) for dep in data[section]}
+                        found |= {('npm', n) for n in (_npm_name(d, v) for d, v in data[section].items()) if n}
             except (ValueError, AttributeError):
                 pass
         elif name != 'pyproject.toml':
@@ -72,6 +75,18 @@ def manifest_packages(read) -> set[tuple[str, str]]:
         else:
             found |= _pyproject(text(path))
     return found
+
+
+def _npm_name(name: str, spec) -> str | None:
+    """The registry name a dependency comes from; None for local, git and URL ones, which never touch npm."""
+    spec = spec if isinstance(spec, str) else ''
+    if spec.startswith('npm:'):  # an alias: "x": "npm:real-pkg@^2"
+        real = spec[4:]
+        at = real.rfind('@')
+        return real[:at] if at > 0 else real
+    if spec.startswith(('workspace:', 'file:', 'link:', 'portal:', 'git', 'github:', 'http:', 'https:')) or '/' in spec:
+        return None
+    return name
 
 
 def _pyproject(source: str) -> set[tuple[str, str]]:
@@ -85,9 +100,12 @@ def _pyproject(source: str) -> set[tuple[str, str]]:
     for extra in (project.get('optional-dependencies') or {}).values():
         lines += list(extra or [])
     found |= {('pypi', n) for n in map(_requirement, (str(x) for x in lines)) if n}
-    poetry = data.get('tool', {}).get('poetry', {}).get('dependencies', {})
-    if isinstance(poetry, dict):
-        found |= {('pypi', _pypi(n)) for n in poetry if n.lower() != 'python'}
+    poetry = data.get('tool', {}).get('poetry', {})
+    tables = [poetry.get('dependencies')] + [g.get('dependencies') for g in (poetry.get('group') or {}).values()
+                                             if isinstance(g, dict)]
+    for table in tables:
+        if isinstance(table, dict):
+            found |= {('pypi', _pypi(n)) for n in table if n.lower() != 'python'}
     return found
 
 
@@ -140,13 +158,18 @@ def _count(n: int) -> str:
 
 
 def make_fetch(timeout: float = 10.0):
+    """url -> JSON dict; None when the registry has no such package; a network failure raises."""
     def fetch(url: str) -> dict | None:
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers={'accept': 'application/json'}),
                                         timeout=timeout) as response:
                 data = json.loads(response.read().decode('utf-8'))
             return data if isinstance(data, dict) else None
-        except (OSError, ValueError):
+        except urllib.error.HTTPError as error:
+            if error.code in (404, 410):
+                return None
+            raise
+        except ValueError:
             return None
     return fetch
 
@@ -190,7 +213,13 @@ class LicenseCheck:
             if session is None:
                 return "I can't find an Agent Room session with a repo to check."
             self._busy = True
-        self.run(lambda: self._check(*session))
+        try:
+            self.run(lambda: self._check(*session))
+        except Exception as exc:
+            LOG.warning('License check could not start (%s)', type(exc).__name__)
+            with self._lock:
+                self._busy = False
+            return "I couldn't start the license check."
         return 'Checking the licenses now.'
 
     def _check(self, title: str, repo: str, base: str, branch: str) -> None:
@@ -201,17 +230,23 @@ class LicenseCheck:
                 LOG.info('License check could not read the packages (%s)', type(exc).__name__)
                 self.announce("I couldn't read that session's packages.")
                 return
-            found = []
+            found, unreachable = [], set()
             for ecosystem, name in packages:
                 try:
                     license_name = self.lookup(ecosystem, name)
-                except Exception:
+                except Exception:  # offline is not the same as "no license"
                     license_name = None
+                    unreachable.add(name)
                 found.append((severity(license_name), name, ecosystem, license_name))
             found.sort(key=lambda f: (SEVERITIES.index(f[0]), f[1]))
+            self._unreachable = unreachable
             lead = f"The last Agent Room session, '{title}', added"
             if not found:
                 self.announce(f'{lead} no packages.')
+                return
+            if len(unreachable) == len(found):
+                self.announce(f"I couldn't reach npm or PyPI to check the {len(found)} "
+                              f"package{'' if len(found) == 1 else 's'} the last Agent Room session added.")
                 return
             self._notes(title, found)
             count = f"{len(found)} package{'' if len(found) == 1 else 's'}"
@@ -219,7 +254,8 @@ class LicenseCheck:
             if not watch:
                 self.announce(f'{lead} {count}, all with permissive licenses.')
                 return
-            spoken = '; '.join(f'{level}, {name} ' + (f'uses {lic}' if lic else 'has no license listed')
+            spoken = '; '.join(f'{level}, {name} ' + (f'uses {lic}' if lic else 'could not be checked'
+                                                     if name in unreachable else 'has no license listed')
                                for level, name, _, lic in watch[:2])
             more = f' {_count(len(watch) - 2)} more in the notes.' if len(watch) > 2 else ''
             self.announce(f"{lead} {count}. {_count(len(watch))} to watch: {spoken}.{more} Notes saved.")
@@ -230,7 +266,9 @@ class LicenseCheck:
     def _notes(self, title: str, found: list) -> None:
         now = self.clock()
         lines = [f'# Package licenses ({now:%Y-%m-%d %H:%M})', '', f'Agent Room session: {title}', '']
-        lines += [f"- **{level.title()}:** {name} ({ecosystem}): {lic or 'no license listed'}"
+        unreachable = getattr(self, '_unreachable', set())
+        lines += [f"- **{level.title()}:** {name} ({ecosystem}): "
+                  + (lic or ('could not be checked (registry unreachable)' if name in unreachable else 'no license listed'))
                   for level, name, ecosystem, lic in found]
         lines += ['', '_A first filter by license name, not legal advice._', '']
         try:
