@@ -851,7 +851,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     announce=announce_paced, capture=capture_desktop,
                     write_steps=make_writer(LLMRouter(config.llm)) if show_me_config.ai_cleanup else None,
                     # The video films the monitor you work on, with your narration from a second mic stream.
-                    video=lambda path: ScreenVideo(path, capture_active_monitor, audio=MicRecorder), repos=howto_repos,
+                    video=lambda path: ScreenVideo(path, capture_active_monitor, audio=lambda wav: MicRecorder(
+                        wav, device=config.voice_commands.device_index)), repos=howto_repos,
                     remember=room_client.add_memory if room_client is not None else None,
                     transcribe=make_file_transcriber(config.voice_commands), git=howto_git)
                 resources.callback(how_to.close)

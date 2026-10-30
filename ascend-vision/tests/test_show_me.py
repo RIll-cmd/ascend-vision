@@ -259,7 +259,7 @@ def test_screen_video_writes_a_real_mp4_from_the_screen(tmp_path):
         return Image.new('RGB', size, (len(calls) * 20 % 255, 0, 0))
 
     video = ScreenVideo(tmp_path / 'recording.mp4', capture, fps=20, max_width=1280)
-    time.sleep(0.5)
+    time.sleep(1.5)  # the first PyAV import in the thread takes a moment
     video.stop()
     assert video.finish() is False  # no sound was recorded, so the video stays silent
     reader = cv2.VideoCapture(str(tmp_path / 'recording.mp4'))
@@ -488,3 +488,132 @@ def test_silence_does_not_become_a_transcript():
     heard = [SimpleNamespace(start=0.0, text=' .'), SimpleNamespace(start=1.2, text=' Open settings. '),
              SimpleNamespace(start=3.0, text='...'), SimpleNamespace(start=9.0, text='Thanks for watching!')]
     assert spoken_segments(heard, duration=4.1) == [(1.2, 'Open settings.')]
+
+
+# Final review fixes
+
+def guide_ready(tmp_path, **kwargs):
+    recorder, clock, screen, said = recorder_for(tmp_path, **kwargs)
+    recorder.intercept('watch me set up the printer')
+    recorder.intercept('plug it in')
+    recorder.intercept('done recording')
+    return recorder, clock, said
+
+
+@pytest.mark.parametrize('chat', ['add it to the readme', 'put it in the calendar', 'save it to my notes'])
+def test_other_save_requests_are_left_to_the_rest_of_vision(tmp_path, chat):
+    hub = tmp_path / 'ascend_hub'
+    hub.mkdir()
+    recorder, clock, said = guide_ready(tmp_path, repos=lambda: [hub])
+    assert recorder.intercept(chat) is None
+
+
+def test_saving_to_a_repo_runs_without_holding_the_recorder(tmp_path):
+    import threading
+    hub = tmp_path / 'ascend_hub'
+    hub.mkdir()
+    free = []
+
+    def remember(key, note):
+        def try_lock():
+            took = recorder._lock.acquire(timeout=0.5)
+            free.append(took)
+            if took:
+                recorder._lock.release()
+        other = threading.Thread(target=try_lock)
+        other.start()
+        other.join()
+        return True
+    recorder, clock, said = guide_ready(tmp_path, repos=lambda: [hub], remember=remember)
+    free.clear()
+    recorder.intercept('save it to ascend hub')
+    assert free == [True]
+
+
+def test_the_guide_is_announced_before_the_slow_whisper_pass(tmp_path):
+    order = []
+
+    class Video(FakeVideo):
+        def finish(self):
+            write_wav(self.path.parent / 'narration.wav')
+            return True
+
+    def transcribe(path):
+        order.append(('transcribe', len(said)))
+        return [(1.0, 'Plug it in.')]
+    recorder, clock, screen, said = recorder_for(tmp_path, video=Video, transcribe=transcribe)
+    recorder.intercept('watch me')
+    recorder.intercept('plug it in')
+    recorder.intercept('done recording')
+    assert order == [('transcribe', 1)] and said[0].startswith('Your how-to is ready')
+    guide = (Video.made[-1].path.parent / 'guide.md').read_text(encoding='utf-8')
+    assert 'Transcript: [transcript.md](transcript.md)' in guide and 'recording.mp4' in guide
+
+
+def test_the_microphone_is_the_one_voice_commands_use(tmp_path, monkeypatch):
+    import sounddevice
+    from assistant.show_me import MicRecorder
+    opened = {}
+
+    class Stream:
+        def __init__(self, **kwargs):
+            opened.update(kwargs)
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+    monkeypatch.setattr(sounddevice, 'InputStream', Stream)
+    MicRecorder(tmp_path / 'n.wav', device=3).stop()
+    assert opened['device'] == 3
+
+
+def test_no_commit_in_the_middle_of_a_merge_and_nothing_left_staged(tmp_path):
+    import subprocess
+    from assistant.revival import command_runner
+    hub = tmp_path / 'ascend_hub'
+    hub.mkdir()
+    git = lambda *args: subprocess.run(['git', *args], cwd=hub, capture_output=True, text=True).stdout
+    git('init', '-q', '-b', 'main')
+    git('config', 'user.email', 'o@example.test')
+    git('config', 'user.name', 'O')
+    (hub / 'a.txt').write_text('1')
+    git('add', 'a.txt')
+    git('commit', '-q', '-m', 'one')
+    (hub / '.git' / 'MERGE_HEAD').write_text(git('rev-parse', 'HEAD'))
+    recorder, clock, screen, said = recorder_for(tmp_path, repos=lambda: [hub], git=command_runner('git'))
+    recorder.intercept('watch me deploy ascend hub')
+    recorder.intercept('run the build')
+    recorder.intercept('done recording')
+    assert recorder.intercept('commit the guide') == (
+        "You're in the middle of a merge in ascend_hub, so I left the guide uncommitted.")
+    assert git('diff', '--cached', '--name-only') == ''
+
+
+def test_quitting_mid_recording_links_the_kept_video(tmp_path):
+    class Video(FakeVideo):
+        def finish(self):
+            return False
+    recorder, clock, screen, said = recorder_for(tmp_path, video=Video)
+    recorder.intercept('watch me')
+    recorder.intercept('open settings')
+    recorder.close()
+    assert 'Screen recording: [recording.mp4](recording.mp4)' in (
+        Video.made[-1].path.parent / 'guide.md').read_text(encoding='utf-8')
+
+
+def test_a_video_with_no_frames_leaves_no_broken_file(tmp_path):
+    import time
+    from assistant.show_me import ScreenVideo
+
+    def locked():
+        raise OSError('locked screen')
+    video = ScreenVideo(tmp_path / 'recording.mp4', locked, fps=10)
+    time.sleep(0.3)
+    video.stop()
+    assert video.finish() is False
+    assert not (tmp_path / 'recording.mp4').exists() and not (tmp_path / 'recording.video.mp4').exists()

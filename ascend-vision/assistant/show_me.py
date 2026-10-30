@@ -35,7 +35,7 @@ _START_PHRASE = re.compile(r"(?:watch me|show me once|record (?:a )?how[- ]?to|r
 _STOP = re.compile(r"\b(?:done|stop|finish|end)(?:ed|ped)? (?:the )?recording\b")
 _CANCEL = re.compile(r"\bcancel (?:the )?recording\b")
 _SAVE = re.compile(rf"{_LEAD}(?:save|put|copy|add) (?:it|that|this|the guide|the how ?to) (?:in|into|to) (?:the )?"
-                   r"(?P<repo>[a-z0-9 ]+?)(?: repo| repository| project)?(?: docs)?(?: please)?")
+                   r"(?P<repo>[a-z0-9 ]+?)(?P<kind> repo| repository| project| docs)?(?: docs)?(?: please)?")
 _COMMIT = re.compile(rf"{_LEAD}commit (?:the |that |this )?(?:guide|how ?to|it)(?: please)?")
 AFTER_SECONDS = 600  # "save it to ..." and "commit the guide" work for ten minutes after a guide
 SHORT_COMMAND = 6  # words; a longer line with "stop recording" in it is narration
@@ -128,7 +128,7 @@ def _slug(title: str) -> str:
 class MicRecorder:
     """The narration as 16 kHz mono WAV, from a second shared input stream beside the voice listener's."""
 
-    def __init__(self, path: Path, samplerate: int = 16000):
+    def __init__(self, path: Path, samplerate: int = 16000, device=None):
         import sounddevice
         import wave
         self.path = Path(path)
@@ -143,7 +143,8 @@ class MicRecorder:
                 if self._wave is not None:
                     self._wave.writeframes(bytes(data))
         try:
-            self._stream = sounddevice.InputStream(samplerate=samplerate, channels=1, dtype='int16', callback=heard)
+            self._stream = sounddevice.InputStream(samplerate=samplerate, channels=1, dtype='int16', callback=heard,
+                                                   device=device)  # voice_commands.device_index, like the listener
             self._stream.start()
         except Exception:
             self._close_wave()
@@ -219,10 +220,13 @@ class ScreenVideo:
         finally:
             if container is not None:
                 try:
-                    for packet in stream.encode():
-                        container.mux(packet)
+                    if stream is not None:
+                        for packet in stream.encode():
+                            container.mux(packet)
                 finally:
                     container.close()
+            if last < 0:  # not one frame: an empty file would only look like a video
+                self._silent.unlink(missing_ok=True)
 
     def stop(self) -> None:
         self._stop.set()
@@ -274,6 +278,18 @@ def spoken_segments(segments, duration: float) -> list[tuple[float, str]]:
     """Whisper invents dots and stock phrases on silence, sometimes past the end: only real words inside it."""
     return [(segment.start, segment.text.strip()) for segment in segments
             if re.search(r'[A-Za-z0-9]', segment.text) and segment.start <= duration]
+
+
+def commit_only(git, repo: Path, where: str, message: str, what: str) -> str:
+    """Commits just ``where``, whatever else is staged; never inside a merge, and never leaves it staged."""
+    if git(repo, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'):
+        return f"You're in the middle of a merge in {Path(repo).name}, so I left {what} uncommitted."
+    if git(repo, 'add', '--', where) is None or git(repo, 'commit', '-q', '-m', message, '--', where) is None:
+        git(repo, 'reset', '-q', '--', where)
+        return f"Git didn't commit {what}, so it is still waiting, uncommitted."
+    branch = (git(repo, 'rev-parse', '--abbrev-ref', 'HEAD') or '').strip()
+    where_to = 'a detached HEAD' if branch in ('', 'HEAD') else branch
+    return f'Committed {where} to {Path(repo).name} on {where_to}.'
 
 
 def make_file_transcriber(voice_config):
@@ -333,11 +349,12 @@ class HowToRecorder:
 
     def intercept(self, text: str) -> str | None:
         said = words(text)
+        if not self.recording:
+            after = self._after(said)  # git and the Room can take seconds: never under the lock
+            if after is not None:
+                return after
         with self._lock:
             if not self.recording:
-                after = self._after(said)
-                if after is not None:
-                    return after
                 if not _START.fullmatch(said):
                     return None
                 phrase = _START_PHRASE.search(text)
@@ -424,13 +441,16 @@ class HowToRecorder:
             if not self.recording:
                 return
             video = self._stop_video()
-            self._draft()
+            folder, title, lines, shots = self._dir, self._title, list(self._lines), dict(self._shots)
             self._reset()
-        if video is not None and hasattr(video, 'finish'):
-            try:
-                video.finish()
-            except Exception as exc:
-                LOG.debug('How-to video not finished on exit (%s)', type(exc).__name__)
+        self._finish_video(video)
+        kept = 'recording.mp4' if (folder / 'recording.mp4').is_file() else None
+        guide = fallback_steps(lines)
+        try:
+            (folder / 'guide.md').write_text(render_guide(title or 'How-to', '', guide['steps'], [], shots,
+                                                          shots.get(0, []), kept), encoding='utf-8')
+        except OSError as exc:
+            LOG.debug('How-to draft not saved on exit (%s)', type(exc).__name__)
 
     def _shoot(self, line: int, only_if_changed: bool = False) -> None:
         self._last_check = self.clock()
@@ -458,14 +478,17 @@ class HowToRecorder:
         self._reset()
         self.run(lambda: self._write(folder, title, lines, shots, video))
 
-    def _sound(self, folder: Path, video) -> str | None:
-        """Finishes the video, then writes the Whisper transcript of the narration; its file name, or None."""
-        voiced = False
+    @staticmethod
+    def _finish_video(video) -> bool:
         if video is not None and hasattr(video, 'finish'):
             try:
-                voiced = bool(video.finish())
+                return bool(video.finish())
             except Exception as exc:
                 LOG.info('How-to video not finished (%s)', type(exc).__name__)
+        return False
+
+    def _sound(self, folder: Path, voiced: bool) -> str | None:
+        """The Whisper transcript of the narration; its file name, or None."""
         wav, transcript = folder / 'narration.wav', None
         if wav.exists() and self.transcribe is not None:
             try:
@@ -479,7 +502,7 @@ class HowToRecorder:
 
     def _write(self, folder: Path, title: str | None, lines: list[str], shots: dict[int, list[str]],
                video=None) -> None:
-        transcript = self._sound(folder, video)
+        voiced = self._finish_video(video)
         guide = None
         if self.write_steps is not None and lines and sum(len(line) + 6 for line in lines) <= MAX_AI_CHARS:
             try:
@@ -489,18 +512,27 @@ class HowToRecorder:
         guide = guide or fallback_steps(lines)
         title = title or guide['title'] or 'How-to'
         video = 'recording.mp4' if (folder / 'recording.mp4').is_file() and (folder / 'recording.mp4').stat().st_size else None
-        try:
-            (folder / 'guide.md').write_text(
-                render_guide(title, guide['summary'], guide['steps'], guide['checklist'], shots, shots.get(0, []),
-                             video, transcript), encoding='utf-8')
-        except OSError as exc:
-            LOG.warning('How-to not saved (%s)', type(exc).__name__)
+
+        def save(transcript: str | None) -> bool:
+            try:
+                (folder / 'guide.md').write_text(
+                    render_guide(title, guide['summary'], guide['steps'], guide['checklist'], shots, shots.get(0, []),
+                                 video, transcript), encoding='utf-8')
+                return True
+            except OSError as exc:
+                LOG.warning('How-to not saved (%s)', type(exc).__name__)
+                return False
+        if not save(None):
             self.announce("I couldn't save the how-to.")
             return
         self._latest = (folder, title, guide, shots, self.clock())  # one assignment; the lock may be held here
         count = len(guide['steps'])
         self.announce(f"Your how-to is ready: {title}, {count} step{'' if count == 1 else 's'}."
                       + self._share(folder, title, guide, shots))
+        # Whisper on a long recording takes minutes on a CPU: the guide is out first, the transcript joins it later.
+        transcript = self._sound(folder, voiced)
+        if transcript:
+            save(transcript)
 
     def _after(self, said: str) -> str | None:
         """'save it to <repo>' and 'commit the guide', shortly after a guide is ready."""
@@ -513,8 +545,8 @@ class HowToRecorder:
                 repo = named_repo(f'{name} repo', self.repos()) if self.repos is not None else None
             except Exception:
                 repo = None
-            if repo is None:
-                return f"I don't see a repo called {name}."
+            if repo is None:  # "add it to the readme" or "put it in the calendar" belong to someone else
+                return f"I don't see a repo called {name}." if saving['kind'] else None
             folder, title, guide, shots, _ = self._latest
             said_back = self._share(folder, title, guide, shots, repo=repo).strip()
             return said_back.replace('Also saved', 'Saved') if said_back else "I couldn't copy it into that repo."
@@ -530,14 +562,10 @@ class HowToRecorder:
         if not (self.git(repo, 'status', '--porcelain', '--', where) or '').strip():
             self._copied = None
             return None
-        # Only the guide's folder goes in the commit, whatever else is staged.
-        done = (self.git(repo, 'add', '--', where) is not None
-                and self.git(repo, 'commit', '-q', '-m', f'docs: how-to {_sentence(title)}', '--', where) is not None)
-        if not done:
-            return "Git didn't commit it, so it is still waiting in docs/howto."
-        self._copied = None
-        branch = (self.git(repo, 'rev-parse', '--abbrev-ref', 'HEAD') or '').strip() or 'the current branch'
-        return f'Committed {where} to {repo.name} on {branch}.'
+        said = commit_only(self.git, repo, where, f'docs: how-to {_sentence(title)}', 'the guide')
+        if said.startswith('Committed'):
+            self._copied = None
+        return said
 
     def _share(self, folder: Path, title: str, guide: dict, shots: dict[int, list[str]], repo=None) -> str:
         """Copies a guide into a repo's docs/howto (the one its title names, unless given), uncommitted, and notes
