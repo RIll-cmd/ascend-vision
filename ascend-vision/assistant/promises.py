@@ -218,16 +218,16 @@ def _day_words(day: date, today: date) -> str:
 
 def find_evidence(what: str, commits, sessions) -> str | None:
     """The first commit (repo, subject) or Room session title sharing two key words with the promise."""
-    keys = {w for w in words(what).split() if len(w) >= 3} - _STOP
-    if not keys:
-        return None
-    need = min(2, len(keys))
+    def split(text: str) -> set[str]:
+        return {w for w in re.split(r'[^a-z0-9]+', text.lower()) if len(w) >= 3} - _STOP
 
-    def matches(text: str) -> bool:
-        return len(keys & set(re.split(r'[^a-z0-9]+', words(text)))) >= need
+    def matches(text: str, ignore: frozenset | set = frozenset()) -> bool:
+        keys = split(what) - ignore
+        return bool(keys) and len(keys & split(text)) >= min(2, len(keys))
 
     for repo, subject in commits:
-        if matches(subject):
+        # The repo's own name (often the 'fix(vision):' scope) is on nearly every commit, so it proves nothing.
+        if matches(subject, split(repo)):
             return f"the commit '{subject}' in {repo}"
     for title in sessions:
         if matches(title):
@@ -302,6 +302,7 @@ class PromiseCoach:
         # ('ask' | 'smaller', promise id, spoken at, the pacer's question count then)
         self._offer: tuple[str, str, datetime, int | None] | None = None
         self._captured: tuple[str, datetime] | None = None
+        self._queueing: Promise | None = None  # handed to the Room once the lock is let go
 
     def _open_offer(self, now: datetime):
         """The open question, if it is recent and no other question (a slump check-in) was spoken after it."""
@@ -389,22 +390,33 @@ class PromiseCoach:
     def intercept(self, text: str) -> str | None:
         with self._lock:
             reply, notice = self._intercept(text)
+            queueing, self._queueing = self._queueing, None
+        if queueing is not None:  # the Room and git can take seconds; chat and the check-ins must not wait
+            ok, reply = self.queue(queueing.what)
+            with self._lock:
+                if ok and queueing.status == 'open':
+                    self._close(queueing, 'queued')
+                    self._save()
         if notice:
             self.announce(notice, urgent=True)  # it answers what the owner just said; no question is opened
         return reply
 
     def phone(self, text: str) -> str | None:
         """Phone chat: explicit reminders and the list only; nothing is spoken at the PC."""
-        said = words(text)
+        said, now = words(text), self.clock()
         with self._lock:
             if _LIST.fullmatch(said):
-                return self._list(self.clock())
-            caught = parse_promise(text, self.clock())
+                return self._list(now)
+            caught = parse_promise(text, now)
             if caught is None or not caught.explicit:
                 return None
-            reply, _ = self._intercept(text)
-            self._captured = None  # 'drop that' is for the PC conversation
-            return reply
+            # Never an answer to a question open at the PC, and the PC's 'drop that' stays as it was.
+            if any(p.status == 'open' and p.what == caught.what for p in self._promises):
+                return "That's already on your list."
+            self._promises.append(Promise(id=secrets.token_hex(4), what=caught.what, created=now.isoformat(),
+                                          next=caught.due.isoformat(), timed=caught.timed))
+            self._save()
+            return f"Okay. I'll check on {caught.what} {caught.when}."
 
     def _intercept(self, text: str) -> tuple[str | None, str | None]:
         said, now = words(text), self.clock()
@@ -464,12 +476,10 @@ class PromiseCoach:
             self._offer = None
             self._close(promise, 'dropped')
             return 'Dropped.'
-        if self.queue and _QUEUE.fullmatch(said):
+        if self.queue and promise.asks >= 3 and _QUEUE.fullmatch(said):  # only once the Room was offered
             self._offer = None
-            ok, message = self.queue(promise.what)
-            if ok:
-                self._close(promise, 'queued')
-            return message
+            self._queueing = promise
+            return 'queueing'
         if _SMALLER.fullmatch(said):
             self._offer = ('smaller', promise.id, now, seq)
             return "What's the first small step?"

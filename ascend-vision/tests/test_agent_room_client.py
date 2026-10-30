@@ -37,6 +37,9 @@ class FakeHub(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers['content-length'])))
         FakeHub.posts.append((self.path, body, self.headers.get('host')))
         if self.path == '/api/room/queue':
+            if body['body']['task'].startswith('Slow'):
+                import time
+                time.sleep(0.6)
             if body['body']['task'].startswith('Full'):
                 return self._send(409, {'error': 'QUEUE_FULL'})
             return self._send(201, {'item': {'id': 'q1'}})
@@ -135,3 +138,7 @@ def test_windows_folders_from_the_room_are_named_by_their_last_part():
     windows = 'D:' + chr(92) + 'ascend_hub'
     body = room_task('fix the login in ascend hub', [{'dir': windows, 'check': None}], newest=lambda dirs: None)
     assert body['repo'] == windows
+
+
+def test_queueing_waits_longer_than_a_status_read(hub):
+    assert RoomClient(hub, timeout_seconds=0.2).queue({'task': 'Slow start'}) == (True, 'Queued in the Agent Room.')

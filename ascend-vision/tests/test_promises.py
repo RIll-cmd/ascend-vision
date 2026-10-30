@@ -457,8 +457,9 @@ def queue_coach(tmp_path, queue):
     clock, voice = Clock(WED_9AM), Voice(False)
     coach = PromiseCoach(PromiseStore(tmp_path / 'promises.json'), announce=voice, clock=clock, queue=queue)
     coach.intercept('remind me to fix the login tomorrow')
-    clock.now = datetime(2026, 10, 29, 10, 0)
-    coach.tick(True)
+    for day in (29, 30, 31):  # the Room is offered from the third ask
+        clock.now = datetime(2026, 10, day, 10, 0)
+        coach.tick(True)
     return coach, clock, voice
 
 
@@ -488,9 +489,6 @@ def test_without_a_room_queue_the_answer_is_left_to_the_ai(tmp_path):
 
 def test_the_firm_question_offers_the_room_when_there_is_one(tmp_path):
     coach, clock, voice = queue_coach(tmp_path, lambda what: (True, 'ok'))
-    for day in (30, 31):
-        clock.now = datetime(2026, 10, day, 10, 0)
-        coach.tick(True)
     assert voice.said[-1] == ('Fix the login has been open 3 days. '
                               'Keep it, make it smaller, queue it in the Room, or drop it?')
 
@@ -543,3 +541,66 @@ def test_room_titles_are_the_first_sentence_cut_at_a_word(tmp_path):
     (folder / 'state.json').write_text(json.dumps({'stage': 'done', 'createdAt': '2026-10-28T12:00:00Z', 'task': long}))
     found = make_evidence([], None, tmp_path / 'room')('word', WED_9AM - timedelta(days=1))
     assert found == "the Room session '" + ' '.join(['word'] * 16) + "'"
+
+
+def test_queue_it_is_only_taken_once_the_room_was_offered(tmp_path):
+    clock, voice = Clock(WED_9AM), Voice(False)
+    coach = PromiseCoach(PromiseStore(tmp_path / 'promises.json'), announce=voice, clock=clock,
+                         queue=lambda what: (True, 'Queued.'))
+    coach.intercept('remind me to call mom tomorrow')
+    clock.now = datetime(2026, 10, 29, 10, 0)
+    coach.tick(True)
+    assert coach.intercept('room') is None and coach.intercept('queue it') is None
+
+
+def test_the_room_is_called_without_holding_the_coach(tmp_path):
+    import threading
+    got = []
+
+    def queue(what):
+        def try_lock():
+            took = coach._lock.acquire(timeout=0.5)
+            got.append(took)
+            if took:
+                coach._lock.release()
+        other = threading.Thread(target=try_lock)
+        other.start()
+        other.join()
+        return True, 'Queued.'
+
+    coach, clock, voice = queue_coach(tmp_path, lambda what: (True, 'x'))
+    coach.queue = queue
+    assert coach.intercept('queue it') == 'Queued.'
+    assert got == [True]
+
+
+def test_evidence_ignores_commit_prefixes_and_repo_names():
+    commits = [('ascend-vision', 'fix(vision): read the right file')]
+    assert find_evidence('fix the vision mic bug', commits, []) is None
+    assert find_evidence('fix the vision mic bug', [('ascend-vision', 'fix(vision): mic bug crackle')], []) == (
+        "the commit 'fix(vision): mic bug crackle' in ascend-vision")
+    assert find_evidence("answer bob's email", [('x', "Answer Bob's email about rent")], []) is not None
+
+
+def test_phone_reminders_never_answer_a_question_open_at_the_pc(tmp_path):
+    coach, clock, voice = coach_for(tmp_path)
+    coach.intercept('remind me to email bob tomorrow')
+    clock.now = datetime(2026, 10, 29, 10, 0)
+    for day in (29, 30, 31):
+        clock.now = datetime(2026, 10, day, 10, 0)
+        coach.tick(True)
+    assert coach.intercept('smaller') == "What's the first small step?"
+    assert coach.phone('remind me to buy milk tomorrow') == "Okay. I'll check on buy milk tomorrow."
+    assert coach.intercept('open the draft') == "Okay: open the draft. I'll check on it in two hours."
+    saved = {p['what']: p['status'] for p in json.loads((tmp_path / 'promises.json').read_text())}
+    assert saved == {'email bob': 'dropped', 'buy milk': 'open', 'open the draft': 'open'}
+    assert coach.phone('remind me to buy milk tomorrow') == "That's already on your list."
+
+
+def test_a_phone_reminder_keeps_the_pc_drop_that_window(tmp_path):
+    coach, clock, voice = coach_for(tmp_path)
+    coach.intercept("I'll fix the login tomorrow")
+    coach.phone('remind me to buy milk tomorrow')
+    assert coach.intercept('drop that') == 'Dropped.'
+    assert {p['what']: p['status'] for p in json.loads((tmp_path / 'promises.json').read_text())} == {
+        'fix the login': 'dropped', 'buy milk': 'open'}

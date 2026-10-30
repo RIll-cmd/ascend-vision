@@ -14,9 +14,12 @@ LOG = logging.getLogger(__name__)
 
 
 class RoomClient:
-    def __init__(self, base_url: str = 'http://127.0.0.1:5173', timeout_seconds: float = 3.0):
+    def __init__(self, base_url: str = 'http://127.0.0.1:5173', timeout_seconds: float = 3.0,
+                 queue_timeout_seconds: float = 30.0):
         self.base_url = base_url.rstrip('/')
         self.timeout_seconds = timeout_seconds
+        # Hub gives a queue add 30 s; giving up sooner could make a second "queue it" add a duplicate.
+        self.queue_timeout_seconds = queue_timeout_seconds
         # Hub is on this computer; a system proxy must never see room traffic.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -65,7 +68,7 @@ class RoomClient:
         request = urllib.request.Request(f'{self.base_url}/api/room/queue', data=json.dumps({'body': body}).encode('utf-8'),
                                          headers={'content-type': 'application/json'}, method='POST')
         try:
-            with self._opener.open(request, timeout=self.timeout_seconds):
+            with self._opener.open(request, timeout=self.queue_timeout_seconds):
                 return True, 'Queued in the Agent Room.'
         except urllib.error.HTTPError as error:
             try:
