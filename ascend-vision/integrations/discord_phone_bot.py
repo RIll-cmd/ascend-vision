@@ -137,7 +137,7 @@ class DiscordPhoneBot:
     def __init__(self, core, handler, *, owner_id: str, token: str,
                  application_id: int, sync_commands: bool = False,
                  cooldown_seconds: float = 2.0, work_timeout_seconds: float = 600.0,
-                 pwa_origin: str | None = None):
+                 pwa_origin: str | None = None, receptionist=None):
         if not owner_id or not token or type(application_id) is not int or application_id <= 0:
             raise ValueError("Discord bot identity is incomplete")
         if (type(cooldown_seconds) not in (int, float) or not math.isfinite(cooldown_seconds)
@@ -148,6 +148,8 @@ class DiscordPhoneBot:
             raise ValueError("Discord work timeout must be between 0 and 600 seconds")
         self.core = core
         self._handler = handler
+        # (sender id, name, text) -> reply: the focus doorman's front desk for people other than the owner.
+        self._receptionist = receptionist
         self._owner_id = owner_id
         self._token = token
         self._cooldown_seconds = cooldown_seconds
@@ -265,7 +267,11 @@ class DiscordPhoneBot:
                 owner = await self.core.verify_link(user_id)
                 if self._closed:
                     return
-                if owner != self._owner_id:
+                if (owner != self._owner_id and self._receptionist is not None and command == "ask"
+                        and isinstance(value, str)):
+                    name = getattr(interaction.user, "display_name", None) or getattr(interaction.user, "name", "")
+                    result = self._receptionist(user_id, str(name or ""), value[:4_000])
+                elif owner != self._owner_id:
                     result = _LINK_FIRST
                 elif command.startswith("browser_"):
                     result, view = await self.browser_commands.run(interaction, command, value)

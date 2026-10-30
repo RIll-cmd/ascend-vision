@@ -11,6 +11,7 @@ come in. When the block ends Vision says how many waited, then plays them.
 from __future__ import annotations
 
 from collections import deque
+import json
 import logging
 import re
 import threading
@@ -127,9 +128,10 @@ class FocusDoorman:
     """A focus block the owner asks for: ordinary notices wait until it ends and the owner is at the PC."""
 
     def __init__(self, pacer: AnnouncementPacer, *, clock=None, present=lambda: True, default_minutes: int = 50,
-                 max_minutes: int = 240):
+                 max_minutes: int = 240, state_path=None):
         from datetime import datetime
         self.pacer, self.clock, self.present = pacer, clock or datetime.now, present
+        self.state_path = state_path  # {"until": iso} while a block runs, read by the Discord bot
         self.default_minutes, self.max_minutes = default_minutes, max_minutes
         self._until = None
         self._leftover = False  # the block ended with notices waiting
@@ -141,11 +143,33 @@ class FocusDoorman:
         except Exception:
             return True
 
+    def _share(self) -> None:
+        if self.state_path is None:
+            return
+        try:
+            if self._until is None:
+                self.state_path.unlink(missing_ok=True)
+            else:
+                self.state_path.parent.mkdir(parents=True, exist_ok=True)
+                self.state_path.write_text(json.dumps({'until': self._until.isoformat()}), encoding='utf-8')
+        except OSError as exc:
+            LOG.warning('Focus block state not shared (%s)', type(exc).__name__)
+
+    def _expire(self) -> None:
+        if self._until is not None and self.clock() >= self._until:
+            self._until, self._leftover = None, True
+            self._share()
+
+    def until(self):
+        """When the running block ends, or None."""
+        with self._lock:
+            self._expire()
+            return self._until
+
     def holding(self) -> bool:
         waiting, here = self.pacer.waiting(), self._here()
         with self._lock:
-            if self._until is not None and self.clock() >= self._until:
-                self._until, self._leftover = None, True
+            self._expire()
             if self._until is not None:
                 return True
             if self._leftover and waiting and not here:
@@ -168,6 +192,7 @@ class FocusDoorman:
             minutes = max(5, min(self.max_minutes, minutes))
             with self._lock:
                 self._until = self.clock() + timedelta(minutes=minutes)
+                self._share()
             hours = minutes // 60
             span = (f"{hours} hour{'' if hours == 1 else 's'}" if minutes % 60 == 0 else f'{minutes} minutes')
             return f"Okay. I'll hold my notices for {span}. Agents and reminders you timed still come in."
@@ -176,6 +201,7 @@ class FocusDoorman:
                 if self._until is None:
                     return None
                 self._until, self._leftover = None, True
+                self._share()
             return 'Okay, the focus block is over.'
         asked = re.search(r"\b(?:what's|what is|anything) waiting\b", said)
         release = re.search(r'\blet them (?:through|in)\b', said)

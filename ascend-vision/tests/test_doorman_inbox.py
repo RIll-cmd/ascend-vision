@@ -1,0 +1,104 @@
+from datetime import datetime, timedelta
+import json
+
+from assistant.doorman_inbox import Inbox, Reception, hold_pushes
+
+NOW = datetime(2026, 10, 30, 15, 0)
+
+
+class Clock:
+    def __init__(self, now=NOW):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def block_until(folder, until):
+    (folder / 'focus_block.json').write_text(json.dumps({'until': until.isoformat()}))
+
+
+def lines(folder):
+    return [json.loads(line) for line in (folder / 'doorman_inbox.jsonl').read_text(encoding='utf-8').splitlines()]
+
+
+def test_in_a_block_routine_messages_wait_and_urgent_ones_pass(tmp_path):
+    block_until(tmp_path, NOW + timedelta(minutes=40))
+    desk = Reception(tmp_path, clock=Clock())
+    assert desk.take('42', 'Alex', 'are we still on for dinner?') == 'In a focus block until 3:40 pm. I\'ll pass it on.'
+    assert desk.take('42', 'Alex', 'URGENT: the server is down') == (
+        "In a focus block until 3:40 pm, but this sounds urgent, so I'm passing it on now.")
+    assert [(m['name'], m['urgent']) for m in lines(tmp_path)] == [('Alex', False), ('Alex', True)]
+    assert lines(tmp_path)[0]['text'] == 'are we still on for dinner?'
+
+
+def test_no_block_or_an_old_block_just_passes_it_on(tmp_path):
+    desk = Reception(tmp_path, clock=Clock())
+    assert desk.take('42', 'Alex', 'hi') == "I'll pass it on."
+    block_until(tmp_path, NOW - timedelta(minutes=1))
+    assert desk.take('43', 'Sam', 'hi') == "I'll pass it on."
+    (tmp_path / 'focus_block.json').write_text('{broken')
+    assert desk.take('44', 'Kim', 'hi') == "I'll pass it on."
+
+
+def test_urgent_senders_and_words_from_config(tmp_path):
+    block_until(tmp_path, NOW + timedelta(minutes=5))
+    desk = Reception(tmp_path, clock=Clock(), urgent_words=('deadline',), urgent_senders=('Mom', '99'))
+    assert 'urgent' in desk.take('1', 'mom', 'hello')
+    assert 'urgent' in desk.take('99', 'Zed', 'hello')
+    assert 'urgent' in desk.take('2', 'Alex', 'the deadline moved')
+    assert 'urgent' not in desk.take('3', 'Alex', 'nice weather')
+
+
+def test_text_is_cleaned_and_capped_and_each_sender_is_limited(tmp_path):
+    desk = Reception(tmp_path, clock=Clock(), per_hour=2, max_chars=20)
+    desk.take('7', 'A' * 80 + '\n', 'line one\nline\ttwo\x07 and a lot more words here')
+    saved = lines(tmp_path)[0]
+    assert saved['text'] == 'line one line two an' and len(saved['name']) == 40
+    desk.take('7', 'A', 'second')
+    assert desk.take('7', 'A', 'third') == 'I have your earlier messages and will pass them on.'
+    assert len(lines(tmp_path)) == 2
+    desk.clock.now += timedelta(hours=1, seconds=1)
+    assert desk.take('7', 'A', 'fourth') == "I'll pass it on."
+    assert desk.take('8', 'B', '   ') == 'Send a message with some words in it.'
+
+
+def test_the_inbox_speaks_each_message_once(tmp_path):
+    said = []
+    inbox = Inbox(tmp_path, announce=lambda text, **kw: said.append((text, kw.get('urgent', False))))
+    inbox.tick()
+    assert said == []
+    desk = Reception(tmp_path, clock=Clock())
+    desk.take('1', 'Alex', 'dinner at 8?')
+    desk.take('2', 'Sam', 'emergency, call me')
+    with open(tmp_path / 'doorman_inbox.jsonl', 'a', encoding='utf-8') as f:
+        f.write('not json\n')
+    inbox.tick()
+    assert said == [('Message from Alex on Discord: dinner at 8?', False),
+                    ('Urgent message from Sam on Discord: emergency, call me', True)]
+    inbox.tick()
+    assert len(said) == 2
+    assert not (tmp_path / 'doorman_inbox.jsonl').exists()
+
+
+def test_a_reading_file_left_by_a_crash_is_read_first(tmp_path):
+    said = []
+    (tmp_path / 'doorman_inbox.reading.jsonl').write_text(
+        json.dumps({'at': NOW.isoformat(), 'sender': '1', 'name': 'Old', 'text': 'from before', 'urgent': False}) + '\n')
+    Reception(tmp_path, clock=Clock()).take('2', 'New', 'now')
+    Inbox(tmp_path, announce=lambda text, **kw: said.append(text)).tick()
+    assert said == ['Message from Old on Discord: from before', 'Message from New on Discord: now']
+
+
+def test_pushes_wait_while_holding():
+    sent, holding = [], [True]
+
+    class Publisher:
+        def publish(self, intent):
+            sent.append(intent)
+            return True
+
+    held = hold_pushes(Publisher(), lambda: holding[0])
+    assert held.publish('agent needs you') is False and sent == []
+    holding[0] = False
+    assert held.publish('agent needs you') is True and sent == ['agent needs you']

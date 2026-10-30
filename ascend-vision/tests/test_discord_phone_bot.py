@@ -612,3 +612,27 @@ def test_completed_ask_cooldown_rejects_immediate_second_ask():
         await bot.close()
 
     asyncio.run(run())
+
+
+def test_someone_else_asking_gets_the_front_desk_when_there_is_one():
+    interaction = FakeInteraction(user_id=555)
+    interaction.user.display_name = "Alex"
+    taken = []
+    bot = bot_for(interaction, linked=False,
+                  receptionist=lambda sender, name, text: (taken.append((sender, name, text)), "I'll pass it on.")[1])
+    asyncio.run(bot.handle_ask(interaction, "dinner at 8?"))
+    assert taken == [("555", "Alex", "dinner at 8?")]
+    assert interaction.events[-1][:2] == ("edit", "I'll pass it on.")
+    assert not any(event[0] == "handle" for event in interaction.events)
+
+
+def test_without_a_front_desk_someone_else_is_told_to_link():
+    from integrations.discord_phone_bot import _LINK_FIRST
+    interaction = FakeInteraction(user_id=555)
+    bot = bot_for(interaction, linked=False)
+    asyncio.run(bot.handle_ask(interaction, "dinner at 8?"))
+    assert interaction.events[-1][:2] == ("edit", _LINK_FIRST)
+    status = FakeInteraction(user_id=555)
+    bot = bot_for(status, linked=False, receptionist=lambda *args: "taken")
+    asyncio.run(bot.handle_status(status))
+    assert status.events[-1][:2] == ("edit", _LINK_FIRST)  # only /ask is a message

@@ -262,3 +262,21 @@ def test_a_block_length_in_words():
         "Okay. I'll hold my notices for 45 minutes.")
     assert doorman.intercept('hold my notices for half an hour').startswith(
         "Okay. I'll hold my notices for 30 minutes.")
+
+
+def test_a_block_is_shared_through_a_state_file(tmp_path):
+    import json
+    from datetime import timedelta
+    from assistant.announcement_pacer import AnnouncementPacer, FocusDoorman
+    wall = Wall()
+    state = tmp_path / 'focus_block.json'
+    doorman = FocusDoorman(AnnouncementPacer(lambda text: None, clock=Clock()), clock=wall, state_path=state)
+    assert doorman.until() is None and not state.exists()
+    doorman.intercept('do not disturb for 25 minutes')
+    assert doorman.until() == wall.now + timedelta(minutes=25)
+    assert json.loads(state.read_text())['until'] == doorman.until().isoformat()
+    doorman.intercept('end focus block')
+    assert doorman.until() is None and not state.exists()
+    doorman.intercept('focus block for 10 minutes')
+    wall.now += timedelta(minutes=11)
+    assert doorman.until() is None and not state.exists()  # ran out

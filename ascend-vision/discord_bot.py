@@ -12,6 +12,7 @@ import sqlite3
 from dotenv import load_dotenv
 
 from assistant.memory import MemoryStore, UnavailableMemoryStore
+from assistant.doorman_inbox import Reception
 from assistant.phone_handler import PhoneMessageHandler
 from assistant.service import AssistantService
 from assistant.tool_runtime import ToolRuntime, ToolSpec
@@ -52,9 +53,15 @@ def build_discord_bot(settings: DiscordBotSettings, config, *, sync_commands: bo
     handler = PhoneMessageHandler(assistant, owner_id=settings.owner_id,
                                   allowed_channels=frozenset({"discord_dm"}))
     core = DiscordCoreClient(settings.core_url, settings.bridge_token)
+    receptionist = None
+    doorman = getattr(config, "focus_doorman", None)
+    if doorman is not None and doorman.enabled and doorman.take_messages:
+        # Other people's messages are only left for Vision to speak; they never reach the assistant.
+        receptionist = Reception(Path(config.storage.database).parent, urgent_words=doorman.urgent_words,
+                                 urgent_senders=doorman.urgent_senders).take
     return DiscordPhoneBot(core, handler, owner_id=settings.owner_id,
                            token=settings.bot_token, application_id=settings.application_id,
-                           sync_commands=sync_commands)
+                           sync_commands=sync_commands, receptionist=receptionist)
 
 
 async def _serve(bot: DiscordPhoneBot) -> None:

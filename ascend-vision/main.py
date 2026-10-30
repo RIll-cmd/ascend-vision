@@ -725,7 +725,13 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         announce_paced = AnnouncementPacer(announce_local, hold=lambda: (
             (how_to is not None and how_to.recording) or (focus_doorman is not None and focus_doorman.holding())))
         focus_doorman = FocusDoorman(
-            announce_paced, present=lambda: away_mode is None or away_mode.state == 'active') if doorman_on else None
+            announce_paced, present=lambda: away_mode is None or away_mode.state == 'active',
+            state_path=Path(config.storage.database).parent / 'focus_block.json') if doorman_on else None
+        doorman_inbox = None
+        if doorman_on and doorman_config.take_messages:
+            from assistant.doorman_inbox import Inbox
+            # Messages people sent Vision's Discord bot (its own process); a focus block holds the routine ones.
+            doorman_inbox = Inbox(Path(config.storage.database).parent, announce=announce_paced)
 
         away_mode = None
         away_mode_config = getattr(config, 'away_mode', None)
@@ -1171,6 +1177,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             )
             resources.callback(delivery.close)
             from integrations.notification_publisher import build_notification_publisher
+            from assistant.doorman_inbox import hold_pushes
             notification_publisher = build_notification_publisher()
             if notification_publisher is not None:
                 resources.callback(notification_publisher.close)
@@ -1184,7 +1191,9 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 delivery, companion_preferences, feedback,
                 shadow_mode=shadow_mode,
                 agent_needs_input_provider=agent_needs_input_provider,
-                notification_publisher=notification_publisher,
+                notification_publisher=(notification_publisher if notification_publisher is None or focus_doorman is None
+                                        else hold_pushes(notification_publisher, lambda: (
+                                            focus_doorman.until() is not None and focus_doorman.present()))),
             )
             LOG.info('Local companion rules running in %s mode (shadow=%s).',
                      config.companion_context.mode, shadow_mode)
@@ -1880,6 +1889,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         how_to.tick()
                     except Exception as exc:
                         LOG.debug('How-to screenshot skipped (%s)', type(exc).__name__)
+                if doorman_inbox is not None:
+                    try:
+                        doorman_inbox.tick()
+                    except Exception as exc:
+                        LOG.debug('Doorman inbox skipped (%s)', type(exc).__name__)
                 if promise_coach is not None:
                     try:
                         promise_coach.tick(owner_available)

@@ -352,3 +352,21 @@ def test_focus_doorman_config_defaults_and_validation(tmp_path):
     path = tmp_path / 'config.yaml'
     path.write_text('focus_doorman:\n  let_room_through: false\n', encoding='utf-8')
     assert load_config(path).focus_doorman.let_room_through is False
+
+
+def test_focus_doorman_front_desk_settings(tmp_path):
+    from config import FocusDoormanConfig, load_config
+
+    defaults = FocusDoormanConfig()
+    assert (defaults.take_messages, defaults.urgent_words, defaults.urgent_senders) == (True, (), ())
+    with pytest.raises(ValueError, match='focus_doorman.take_messages'):
+        FocusDoormanConfig(take_messages='yes')
+    for name in ('urgent_words', 'urgent_senders'):
+        with pytest.raises(ValueError, match=f'focus_doorman.{name}'):
+            FocusDoormanConfig(**{name: 'mom'})
+        with pytest.raises(ValueError, match=f'focus_doorman.{name}'):
+            FocusDoormanConfig(**{name: ['  ']})
+    path = tmp_path / 'config.yaml'
+    path.write_text('focus_doorman:\n  urgent_senders: [Mom, "1234"]\n  urgent_words: [deadline]\n', encoding='utf-8')
+    loaded = load_config(path).focus_doorman
+    assert (loaded.urgent_senders, loaded.urgent_words) == (('Mom', '1234'), ('deadline',))

@@ -519,11 +519,19 @@ class FocusDoormanConfig:
     """In focus mode Vision's ordinary notices wait; agents waiting and clock-time reminders still come in."""
     enabled: bool = True
     let_room_through: bool = True
+    take_messages: bool = True  # people who message Vision's Discord bot get a front-desk answer
+    urgent_words: tuple[str, ...] = ()  # besides urgent, emergency, asap, hospital, call me, right now
+    urgent_senders: tuple[str, ...] = ()  # Discord user ids or display names
 
     def __post_init__(self):
-        for name in ('enabled', 'let_room_through'):
+        for name in ('enabled', 'let_room_through', 'take_messages'):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f'focus_doorman.{name} must be a YAML boolean')
+        for name in ('urgent_words', 'urgent_senders'):
+            value = getattr(self, name)
+            if not isinstance(value, (list, tuple)) or any(not isinstance(v, str) or not v.strip() for v in value):
+                raise ValueError(f'focus_doorman.{name} must be a list of words')
+            object.__setattr__(self, name, tuple(value))
 
 
 @dataclass(frozen=True)

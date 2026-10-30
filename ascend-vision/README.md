@@ -87,6 +87,12 @@ no time) and Vision's own notices (weather, GitHub, food, check-ins) wait until 
 block ends and you are back at the PC; then it says how many waited and plays them.
 Agent room announcements and reminders you set for a clock time still come in. Ask
 "what's waiting?", say "let them through" to hear them early, or "end focus block".
+During a block Vision also holds its phone pushes while you are at the PC. People who
+message Vision's Discord bot get a front-desk answer ("In a focus block until 3:40 pm.
+I'll pass it on.") and their message waits like any notice; one with "urgent",
+"emergency", "asap", "call me" (or your `focus_doorman.urgent_words`), or from someone
+in `focus_doorman.urgent_senders`, comes through now. Their messages are only read
+aloud, never sent to the AI; set `focus_doorman.take_messages: false` to turn this off.
 
 Say "Vision, watch me" (or "watch me set up the printer"), do the task while you talk
 it through, then say "done recording". Vision takes a screenshot with each thing you
