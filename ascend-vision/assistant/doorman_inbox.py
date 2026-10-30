@@ -68,7 +68,8 @@ class Reception:
             self._recent[sender_id] = recent + [now]
             lowered = f' {text.lower()} '
             # "not urgent" and "not right now" are not urgent; "help!" matches with its punctuation.
-            urgent = (any(re.search(rf'(?<![a-z0-9])(?<!not )(?<!no ){re.escape(w)}(?![a-z0-9])', lowered)
+            urgent = (any(re.search(rf"(?<![a-z0-9])(?<!not )(?<!no )(?<!isn't )(?<!isnt )(?<!not really )"
+                                    rf"(?<!not that ){re.escape(w)}(?![a-z0-9])", lowered)
                           for w in self.urgent_words)
                       or sender_id in self.urgent_senders)
             line = json.dumps({'at': now.isoformat(), 'sender': sender_id, 'name': name, 'text': text,
@@ -90,6 +91,7 @@ class Inbox:
     def __init__(self, folder: Path, *, announce, holding=lambda: False, clock=datetime.now, in_block=lambda: False):
         self.folder, self.announce, self.holding, self.clock = Path(folder), announce, holding, clock
         self.in_block = in_block  # messages the owner let through during a block must pass the pacer's hold
+        self.released = None  # called once let-through messages are out, so later ones wait again
 
     def waiting(self) -> int:
         """Messages on disk not yet spoken (the summary at the end of a focus block counts them)."""
@@ -144,6 +146,11 @@ class Inbox:
             let_through = bool(self.in_block())
         except Exception:
             let_through = False
+        if let_through and speak and self.released is not None:
+            try:
+                self.released()
+            except Exception:
+                pass
         for item in speak:
             who = _clean(item.get('name', ''), MAX_NAME + 40) or 'someone'
             text = _clean(item.get('text', ''), 300)

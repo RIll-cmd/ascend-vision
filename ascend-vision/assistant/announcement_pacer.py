@@ -187,16 +187,25 @@ class FocusDoorman:
             self._expire()
             return self._until
 
+    def messages_released(self) -> None:
+        """The messages let through are out; any that come in later wait again, like notices do."""
+        self._let_messages = False
+
     def messages_held(self) -> bool:
         """Whether routine Discord messages should stay on disk for now."""
         return self.holding() and not self._let_messages
 
     def holding(self) -> bool:
-        waiting, here = self.pacer.waiting() + self.pacer.extra_waiting(), self._here()
         with self._lock:
             self._expire()
             if self._until is not None:
                 return True
+            leftover = self._leftover
+        if not leftover:
+            return False
+        # Only after a block: counting what waits reads the Discord inbox files, so not on every pump.
+        waiting, here = self.pacer.waiting() + self.pacer.extra_waiting(), self._here()
+        with self._lock:
             if self._leftover and waiting and not here:
                 return True  # never play what waited to an empty room
             self._leftover = False

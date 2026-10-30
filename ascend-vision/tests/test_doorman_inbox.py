@@ -210,3 +210,27 @@ def test_negated_or_punctuated_urgent_words(tmp_path):
     assert 'urgent' not in desk.take('2', 'A', 'no rush, not right now')
     assert 'urgent' in desk.take('3', 'A', 'help! the build is red')
     assert 'urgent' in desk.take('4', 'A', 'URGENT: server down')
+
+
+def test_let_them_through_lets_only_what_was_waiting(tmp_path):
+    said, wall, inbox, pacer, doorman = doorman_with_inbox(tmp_path)
+    inbox.released = doorman.messages_released
+    doorman.intercept('do not disturb')
+    desk = Reception(tmp_path, clock=wall)
+    desk.take('1', 'Alex', 'dinner at 8?')
+    inbox.tick()
+    doorman.intercept('let them through')
+    inbox.tick()
+    pacer.pump()
+    desk.take('2', 'Sam', 'got the keys')
+    inbox.tick()
+    pacer.pump()
+    assert said == ['Message from Alex on Discord: dinner at 8?']
+    assert inbox.waiting() == 1  # Sam's waits for the end of the block
+
+
+def test_more_negations_are_not_urgent(tmp_path):
+    desk = Reception(tmp_path, clock=Clock())
+    block_until(tmp_path, NOW + timedelta(minutes=5))
+    assert 'urgent' not in desk.take('1', 'A', "it isn't urgent")
+    assert 'urgent' not in desk.take('2', 'A', 'not really urgent tbh')
