@@ -222,3 +222,25 @@ def test_a_failed_screenshot_is_skipped_and_said(tmp_path):
     finish(jobs)
     assert '## Screenshots' not in (tmp_path / 'notes' / 'ascend_hub-2026-10-30.md').read_text(encoding='utf-8')
     assert said[-1].endswith('The screenshot did not work, so the notes have none.')
+
+
+def test_a_second_run_the_same_day_keeps_the_first_runs_screenshot(tmp_path):
+    from assistant.release_notes import make_screenshotter
+    hub = tmp_path / 'ascend_hub'
+    git = make_repo(hub, ['feat: dark mode'])
+
+    def shoot(url, path):
+        path.write_bytes(path.name.encode())
+    notes, said, jobs = notes_for(tmp_path, [hub])
+    notes.screenshots = make_screenshotter(['ascend_hub=http://127.0.0.1:5173/'], shoot)
+    notes.intercept('write release notes for ascend hub')
+    finish(jobs)
+    (hub / 'more.txt').write_text('x')
+    git('add', '.')
+    git('commit', '-q', '-m', 'fix: login')
+    notes.intercept('write release notes for ascend hub')
+    finish(jobs)
+    folder = tmp_path / 'notes'
+    assert (folder / 'ascend_hub-2026-10-30-shot-1.png').read_bytes() == b'ascend_hub-2026-10-30-shot-1.png'
+    assert '![Screenshot 1](ascend_hub-2026-10-30-2-shot-1.png)' in (folder / 'ascend_hub-2026-10-30-2.md').read_text(
+        encoding='utf-8')

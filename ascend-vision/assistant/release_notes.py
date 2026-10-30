@@ -293,7 +293,7 @@ class ReleaseNotes:
         path, n = self.folder / f'{base}.md', 2
         while path.exists():
             path, n = self.folder / f'{base}-{n}.md', n + 1
-        shots, failed = self.screenshots(repo, base, self.folder) if self.screenshots else ([], False)
+        shots, failed = self.screenshots(repo, path.stem, self.folder) if self.screenshots else ([], False)
         path.write_text(render_notes(name, now, commits, story, shots), encoding='utf-8')
         if head:
             state[repo.name] = head

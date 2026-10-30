@@ -143,11 +143,13 @@ committed to last; "vision" is enough for ascend-vision). Vision groups the comm
 its last notes for that repo (or the last tag, or the last two weeks, or at least the last
 20 commits) into New, Fixes, Docs and Other, asks the AI for a short "what's new" list and
 a post you could share, and saves it to `data/release-notes/`. It never writes into the
-repo, tags or posts anything. Paste two to five posts you wrote into
-`data/release-notes/voice.md` (blank line between them) and the post is written in your
-voice. Fresh screenshots of the pages in `release_notes.screenshots` (`"repo=url"` lines;
-Hub's local page by default) are taken with the installed headless browser and linked in
-the notes; if that page is not running, the notes simply have none.
+repo, tags or posts anything. Paste two to five posts you wrote into `voice.md` in the
+release-notes folder (blank line between them) and the post is written in your voice.
+Fresh screenshots of the pages in `release_notes.screenshots` (`"repo=url"` lines; Hub's
+local page by default) are taken with the installed headless browser and linked in the
+notes; if that page is not running, the notes simply have none. A screenshot shows
+whatever the page shows at that moment (Hub's home page includes what Spotify is
+playing), so look at it before you post it.
 
 Advanced and experimental features (phone chat, Discord, browser automation,
 proactive check-ins, Core link) are off by default and are described below.
