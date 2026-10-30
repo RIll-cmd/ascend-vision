@@ -91,11 +91,14 @@ class RoomClient:
             notes = [n for n in notes if isinstance(n, str)] if isinstance(notes, list) else []
             if note in notes:
                 return True
+            if len(notes) >= 60:  # the room keeps 60; adding one would push out a note the owner approved
+                return False
             request = urllib.request.Request(
                 f'{self.base_url}/api/room/memory', data=json.dumps({'key': key, 'notes': notes + [note]}).encode('utf-8'),
                 headers={'content-type': 'application/json'}, method='POST')
-            with self._opener.open(request, timeout=self.timeout_seconds):
-                return True
+            with self._opener.open(request, timeout=self.timeout_seconds) as response:
+                kept = json.loads(response.read().decode('utf-8')).get('notes')
+            return isinstance(kept, list) and note in kept  # the room drops notes it cannot keep
         except (OSError, ValueError, AttributeError):
             return False
 

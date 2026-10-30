@@ -109,6 +109,11 @@ def render_guide(title: str, summary: str, steps: list[dict], checklist: list[st
     return '\n'.join(parts)
 
 
+def memory_note(title: str, slug: str) -> str:
+    """The Room keeps notes of 200 characters at most, so the title is cut."""
+    return f'How-to "{_one_line(_sentence(title), 100)}": docs/howto/{slug}/guide.md'
+
+
 def _slug(title: str) -> str:
     return '-'.join(re.findall(r'[a-z0-9]+', title.lower()))[:60].strip('-') or 'how-to'
 
@@ -316,9 +321,11 @@ class HowToRecorder:
         if repo is None:
             return ''
         repo, slug = Path(repo), _slug(title)
-        target = repo / 'docs' / 'howto' / slug
+        target, n = repo / 'docs' / 'howto' / slug, 2
+        while target.exists():  # an earlier guide (maybe edited by hand) is never overwritten
+            target, n = repo / 'docs' / 'howto' / f'{slug}-{n}', n + 1
         try:
-            target.mkdir(parents=True, exist_ok=True)
+            target.mkdir(parents=True)
             (target / 'guide.md').write_text(
                 render_guide(title, guide['summary'], guide['steps'], guide['checklist'], shots, shots.get(0, [])),
                 encoding='utf-8')
@@ -329,7 +336,7 @@ class HowToRecorder:
             LOG.warning('How-to not copied to the repo (%s)', type(exc).__name__)
             return ''
         said = f" Also saved to {repo.name}'s docs/howto"
-        note = f'How-to "{_sentence(title)}": docs/howto/{slug}/guide.md'
+        note = memory_note(title, target.name)
         try:
             remembered = self.remember is not None and self.remember(repo.name, note)
         except Exception as exc:

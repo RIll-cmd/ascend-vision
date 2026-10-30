@@ -451,3 +451,17 @@ def test_the_archiver_renames_branches_closes_issues_and_never_deletes():
                      ('D:/r', ('issue', 'close', '12', '--reason', 'not planned'))]
     failing = Leftover('b', 'branch', 'branch x', NOW, 'd', repo='D:/r', ref='fail')
     assert archive(failing) == (False, "I couldn't rename that branch; it may be checked out somewhere.")
+
+
+# Gap 3 review fixes
+
+def test_named_repo_needs_two_words_or_the_word_repo_and_prefers_the_longest():
+    from assistant.revival import named_repo
+    dirs = ['D:/app', 'D:/app-server', 'D:/ascend_hub', 'D:/notes']
+    assert named_repo('install the app', dirs) is None
+    assert named_repo('take notes on the meeting', dirs) is None
+    assert named_repo('set up the app repo', dirs) == 'D:/app'
+    assert named_repo('in the notes project', dirs) == 'D:/notes'
+    assert named_repo('app server setup', dirs) == 'D:/app-server'
+    assert named_repo('deploy ascend hub', dirs) == 'D:/ascend_hub'
+    assert named_repo('fix the ascend_hub login', dirs) == 'D:/ascend_hub'

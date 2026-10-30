@@ -219,13 +219,22 @@ def _plain(text: str) -> str:
 
 
 def named_repo(text: str, dirs):
-    """The first repo whose folder name ('ascend_hub' or 'ascend hub') appears in the text, or None."""
-    said = _plain(text)
+    """The repo the text names: a two-word folder name ('ascend hub' for ascend_hub) anywhere, a one-word name
+    ('notes') only next to 'repo' or 'project', since one-word names are often ordinary words. Longest wins."""
+    said, best, size = _plain(text), None, 0
     for folder in dirs:
         name = _plain(re.split(r'[\\/]', str(folder).rstrip('\\/'))[-1])
-        if name.strip() and name in said:
-            return folder
-    return None
+        parts = name.split()
+        if not parts:
+            continue
+        if len(parts) >= 2:
+            hit = name in said
+        else:
+            word = re.escape(parts[0])
+            hit = re.search(rf' (?:{word} (?:repo|repository|project)|(?:repo|repository|project) {word}) ', said)
+        if hit and len(name) > size:
+            best, size = folder, len(name)
+    return best
 
 
 def default_repos(vision_repo: Path) -> list[Path]:

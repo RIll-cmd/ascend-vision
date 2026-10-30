@@ -331,3 +331,21 @@ def test_no_repo_named_means_no_copy_and_a_failed_memory_is_said(tmp_path):
     recorder.intercept('open the file')
     recorder.intercept('done recording')
     assert said[-1] == "Your how-to is ready: fix the ascend_hub login, 1 step. Also saved to ascend_hub's docs/howto."
+
+
+def test_a_second_guide_for_the_same_repo_task_does_not_overwrite_the_first(tmp_path):
+    hub = tmp_path / 'ascend_hub'
+    hub.mkdir()
+    recorder, clock, screen, said = recorder_for(tmp_path, repos=lambda: [hub])
+    for _ in range(2):
+        recorder.intercept('watch me deploy ascend hub')
+        recorder.intercept('run the build')
+        recorder.intercept('done recording')
+    assert (hub / 'docs' / 'howto' / 'deploy-ascend-hub' / 'guide.md').exists()
+    assert (hub / 'docs' / 'howto' / 'deploy-ascend-hub-2' / 'guide.md').exists()
+
+
+def test_the_memory_note_is_capped_for_the_room():
+    from assistant.show_me import memory_note
+    note = memory_note('x' * 300, 'deploy')
+    assert len(note) <= 200 and note.endswith(': docs/howto/deploy/guide.md')

@@ -39,6 +39,9 @@ class FakeHub(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['content-length'])))
         FakeHub.posts.append((self.path, body, self.headers.get('host')))
+        if self.path == '/api/room/memory':
+            kept = [n for n in body['notes'] if len(n) <= 200][-60:]  # what the room really keeps
+            return self._send(200, {'key': body['key'], 'notes': kept})
         if self.path == '/api/room/queue':
             if body['body']['task'].startswith('Slow'):
                 import time
@@ -155,3 +158,13 @@ def test_a_memory_note_is_added_once_to_the_project_memory(hub):
     posts = len(FakeHub.posts)
     assert client.add_memory('ascend_hub', 'Use npm test') is True and len(FakeHub.posts) == posts
     assert RoomClient('http://127.0.0.1:1', timeout_seconds=0.5).add_memory('x', 'note') is False
+
+
+def test_a_full_memory_is_left_alone_and_a_dropped_note_is_not_claimed(hub):
+    FakeHub.memory = [f'note {i}' for i in range(60)]
+    posts = len(FakeHub.posts)
+    assert RoomClient(hub).add_memory('ascend_hub', 'new note') is False
+    assert len(FakeHub.posts) == posts  # never pushes out an approved note
+    FakeHub.memory = []
+    assert RoomClient(hub).add_memory('ascend_hub', 'x' * 201) is False
+    FakeHub.memory = ['Use npm test']
