@@ -12,7 +12,7 @@ button toggles visual audio reactivity independently of microphone capture/mute.
 ## Run with Vision
 
 ```powershell
-cd D:\ascend-vision\ascend-vision\fairy-ui
+cd ascend-vision\fairy-ui
 npm install
 npm run build
 cd ..

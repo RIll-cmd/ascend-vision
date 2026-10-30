@@ -1,4 +1,4 @@
-# Ascend Vision
+# Ascend Vision user guide
 
 A friendly eye on your desk that notices when you pick up your phone, keeps you
 company while you focus, and chats with you by voice or text. Everything runs
@@ -249,11 +249,10 @@ The dashboard shows each value's source and age, and can set or undo a temporary
 focus, break, research, or meeting intent; set or cancel a 30-minute quiet
 interval; clear current context; or pause/resume this companion context feature.
 A break defaults to 15 minutes; other intents default to one hour. These values
-live only in the running Vision process. Phase 1 has no proactive prompts, so
-the quiet interval is recorded for future companion behavior and does not affect
-current monitoring. Pause stops the new companion context collector; existing
+live only in the running Vision process. The quiet interval is recorded for
+companion behavior and does not affect current monitoring. Pause stops the new companion context collector; existing
 Phone Watch camera and activity features continue under their current controls.
-Phase 1 does not publish laptop context to Core, PWA, or Discord.
+This context is not published to Core, the phone app or Discord.
 
 Local voice/dashboard chat may read the same current snapshot. A serialized
 allowlisted packet is capped at 4 KiB and labels each value with its source,
@@ -275,7 +274,7 @@ dashboard over a same-Windows-user authenticated named pipe. Restarting Vision
 starts with unknown context. The feature is disabled by default until you enable
 it in configuration.
 
-### Proactive companion — Phase 3 implementation through delivery routing
+### Proactive companion
 
 Local interventions are also disabled by default. They require both
 `companion_context.enabled: true` and `proactive_enabled: true`; each rule has
@@ -297,14 +296,10 @@ speech queue: accepted non-companion speech preempts queued or active companion
 prompts, and a companion prompt does not enqueue while other speech is pending.
 The optional agent-needs-input rule requires fresh, explicit Core operation
 evidence and its own opt-in; idle, generic stuck status, and elapsed time are
-never substitutes. Producer wiring and selected-build integration still need
-staging verification.
+never substitutes.
 
 The shadow-mode explanation view and local pause/snooze controls are
-implemented. Remaining acceptance work is the real-wiring arbitration replay,
-review of three representative shadow sessions, tuning from that review, and
-the seven-day personal pilot. Keep `proactive_enabled` false until those
-acceptance checks are complete.
+implemented. `proactive_enabled` stays false by default.
 
 ```powershell
 # Select a port and print the URL without opening a browser:
@@ -365,7 +360,6 @@ are no mutation endpoints, directory browsing or credential-serving routes.
 The dashboard is intended for this computer; it has no remote-access login.
 SQLite is opened with `mode=ro`, `query_only=ON` and a consistent read transaction.
 It neither initializes missing databases nor competes for the app's writer lock.
-No schema migration is needed for Phase 5.
 
 ## Gemini credentials and feedback
 
@@ -502,7 +496,7 @@ creating it accidentally:
 ```
 
 Use SQLite's backup API or stop the app before copying the database; a live WAL
-database can have committed data in its `-wal` file. The Phase 5 dashboard reads these records without taking the writer lock.
+database can have committed data in its `-wal` file. The dashboard reads these records without taking the writer lock.
 
 ## Configuration
 
@@ -553,7 +547,7 @@ verification reports for measured results.
 
 Proximity does **not prove a grip**: a hand resting near a desk phone long enough
 can still confirm. The real scene needs calibration; universal desk-phone
-rejection is not claimed. Phase 4 adds feedback and retains the existing classifier.
+rejection is not claimed.
 
 ## Files
 
@@ -575,7 +569,6 @@ config.py / config.yaml Typed configuration
 models/                 Official YOLO26n and Hand Landmarker weights
 data/                   Local SQLite database (generated, excluded from archive)
 tests/                  Hardware-independent regression/integration tests
-docs/                   Spec, plans and verification reports
 requirements*.txt       Runtime/development requirements and tested lock
 ```
 
@@ -591,4 +584,3 @@ Official references: [pystray](https://pystray.readthedocs.io/en/latest/usage.ht
 [keyboard](https://github.com/boppreh/keyboard),
 [MediaPipe](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker/python),
 [YOLO26](https://docs.ultralytics.com/models/yolo26/).
-Historical Phase 1/2/3/4 instructions and measurements remain under `docs/`.
