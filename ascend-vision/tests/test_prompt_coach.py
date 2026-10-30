@@ -33,7 +33,7 @@ def test_grade_counts_rework_and_its_reasons(tmp_path):
                   tasks=[{'status': 'done', 'attempts': 1, 'rounds': 3, 'check': {'ok': False}}])
     smooth, rough = sorted((grade(s) for s in read_sessions(tmp_path, NOW)), key=lambda g: g.rework)
     assert smooth.smooth and smooth.rework == 0 and smooth.title == 'Smooth one'
-    assert not rough.smooth and rough.rework == 2 + 2 + 1 + 1 + 3
+    assert not rough.smooth and rough.rework == 2 + 2 + 1 + 1  # a check that failed and was retried counts once
     assert rough.reasons['plan revisions'] == 2 and rough.reasons['review rounds'] == 2
 
 
@@ -45,8 +45,10 @@ def test_reading_skips_old_broken_and_never_started_sessions(tmp_path):
     write_session(tmp_path, 4, task='Future', days=-3)
     (write_session(tmp_path, 5, task='Broken') / 'state.json').write_text('{nope', encoding='utf-8')
     write_session(tmp_path, 6, task=None, extra={'question': 'Which database?', 'mode': 'debate'}, tasks=[])
-    assert sorted(s['state'].get('task') or s['state'].get('question') for s in read_sessions(tmp_path, NOW)) == [
-        'Recent', 'Which database?']
+    write_session(tmp_path, 7, task='Still running', stage='gate-result')
+    write_session(tmp_path, 8, task='Year one', extra={'createdAt': '0001-01-01T00:00:00Z'})
+    write_session(tmp_path, 9, task='Odd counters', stage='stopped', tasks=[{'status': 'pending', 'rounds': '2'}])
+    assert sorted(s['state'].get('task') for s in read_sessions(tmp_path, NOW)) == ['Recent']
     assert read_sessions(tmp_path / 'missing', NOW) == []
 
 
@@ -72,13 +74,37 @@ def test_coaching_falls_back_to_the_roughest_prompt(tmp_path):
     for n in range(3):
         write_session(tmp_path, 100 + n, task=f'Add dark mode {n}', revisions=1 + n)
     lines = coaching([grade(s) for s in read_sessions(tmp_path, NOW)])
-    assert lines[1] == "The roughest was 'Add dark mode 2', with 3 rounds of rework."
+    assert lines[1] == "The roughest was 'Add dark mode 2': 3 plan revisions."
     assert lines[2] == 'Next time, name the files to change.'
 
 
 def test_too_few_sessions_or_all_smooth(tmp_path):
     assert coaching(month(tmp_path / 'a', 3, 2)) == []
     assert coaching(month(tmp_path / 'b', 6, 0)) == ['All 6 went smoothly. Keep writing them like that.']
+    assert coaching(month(tmp_path / 'c', 0, 6)) == [], 'nothing to compare against'
+
+
+def test_files_are_any_file_name_but_not_a_web_address():
+    assert traits('Create ok.txt containing ok', None)['files']
+    assert traits('Write data/numbers.csv', None)['files']
+    assert not traits('Make it look like github.com, e.g. clean', None)['files']
+    assert not traits('Bump to 1.5 please', None)['files']
+
+
+def test_a_gap_of_exactly_thirty_points_counts(tmp_path):
+    from assistant.prompt_coach import Grade
+    smooth = [Grade('s', True, 0, traits={**dict.fromkeys(('files', 'done_when', 'check', 'steps', 'example'), False),
+                                          'files': n < 7}) for n in range(10)]
+    rough = [Grade('r', False, 1, reasons=__import__('collections').Counter({'retries': 1}),
+                   traits={**dict.fromkeys(('files', 'done_when', 'check', 'steps', 'example'), False), 'files': n < 4})
+             for n in range(10)]
+    assert coaching(smooth + rough)[1] == 'The smooth ones more often named the files: 7 of 10, against 4 of 10.'
+
+
+def test_the_roughest_title_is_cut_at_a_word():
+    from assistant.prompt_coach import _title
+    assert _title('Create hello.txt containing hello, and then write exactly the words the owner said') == (
+        'Create hello.txt containing hello, and then write exactly the')
 
 
 class Clock:

@@ -33,12 +33,20 @@ TRAITS = {  # name: (how it reads in the coaching, the tip)
     'steps': ('listed the steps', 'Next time, list the steps you expect, one per line.'),
     'example': ('gave an example', 'Next time, give one example of the result you want.'),
 }
-_FILES = re.compile(r'@[\w./-]+|\b[\w-]+\.(?:py|js|jsx|ts|tsx|mjs|md|json|html|css|yaml|yml|toml|sql)\b'
-                    r'|\b(?:src|app|tests?|scripts|docs|lib|components)/', re.I)
-_DONE_WHEN = re.compile(r'\b(?:should|must|so that|done when|expect(?:ed)?|acceptance|tests? pass(?:es)?'
-                        r'|make sure|until)\b', re.I)
+# Any file name (ok.txt, data/numbers.csv, @app/page.tsx), but not a web address or a version number.
+_FILES = re.compile(r'@[\w./-]+|\b[\w-]{2,}\.(?!(?:com|org|net|io|dev|co|ai|gov|edu|app)\b)[a-z][a-z0-9]{0,4}\b'
+                    r'|\b(?:src|app|tests?|scripts|docs|lib|components|data)/', re.I)
+_DONE_WHEN = re.compile(r'\b(?:should|must|so that|done when|expected|acceptance|tests? pass(?:es)?'
+                        r'|make sure)\b', re.I)
 _STEPS = re.compile(r'^\s*(?:[-*•]|\d+[.)])\s+\S', re.M)
-_EXAMPLE = re.compile(r'\b(?:for example|e\.g\.|such as|for instance|looks like)', re.I)
+_EXAMPLE = re.compile(r'\b(?:for example|e\.g\.|such as|for instance)', re.I)
+FINISHED = {'done', 'rejected', 'stopped'}
+# How each kind of rework reads in "the roughest was ...": (one, many)
+REWORK_WORDS = {'plan revisions': ('a plan revision', 'plan revisions'),
+                'review rounds': ('an extra review round', 'extra review rounds'),
+                'retries': ('a retry', 'retries'), 'failed checks': ('a failed check', 'failed checks'),
+                'rejected results': ('a rejected result', 'rejected results'),
+                'stopped sessions': ('stopping it partway', 'stopping it partway')}
 _ASK = re.compile(r"(?:(?:hey|ok|okay) )?(?:vision )?(?:how are my prompts(?: doing)?|coach my prompts|prompt tips"
                   r"|grade my prompts)")
 
@@ -55,7 +63,7 @@ class Grade:
 def _local(stamp) -> datetime | None:
     try:
         return datetime.fromisoformat(str(stamp).replace('Z', '+00:00')).astimezone().replace(tzinfo=None)
-    except ValueError:
+    except (ValueError, OSError, OverflowError):  # year 1 raises OSError on Windows
         return None
 
 
@@ -97,14 +105,15 @@ def read_sessions(data_dir: Path, now: datetime) -> list[dict]:
             state = json.loads((root / session_id / 'state.json').read_text(encoding='utf-8'))
         except (OSError, ValueError):
             continue
-        if not isinstance(state, dict):
+        # Only finished build sessions: a running one has no outcome yet, and a debate has no task prompt.
+        if not isinstance(state, dict) or state.get('stage') not in FINISHED or state.get('mode') == 'debate':
             continue
         created = _local(state.get('createdAt'))
         if created is None or not now - WINDOW <= created <= now + timedelta(hours=1):
             continue
         revisions, assigned = _transcript_counts(root / session_id / 'transcript.jsonl')
         if state.get('stage') == 'stopped':
-            started = any(t.get('status') != 'pending' or (t.get('rounds') or 0) > 0 or (t.get('attempts') or 0) > 0
+            started = any(t.get('status') != 'pending' or _number(t.get('rounds')) > 0 or _number(t.get('attempts')) > 0
                           or t.get('failures') for t in _tasks(state))
             if not (started or assigned):
                 continue
@@ -129,21 +138,34 @@ def grade(session: dict) -> Grade:
     reasons['plan revisions'] += session.get('revisions', 0)
     for task in _tasks(state):
         reasons['review rounds'] += max(0, _number(task.get('rounds')) - 1)
-        reasons['retries'] += _number(task.get('attempts'))
+        retries = _number(task.get('attempts'))
+        reasons['retries'] += retries
         check = task.get('check')
-        failures = task.get('failures')
-        reasons['failed checks'] += (len(failures) if isinstance(failures, list) else 0) + (
-            1 if isinstance(check, dict) and check.get('ok') is False else 0)
+        # A failed check that was retried is already a retry; only a check still red at the end counts again.
+        reasons['failed checks'] += 1 if isinstance(check, dict) and check.get('ok') is False and not retries else 0
     stage = state.get('stage')
     if stage == 'rejected':
-        reasons['rejected results'] += 3
+        reasons['rejected results'] += 1
     elif stage == 'stopped':
-        reasons['stopped sessions'] += 2
+        reasons['stopped sessions'] += 1
     reasons = +reasons  # drop zeros
     rework = sum(reasons.values())
     text = str(state.get('task') or state.get('question') or '')
-    return Grade(title=text.split('\n')[0].strip()[:60] or 'an untitled session', smooth=stage == 'done' and not rework,
+    return Grade(title=_title(text), smooth=stage == 'done' and not rework,
                  rework=rework, reasons=reasons, traits=traits(text, state.get('check')))
+
+
+def _title(text: str, limit: int = 64) -> str:
+    first = text.split('\n')[0].strip()
+    if len(first) > limit:
+        first = first[:limit].rsplit(' ', 1)[0].rstrip(',;:')
+    return first or 'an untitled session'
+
+
+def _rework_words(reasons: Counter) -> str:
+    parts = [REWORK_WORDS[name][0] if n == 1 or name == 'stopped sessions' else f'{n} {REWORK_WORDS[name][1]}'
+             for name, n in reasons.most_common() if name in REWORK_WORDS]
+    return parts[0] if len(parts) == 1 else f"{', '.join(parts[:-1])} and {parts[-1]}"
 
 
 def coaching(grades: list[Grade]) -> list[str]:
@@ -154,14 +176,15 @@ def coaching(grades: list[Grade]) -> list[str]:
     if not rough:
         return [f'All {len(grades)} went smoothly. Keep writing them like that.']
     if not smooth:
-        smooth = []
-    reasons = sum((g.reasons for g in rough), Counter())
+        return []  # nothing smooth to learn from
+    # "mostly" names the kind of rework the most rough sessions had, not the biggest weighted sum.
+    reasons = Counter(name for g in rough for name in g.reasons) or Counter({'rework': 1})
     lines = [f'Your Agent Room prompts, last 30 days: {len(grades)} sessions; {len(smooth)} went smoothly and '
              f'{len(rough)} needed rework, mostly {reasons.most_common(1)[0][0]}.']
     best, gap = None, MIN_GAP
     for name in TRAITS:
         have = sum(g.traits[name] for g in smooth), sum(g.traits[name] for g in rough)
-        difference = (have[0] / len(smooth) if smooth else 0) - have[1] / len(rough)
+        difference = round(have[0] / len(smooth) - have[1] / len(rough), 6)  # 0.7 - 0.4 must reach 0.3
         if difference >= gap and (best is None or difference > gap):
             best, gap, counts = name, difference, have
     if best is not None:
@@ -170,8 +193,7 @@ def coaching(grades: list[Grade]) -> list[str]:
         lines.append(TRAITS[best][1])
         return lines
     roughest = max(rough, key=lambda g: g.rework)
-    lines.append(f"The roughest was '{roughest.title}', with {roughest.rework} "
-                 f"round{'' if roughest.rework == 1 else 's'} of rework.")
+    lines.append(f"The roughest was '{roughest.title}': {_rework_words(roughest.reasons)}.")
     missing = next((name for name in TRAITS if not roughest.traits[name]), None)
     if missing:
         lines.append(TRAITS[missing][1])
@@ -208,7 +230,12 @@ class PromptCoach:
         if last and now - last < SPEAK_EVERY:
             self._retry_after = last + SPEAK_EVERY  # no file reads every 5 s until then
             return
-        lines = coaching(self.read())
+        try:
+            lines = coaching(self.read())
+        except Exception as exc:  # a bad session file must not mean a re-read every 5 s
+            LOG.debug('Prompt coaching read failed (%s)', type(exc).__name__)
+            self._retry_after = now + timedelta(hours=1)
+            return
         if not lines:
             self._retry_after = now + timedelta(days=1)
             return
