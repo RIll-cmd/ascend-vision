@@ -482,7 +482,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             resources.callback(notification_worker.stop)
             notification_worker.start()
             LOG.info('Companion notification worker started; dispatching generic push alerts outbound-only')
-        room_dialog = room_client = None  # Set up with the agent room below; phone answers read them late.
+        room_dialog = room_client = promise_coach = None  # Set up below; phone answers read them late.
 
         def answer_room(text, remote=False):
             """Lines to say when a waiting agent room gate takes ``text``, else None."""
@@ -513,7 +513,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 audio_transcriber = WhisperAudioTranscriber(config.voice_commands)
             phone_handler = PhoneMessageHandler(
                 assistant_service, owner_id=phone_owner_id, audio_transcriber=audio_transcriber,
-                room_answer=lambda text: ' '.join(answer_room(text, remote=True) or ()) or None)
+                room_answer=lambda text: (' '.join(answer_room(text, remote=True) or ()) or None)
+                or (promise_coach.phone(text) if promise_coach is not None else None))
             phone_worker = build_phone_worker(phone_chat_config, phone_handler)
             if phone_worker is None:
                 raise RuntimeError('Enabled phone chat did not create its worker')
@@ -861,9 +862,22 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         promises_config = getattr(config, 'promises', None)
         if promises_config is not None and promises_config.enabled:
             try:
-                from assistant.promises import PromiseCoach, PromiseStore
+                from assistant.promises import PromiseCoach, PromiseStore, make_evidence
+                from assistant.revival import command_runner, default_repos
+                from integrations.agent_room import newest_repo, promise_queue
+                promise_git = command_runner('git')
+                common = promise_git(Path(__file__).resolve().parent, 'rev-parse', '--path-format=absolute',
+                                     '--git-common-dir')
+                revival_repos = getattr(getattr(config, 'revival', None), 'repos', ())
+                promise_repos = ([Path(r) for r in revival_repos] if revival_repos
+                                 else default_repos(Path(common.strip()).parent) if common else [])
+                promise_room = (Path(common.strip()).parent.parent / 'ascend_hub' / '.sites-runtime' / 'agent-room'
+                                if common else Path('.'))
                 promise_coach = PromiseCoach(
-                    PromiseStore(Path(config.storage.database).parent / 'promises.json'), announce=announce_paced)
+                    PromiseStore(Path(config.storage.database).parent / 'promises.json'), announce=announce_paced,
+                    evidence=make_evidence(promise_repos, promise_git, promise_room),
+                    queue=(promise_queue(room_client, newest=lambda dirs: newest_repo(dirs, promise_git))
+                           if room_client is not None else None))
             except Exception as exc:
                 LOG.warning('Promise check-ins unavailable (%s)', type(exc).__name__)
 

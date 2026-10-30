@@ -143,6 +143,7 @@ _DONE_WITH = re.compile(rf"{_LEAD}(?:i'm |im |i am )?(?:done with|cross off|cros
 _LIST = re.compile(rf"{_LEAD}(?:what did i promise|what have i promised|what are my promises|my promises"
                    r"|list my promises)")
 _QUESTION = re.compile(r"(?:what|why|how|who|when|where|which|can|could|would|should|is|are|do|does|did|will)\b")
+_QUEUE = re.compile(rf"{_LEAD}(?:(?:queue|send|give) it(?: (?:in|to) the (?:agent )?room)?(?: please)?|room)")
 _STEP_LEAD = re.compile(r"^(?:the first (?:small )?step is |first step is |first |just |i'll |i will )+")
 
 
@@ -154,7 +155,7 @@ class Promise:
     next: str
     timed: bool
     asks: int = 0
-    status: str = 'open'  # open | stale | done | dropped
+    status: str = 'open'  # open | stale | done | dropped | queued
     closed: str | None = None
 
 
@@ -215,6 +216,71 @@ def _day_words(day: date, today: date) -> str:
     return WEEKDAYS[day.weekday()].title() if abs((day - today).days) < 7 else f'{day:%B} {day.day}'
 
 
+def find_evidence(what: str, commits, sessions) -> str | None:
+    """The first commit (repo, subject) or Room session title sharing two key words with the promise."""
+    keys = {w for w in words(what).split() if len(w) >= 3} - _STOP
+    if not keys:
+        return None
+    need = min(2, len(keys))
+
+    def matches(text: str) -> bool:
+        return len(keys & set(re.split(r'[^a-z0-9]+', words(text)))) >= need
+
+    for repo, subject in commits:
+        if matches(subject):
+            return f"the commit '{subject}' in {repo}"
+    for title in sessions:
+        if matches(title):
+            return f"the Room session '{title}'"
+    return None
+
+
+MAX_ROOM_SESSIONS = 40
+
+
+def _done_room_titles(room_data: Path, since: datetime) -> list[str]:
+    """First task lines of finished Room sessions made after ``since`` (local time)."""
+    try:
+        folders = sorted((p for p in (Path(room_data) / 'sessions').iterdir() if p.is_dir()),
+                         key=lambda p: p.name, reverse=True)[:MAX_ROOM_SESSIONS]
+    except OSError:
+        return []
+    titles = []
+    for folder in folders:
+        try:
+            state = json.loads((folder / 'state.json').read_text(encoding='utf-8'))
+            made = datetime.fromisoformat(str(state['createdAt']).replace('Z', '+00:00'))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        made = made.astimezone().replace(tzinfo=None) if made.tzinfo else made
+        if state.get('stage') == 'done' and made >= since and isinstance(state.get('task'), str):
+            titles.append(_short_title(state['task']))
+    return titles
+
+
+def _short_title(task: str, limit: int = 80) -> str:
+    """The first sentence of a task, cut at a word so it reads well aloud."""
+    first = re.split(r'(?<=[.!?])\s|\n', task.strip(), maxsplit=1)[0].rstrip('.!? ')
+    if len(first) <= limit:
+        return first
+    return first[:limit].rsplit(' ', 1)[0].rstrip(',;: ')
+
+
+def make_evidence(repos, run_git, room_data: Path):
+    """(what, made at) -> a matching commit by the owner or finished Room session since then, or None."""
+    def lookup(what: str, since: datetime) -> str | None:
+        commits = []
+        for repo in repos:
+            email = (run_git(repo, 'config', 'user.email') or '').strip()
+            args = ['log', '--all', '--no-merges', f'--since={since.isoformat(timespec="seconds")}']
+            if email:
+                args.append(f'--author={email}')
+            out = run_git(repo, *args, '--format=%s', '-n', '50') or ''
+            commits += [(Path(repo).name, line.strip()) for line in out.splitlines() if line.strip()]
+        return find_evidence(what, commits, _done_room_titles(room_data, since))
+    return lookup
+
+
 def _sentence(text: str) -> str:
     return text[:1].upper() + text[1:]
 
@@ -222,8 +288,11 @@ def _sentence(text: str) -> str:
 class PromiseCoach:
     """Catches promises in chat, and asks about one due promise at a time while the owner is around."""
 
-    def __init__(self, store: PromiseStore, *, announce, clock=datetime.now, offer_window: float = 120.0):
+    def __init__(self, store: PromiseStore, *, announce, clock=datetime.now, offer_window: float = 120.0,
+                 evidence=None, queue=None):
         self.store = store
+        self.evidence = evidence  # (what, made at) -> 'the commit ...' | None, for the first check-in
+        self.queue = queue  # what -> (ok, message): hands the promise to the Agent Room
         self.announce = announce
         self.clock = clock
         self.offer_window = offer_window
@@ -289,15 +358,24 @@ class PromiseCoach:
             promise.next = _at_ten(now.date() + timedelta(days=1)).isoformat()
             created = datetime.fromisoformat(promise.created).date()
             if promise.asks == 1:
-                line = f'Checking in on {promise.what}. Done?'
+                line = None
             elif promise.asks == 2:
                 line = f'{_sentence(promise.what)} is still open from {_day_words(created, now.date())}. Done yet?'
             else:
                 days = (now.date() - created).days
                 line = (f"{_sentence(promise.what)} has been open {'a day' if days == 1 else f'{days} days'}. "
-                        'Keep it, make it smaller, or drop it?')
+                        + ('Keep it, make it smaller, queue it in the Room, or drop it?' if self.queue
+                           else 'Keep it, make it smaller, or drop it?'))
             self._asking.add(promise.id)
             self._save()
+        if line is None:
+            found = None
+            if self.evidence:
+                try:  # git and the Room files are read outside the lock
+                    found = self.evidence(promise.what, datetime.fromisoformat(promise.created))
+                except Exception as exc:
+                    LOG.warning('Promise evidence lookup failed (%s)', type(exc).__name__)
+            line = f'Checking in on {promise.what}. ' + (f'I saw {found}. ' if found else '') + 'Done?'
         self.announce(line, on_said=self._opened('ask', promise.id), urgent=urgent)
 
     def _opened(self, kind: str, promise_id: str):
@@ -314,6 +392,19 @@ class PromiseCoach:
         if notice:
             self.announce(notice, urgent=True)  # it answers what the owner just said; no question is opened
         return reply
+
+    def phone(self, text: str) -> str | None:
+        """Phone chat: explicit reminders and the list only; nothing is spoken at the PC."""
+        said = words(text)
+        with self._lock:
+            if _LIST.fullmatch(said):
+                return self._list(self.clock())
+            caught = parse_promise(text, self.clock())
+            if caught is None or not caught.explicit:
+                return None
+            reply, _ = self._intercept(text)
+            self._captured = None  # 'drop that' is for the PC conversation
+            return reply
 
     def _intercept(self, text: str) -> tuple[str | None, str | None]:
         said, now = words(text), self.clock()
@@ -373,6 +464,12 @@ class PromiseCoach:
             self._offer = None
             self._close(promise, 'dropped')
             return 'Dropped.'
+        if self.queue and _QUEUE.fullmatch(said):
+            self._offer = None
+            ok, message = self.queue(promise.what)
+            if ok:
+                self._close(promise, 'queued')
+            return message
         if _SMALLER.fullmatch(said):
             self._offer = ('smaller', promise.id, now, seq)
             return "What's the first small step?"

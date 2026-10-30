@@ -399,3 +399,147 @@ def test_a_broken_file_is_set_aside_and_closed_promises_go_after_thirty_days(tmp
     clock.now += timedelta(days=31)
     coach.intercept('remind me to stretch in 5 minutes')
     assert [p['status'] for p in json.loads(path.read_text())] == ['open']
+
+
+# Gap 1: evidence, Room queue, phone
+
+from assistant.promises import find_evidence
+
+
+def test_evidence_matches_two_shared_words_or_the_only_word():
+    commits = [('ascend_hub', 'docs: tidy readme'), ('ascend_hub', 'fix(hub): login redirect loop')]
+    assert find_evidence('fix the login', commits, []) == "the commit 'fix(hub): login redirect loop' in ascend_hub"
+    assert find_evidence('the dentist', [('x', 'Dentist booking notes')], []) == "the commit 'Dentist booking notes' in x"
+    assert find_evidence('fix the login', [('x', 'login page colors')], []) is None  # one of two words
+    assert find_evidence('write the report', [], ['Write the weekly report']) == "the Room session 'Write the weekly report'"
+    assert find_evidence('go', [('x', 'go go go')], []) is None  # no word long enough to judge
+
+
+def ask_with_evidence(tmp_path, evidence):
+    clock, voice = Clock(WED_9AM), Voice(False)
+    coach = PromiseCoach(PromiseStore(tmp_path / 'promises.json'), announce=voice, clock=clock, evidence=evidence)
+    coach.intercept('remind me to fix the login tomorrow')
+    clock.now = datetime(2026, 10, 29, 10, 0)
+    coach.tick(True)
+    return coach, clock, voice
+
+
+
+
+def test_first_check_in_mentions_the_commit_it_found(tmp_path):
+    seen = []
+
+    def evidence(what, since):
+        seen.append((what, since))
+        return "the commit 'fix login redirect' in ascend_hub"
+
+    coach, clock, voice = ask_with_evidence(tmp_path, evidence)
+    assert voice.said == ["Checking in on fix the login. I saw the commit 'fix login redirect' in ascend_hub. Done?"]
+    assert seen == [('fix the login', WED_9AM)]
+    assert coach.intercept('yes') == 'Nice. Crossed off.'
+
+
+def test_evidence_is_only_looked_for_on_the_first_ask_and_failures_fall_back(tmp_path):
+    calls = []
+
+    def evidence(what, since):
+        calls.append(what)
+        raise OSError('git missing')
+
+    coach, clock, voice = ask_with_evidence(tmp_path, evidence)
+    assert voice.said == ['Checking in on fix the login. Done?']
+    clock.now = datetime(2026, 10, 30, 10, 0)
+    coach.tick(True)
+    assert len(calls) == 1
+
+
+def queue_coach(tmp_path, queue):
+    clock, voice = Clock(WED_9AM), Voice(False)
+    coach = PromiseCoach(PromiseStore(tmp_path / 'promises.json'), announce=voice, clock=clock, queue=queue)
+    coach.intercept('remind me to fix the login tomorrow')
+    clock.now = datetime(2026, 10, 29, 10, 0)
+    coach.tick(True)
+    return coach, clock, voice
+
+
+@pytest.mark.parametrize('answer', ['queue it', 'Queue it in the Room.', 'send it to the room', 'room'])
+def test_queue_it_hands_the_promise_to_the_room(tmp_path, answer):
+    asked = []
+    coach, clock, voice = queue_coach(tmp_path, lambda what: (asked.append(what), (True, 'Queued in the Agent Room.'))[1])
+    assert coach.intercept(answer) == 'Queued in the Agent Room.'
+    assert asked == ['fix the login']
+    assert json.loads((tmp_path / 'promises.json').read_text())[0]['status'] == 'queued'
+    assert coach.intercept('what did I promise') == 'No open promises.'
+
+
+def test_a_failed_queue_keeps_the_promise_open(tmp_path):
+    coach, clock, voice = queue_coach(tmp_path, lambda what: (False, "I couldn't reach the agent room."))
+    assert coach.intercept('queue it') == "I couldn't reach the agent room."
+    assert json.loads((tmp_path / 'promises.json').read_text())[0]['status'] == 'open'
+
+
+def test_without_a_room_queue_the_answer_is_left_to_the_ai(tmp_path):
+    coach, clock, voice = coach_for(tmp_path)
+    coach.intercept('remind me to fix the login tomorrow')
+    clock.now = datetime(2026, 10, 29, 10, 0)
+    coach.tick(True)
+    assert coach.intercept('queue it') is None
+
+
+def test_the_firm_question_offers_the_room_when_there_is_one(tmp_path):
+    coach, clock, voice = queue_coach(tmp_path, lambda what: (True, 'ok'))
+    for day in (30, 31):
+        clock.now = datetime(2026, 10, day, 10, 0)
+        coach.tick(True)
+    assert voice.said[-1] == ('Fix the login has been open 3 days. '
+                              'Keep it, make it smaller, queue it in the Room, or drop it?')
+
+
+def test_phone_takes_explicit_reminders_and_the_list_without_speaking(tmp_path):
+    coach, clock, voice = coach_for(tmp_path)
+    assert coach.phone('remind me to call mom at 6') == "Okay. I'll check on call mom at 6."
+    assert coach.phone("I'll fix the login tomorrow") is None
+    assert coach.phone('what did I promise?') == 'One open: call mom, due today at 6 pm.'
+    assert coach.phone('how are you') is None
+    assert voice.said == []
+
+
+def test_make_evidence_reads_owner_commits_since_the_promise_and_done_room_sessions(tmp_path):
+    from assistant.promises import make_evidence
+    calls = []
+
+    def run_git(repo, *args):
+        calls.append((repo.name, args))
+        if args[:2] == ('config', 'user.email'):
+            return 'me@example.com\n' if repo.name == 'hub' else None
+        return 'fix(hub): login redirect\n' if repo.name == 'hub' else ''
+
+    sessions = tmp_path / 'room' / 'sessions'
+    for sid, stage, created, task in (('1761000000000-aaaaaa', 'done', '2026-10-28T12:00:00Z', 'Write the weekly report\nmore'),
+                                      ('1761000000001-bbbbbb', 'stopped', '2026-10-28T12:00:00Z', 'Plan the trip'),
+                                      ('1761000000002-cccccc', 'done', '2026-10-01T12:00:00Z', 'Plan the trip')):
+        (sessions / sid).mkdir(parents=True)
+        (sessions / sid / 'state.json').write_text(json.dumps({'stage': stage, 'createdAt': created, 'task': task}))
+    lookup = make_evidence([tmp_path / 'hub', tmp_path / 'other'], run_git, tmp_path / 'room')
+    assert lookup('fix the login', WED_9AM - timedelta(days=1)) == "the commit 'fix(hub): login redirect' in hub"
+    log = [args for name, args in calls if args[0] == 'log']
+    assert log[0] == ('log', '--all', '--no-merges', '--since=2026-10-27T09:00:00', '--author=me@example.com',
+                      '--format=%s', '-n', '50')
+    assert '--author=me@example.com' not in log[1]  # no email set there: any author
+    assert lookup('write the report', WED_9AM - timedelta(days=1)) == "the Room session 'Write the weekly report'"
+    assert lookup('plan the trip', WED_9AM - timedelta(days=1)) is None  # stopped, or made before the promise
+    assert make_evidence([], run_git, tmp_path / 'missing')('fix the login', WED_9AM) is None
+
+
+def test_room_titles_are_the_first_sentence_cut_at_a_word(tmp_path):
+    from assistant.promises import make_evidence
+    folder = tmp_path / 'room' / 'sessions' / '1761000000000-aaaaaa'
+    folder.mkdir(parents=True)
+    task = 'Make a one-page HTML stopwatch with start, stop and reset. At the end, propose one more idea.'
+    (folder / 'state.json').write_text(json.dumps({'stage': 'done', 'createdAt': '2026-10-28T12:00:00Z', 'task': task}))
+    found = make_evidence([], None, tmp_path / 'room')('make a stopwatch', WED_9AM - timedelta(days=1))
+    assert found == "the Room session 'Make a one-page HTML stopwatch with start, stop and reset'"
+    long = 'word ' * 30
+    (folder / 'state.json').write_text(json.dumps({'stage': 'done', 'createdAt': '2026-10-28T12:00:00Z', 'task': long}))
+    found = make_evidence([], None, tmp_path / 'room')('word', WED_9AM - timedelta(days=1))
+    assert found == "the Room session '" + ' '.join(['word'] * 16) + "'"

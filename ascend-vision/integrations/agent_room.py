@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -48,6 +49,78 @@ class RoomClient:
             return False, f'The agent room did not take that answer ({code}).'
         except OSError:
             return False, "I couldn't reach the agent room."
+
+
+    def status(self) -> dict | None:
+        """The room's status (its repos and their suggested checks), or None when it is unreachable."""
+        try:
+            with self._opener.open(f'{self.base_url}/api/room', timeout=self.timeout_seconds) as response:
+                status = json.loads(response.read().decode('utf-8'))
+            return status if isinstance(status, dict) else None
+        except (OSError, ValueError):
+            return None
+
+    def queue(self, body: dict) -> tuple[bool, str]:
+        """Adds a start body to the room's queue; it starts as soon as no session runs."""
+        request = urllib.request.Request(f'{self.base_url}/api/room/queue', data=json.dumps({'body': body}).encode('utf-8'),
+                                         headers={'content-type': 'application/json'}, method='POST')
+        try:
+            with self._opener.open(request, timeout=self.timeout_seconds):
+                return True, 'Queued in the Agent Room.'
+        except urllib.error.HTTPError as error:
+            try:
+                code = json.loads(error.read().decode('utf-8')).get('error', error.code)
+            except (ValueError, AttributeError):
+                code = error.code
+            return False, f'The agent room did not queue it ({code}).'
+        except OSError:
+            return False, "I couldn't reach the agent room."
+
+
+def _folder(path: str) -> str:
+    return re.split(r'[\\/]', path.rstrip('\\/'))[-1]
+
+
+def room_task(what: str, repos: list, *, newest) -> dict | None:
+    """A Room start body for a promise: the repo it names, else the one worked on last; None without a repo."""
+    dirs = [r['dir'] for r in repos if isinstance(r, dict) and isinstance(r.get('dir'), str)]
+    said = ' ' + re.sub(r'[^a-z0-9]+', ' ', what.lower()) + ' '
+    named = [d for d in dirs if f" {re.sub(r'[^a-z0-9]+', ' ', _folder(d).lower()).strip()} " in said]
+    repo = named[0] if named else (newest(dirs) if dirs else None)
+    if repo not in dirs:
+        return None
+    slug = '-'.join(re.sub(r'[^a-z0-9]+', ' ', what.lower()).split()[:3])[:40].strip('-')
+    plain = what.strip().rstrip('.!?').strip()
+    body = {'template': 'feature', 'project': slug or 'promise', 'repo': repo,
+            'task': f'{plain[:1].upper()}{plain[1:]}. (Queued by Vision from a promise.)'}
+    check = next((r.get('check') for r in repos if isinstance(r, dict) and r.get('dir') == repo), None)
+    if isinstance(check, str) and check.strip():
+        body['check'] = check
+    return body
+
+
+def newest_repo(dirs: list, run_git) -> str | None:
+    """The repo with the latest commit, by ``git log -1 --format=%ct``."""
+    best, when = None, -1
+    for repo in dirs:
+        out = run_git(repo, 'log', '-1', '--format=%ct')
+        if out and out.strip().isdigit() and int(out) > when:
+            best, when = repo, int(out)
+    return best
+
+
+def promise_queue(client: RoomClient, *, newest):
+    """what -> (ok, spoken reply): queues a promise in the Agent Room."""
+    def queue(what: str) -> tuple[bool, str]:
+        status = client.status()
+        if status is None:
+            return False, "I couldn't reach the agent room."
+        body = room_task(what, status.get('repos') or [], newest=newest)
+        if body is None:
+            return False, "I couldn't tell which repo that is for. Queue it from the Room page."
+        ok, message = client.queue(body)
+        return (True, f'Queued in the Agent Room for {_folder(body["repo"])}: {what}.') if ok else (False, message)
+    return queue
 
 
 class RoomWatcher:
