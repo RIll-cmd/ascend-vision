@@ -862,6 +862,26 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             except Exception as exc:
                 LOG.warning('Leftover check-ins unavailable (%s)', type(exc).__name__)
 
+        prompt_coach = None
+        prompt_coach_config = getattr(config, 'prompt_coach', None)
+        if prompt_coach_config is not None and prompt_coach_config.enabled:
+            try:
+                from assistant.prompt_coach import PromptCoach, grade, read_sessions
+                from assistant.revival import command_runner
+                room_data = Path(prompt_coach_config.room_data) if prompt_coach_config.room_data else None
+                if room_data is None:
+                    common = command_runner('git')(Path(__file__).resolve().parent, 'rev-parse',
+                                                   '--path-format=absolute', '--git-common-dir')
+                    if common:  # the Hub's Room data, next to Vision's own repo
+                        room_data = Path(common.strip()).parent.parent / 'ascend_hub' / '.sites-runtime' / 'agent-room'
+                if room_data is not None:
+                    prompt_coach = PromptCoach(
+                        lambda: [grade(s) for s in read_sessions(room_data, datetime.now())],
+                        announce=announce_paced,
+                        store_path=Path(config.storage.database).parent / 'prompt_coach.json')
+            except Exception as exc:
+                LOG.warning('Prompt coaching unavailable (%s)', type(exc).__name__)
+
         nutrition_coach = None
         try:
             from assistant.nutrition import NutritionStore
@@ -893,7 +913,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             # Away/sleep first (it blocks everything while asleep), then eyes, weather, GitHub, food, promises, slumps.
             # While a how-to is recording, every line is narration, so the recorder comes right after away mode.
             for handler in (away_mode, how_to, eye_calibrator, focus_doorman, weather_coach, github_coach,
-                            nutrition_coach, promise_coach, revival_coach, slump_coach):
+                            nutrition_coach, promise_coach, revival_coach, prompt_coach, slump_coach):
                 if handler is not None:
                     try:
                         answer = handler.intercept(text)
@@ -1805,6 +1825,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         revival_coach.tick(owner_available)
                     except Exception as exc:
                         LOG.debug('Leftover check skipped (%s)', type(exc).__name__)
+                if prompt_coach is not None:
+                    try:
+                        prompt_coach.tick(owner_available)
+                    except Exception as exc:
+                        LOG.debug('Prompt coaching skipped (%s)', type(exc).__name__)
                 try:
                     for notice in key_low_notifier.messages(ai_key_summary()):
                         announce_paced(notice)

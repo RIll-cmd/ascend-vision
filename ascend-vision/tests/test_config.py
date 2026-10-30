@@ -307,6 +307,19 @@ def test_revival_config_defaults_and_validation(tmp_path):
     assert load_config(path).revival.repos == ('D:/ascend_hub', 'D:/ascend-vision')
 
 
+def test_prompt_coach_config_defaults_and_validation(tmp_path):
+    from config import Config, PromptCoachConfig, load_config
+
+    assert Config().prompt_coach == PromptCoachConfig(enabled=True, room_data='')
+    with pytest.raises(ValueError, match='prompt_coach.enabled'):
+        PromptCoachConfig(enabled='yes')
+    with pytest.raises(ValueError, match='prompt_coach.room_data'):
+        PromptCoachConfig(room_data=5)
+    path = tmp_path / 'config.yaml'
+    path.write_text("prompt_coach:\n  room_data: 'E:/hub/.sites-runtime/agent-room'\n", encoding='utf-8')
+    assert load_config(path).prompt_coach.room_data == 'E:/hub/.sites-runtime/agent-room'
+
+
 def test_focus_doorman_config_defaults_and_validation(tmp_path):
     from config import Config, FocusDoormanConfig, load_config
 

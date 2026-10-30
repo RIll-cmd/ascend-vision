@@ -557,6 +557,19 @@ class RevivalConfig:
 
 
 @dataclass(frozen=True)
+class PromptCoachConfig:
+    """Weekly coaching on the owner's Agent Room task prompts, read from the Room's session files."""
+    enabled: bool = True
+    room_data: str = ''  # '' reads ascend_hub/.sites-runtime/agent-room next to Vision's repo
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('prompt_coach.enabled must be a YAML boolean')
+        if not isinstance(self.room_data, str):
+            raise ValueError('prompt_coach.room_data must be a string')
+
+
+@dataclass(frozen=True)
 class WeatherConfig:
     """Daily weather briefing from Open-Meteo (free, no key) for the owner's places."""
     enabled: bool = True
@@ -837,6 +850,7 @@ class Config:
     focus_doorman: FocusDoormanConfig = field(default_factory=FocusDoormanConfig)
     show_me: ShowMeConfig = field(default_factory=ShowMeConfig)
     revival: RevivalConfig = field(default_factory=RevivalConfig)
+    prompt_coach: PromptCoachConfig = field(default_factory=PromptCoachConfig)
     github: GitHubCoachConfig = field(default_factory=GitHubCoachConfig)
     phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
     browser_automation: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
@@ -865,6 +879,7 @@ def load_config(path: Path) -> Config:
                  'weather': WeatherConfig, 'github': GitHubCoachConfig, 'agent_room': AgentRoomConfig,
                  'slump': SlumpConfig, 'promises': PromisesConfig,
                  'focus_doorman': FocusDoormanConfig, 'show_me': ShowMeConfig, 'revival': RevivalConfig,
+                 'prompt_coach': PromptCoachConfig,
                  'browser_automation': BrowserAutomationConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')

@@ -52,6 +52,7 @@ Everything has a default. Edit `config.yaml` only if you need to:
 | Hold agent room announcements during a focus block too | `focus_doorman.let_room_through: false` |
 | Keep how-to guides somewhere else, or write them without the AI | `show_me.folder: 'D:/guides'`, `show_me.ai_cleanup: false` |
 | Stop the weekly "something you left" check-in, or pick which repos it reads | `revival.enabled: false`, `revival.repos: ['D:/ascend_hub']` |
+| Stop the weekly prompt coaching, or read the Agent Room from another folder | `prompt_coach.enabled: false`, `prompt_coach.room_data: 'E:/hub/.sites-runtime/agent-room'` |
 
 While a gate waits, say the wake word, then the answer ("Vision, approve"); the
 follow-up "yes" needs no wake word for 20 seconds. Phone messages and voice notes
@@ -93,6 +94,12 @@ at a gate, or a GitHub issue you opened that nobody touched for a month. It look
 the git repos next to Vision's own folder (or `revival.repos`) and only reads them.
 Answer "revive it" (it becomes a promise for tomorrow), "later" (asked again in a
 month) or "forget it"; ask "what did I leave?" any time.
+
+Once a week Vision also looks at your Agent Room sessions from the last 30 days (read
+from the Room's own files, no AI) and coaches your task prompts in three lines: how many
+went smoothly, what the smooth ones had that the rough ones lacked (named files, said
+what done looks like, a check command, listed steps, an example), and one tip. Ask "how
+are my prompts?" any time.
 
 Advanced and experimental features (phone chat, Discord, browser automation,
 proactive check-ins, Core link) are off by default and are described below.
