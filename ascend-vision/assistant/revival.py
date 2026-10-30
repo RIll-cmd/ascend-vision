@@ -7,7 +7,7 @@ only read, never changed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import json
 import logging
@@ -30,7 +30,9 @@ COUNTS = ('No', 'One', 'Two', 'Three')
 _LEAD = r"(?:(?:hey|ok|okay) )?(?:vision )?"
 _REVIVE = re.compile(rf"{_LEAD}(?:yes )?(?:revive(?: it)?|bring it back)")
 _LATER = re.compile(rf"{_LEAD}(?:later|maybe later|not now|next month|no|nope|not yet)")  # a bare no only postpones
-_FORGET = re.compile(rf"{_LEAD}(?:forget(?: about)? it|forget it for good)")
+_FORGET = re.compile(rf"{_LEAD}(?:forget(?: about)? it|forget it for good|drop it|drop)")
+_ARCHIVE = re.compile(rf"{_LEAD}archive(?: it)?(?: please)?")
+_SESSION_ID = re.compile(r'[A-Za-z0-9_-]{1,64}')
 _LIST = re.compile(rf"{_LEAD}(?:what did i leave(?: behind)?|what have i left(?: behind)?|anything unfinished"
                    r"|what's unfinished)")
 
@@ -42,6 +44,9 @@ class Leftover:
     label: str  # how Vision says it
     last: datetime
     detail: str
+    repo: str | None = field(default=None, compare=False)
+    ref: str | None = field(default=None, compare=False)  # branch name, issue number or worktree folder
+    start: dict | None = field(default=None, compare=False)  # an Agent Room start body, when it can restart there
 
 
 def _spoken(name: str) -> str:
@@ -65,7 +70,11 @@ def _age(last: datetime, now: datetime) -> str:
     return f'{days // 30} months ago'
 
 
-def left_branches(repo: Path, run_git, now: datetime) -> list[Leftover]:
+def _project(name: str, fallback: str) -> str:
+    return '-'.join(re.findall(r'[a-z0-9]+', name.lower()))[:40].strip('-') or fallback
+
+
+def left_branches(repo: Path, run_git, now: datetime, checked_out=frozenset()) -> list[Leftover]:
     head = (run_git(repo, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD') or '').strip()
     names = ([head.split('/', 1)[1]] if head.startswith('origin/') else []) + ['main', 'master']
     default = next((b for b in names if run_git(repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{b}')), None)
@@ -75,7 +84,8 @@ def left_branches(repo: Path, run_git, now: datetime) -> list[Leftover]:
     found = []
     for line in listing.splitlines():
         name, _, stamp = line.partition('\t')
-        if name == default or not stamp.strip().isdigit():
+        # A branch put away as archive/..., or open in a worktree (that worktree is its own leftover), is skipped.
+        if name == default or not stamp.strip().isdigit() or name.startswith('archive/') or name in checked_out:
             continue
         last = datetime.fromtimestamp(int(stamp))
         if not BRANCH_DAYS <= (now - last).days <= MAX_DAYS:
@@ -86,13 +96,78 @@ def left_branches(repo: Path, run_git, now: datetime) -> list[Leftover]:
         if not ahead.isdigit() or int(ahead) == 0:
             continue
         count = int(ahead)
+        detail = f"{count} commit{'' if count == 1 else 's'} not merged"
+        start = {'template': 'feature', 'project': _project(name, 'branch'), 'repo': str(repo),
+                 'task': (f'Finish the work left on branch {name} ({detail}). Read `git log {default}..{name}` and '
+                          f'`git diff {default}...{name}` first, then carry that work into this session.')}
         found.append(Leftover(f'branch:{repo.as_posix()}:{name}', 'branch',
-                              f'branch {_spoken(name)} in {_spoken(repo.name)}', last,
-                              f"{count} commit{'' if count == 1 else 's'} not merged"))
+                              f'branch {_spoken(name)} in {_spoken(repo.name)}', last, detail,
+                              repo=str(repo), ref=name, start=start))
     return found
 
 
-def left_room_sessions(payload, now: datetime) -> list[Leftover]:
+def _worktrees(repo: Path, run_git) -> list[dict]:
+    """``git worktree list --porcelain`` as dicts; the first is the main checkout."""
+    listing = run_git(repo, 'worktree', 'list', '--porcelain') or ''
+    entries = []
+    for block in listing.strip().split('\n\n'):
+        entry = {}
+        for line in block.splitlines():
+            key, _, value = line.partition(' ')
+            entry[key] = value.strip()
+        if entry.get('worktree'):
+            if entry.get('branch', '').startswith('refs/heads/'):
+                entry['branch'] = entry['branch'][len('refs/heads/'):]
+            entries.append(entry)
+    return entries
+
+
+def left_worktrees(repo: Path, run_git, now: datetime, entries=None) -> list[Leftover]:
+    """Extra worktrees not committed to for two weeks, or whose folder is gone. Vision never removes them."""
+    found = []
+    for entry in (entries if entries is not None else _worktrees(repo, run_git))[1:]:
+        folder, branch = Path(entry['worktree']), entry.get('branch')
+        gone = 'prunable' in entry
+        stamp = (run_git(repo, 'log', '-1', '--format=%ct', entry.get('HEAD', '')) if gone
+                 else run_git(folder, 'log', '-1', '--format=%ct')) or ''
+        if not stamp.strip().isdigit():
+            continue
+        last = datetime.fromtimestamp(int(stamp.strip()))
+        if not BRANCH_DAYS <= (now - last).days <= MAX_DAYS:
+            continue
+        if gone:
+            detail = 'its folder is gone'
+        else:
+            changed = len([line for line in (run_git(folder, 'status', '--porcelain') or '').splitlines() if line.strip()])
+            detail = (f"{changed} file{'' if changed == 1 else 's'} not committed" if changed
+                      else f'on branch {branch}, nothing uncommitted' if branch else 'nothing uncommitted')
+        found.append(Leftover(f'worktree:{folder.as_posix()}', 'worktree',
+                              f'worktree {folder.name} in {_spoken(repo.name)}', last, detail,
+                              repo=str(repo), ref=str(folder)))
+    return found
+
+
+def _room_start(room_data, session_id: str) -> dict | None:
+    """A stopped session's own start (task, repo, template, check), from its state.json."""
+    if room_data is None or not _SESSION_ID.fullmatch(session_id):
+        return None
+    try:
+        state = json.loads((Path(room_data) / 'sessions' / session_id / 'state.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    repo = state.get('repo') if isinstance(state, dict) else None
+    task, project = (state.get('task'), state.get('project')) if isinstance(state, dict) else (None, None)
+    if not (isinstance(repo, dict) and isinstance(repo.get('dir'), str) and isinstance(task, str) and task.strip()
+            and isinstance(project, str) and project):
+        return None
+    start = {'template': state.get('template') if isinstance(state.get('template'), str) else 'feature',
+             'project': project, 'task': task, 'repo': repo['dir']}
+    if isinstance(state.get('check'), str) and state['check'].strip():
+        start['check'] = state['check']
+    return start
+
+
+def left_room_sessions(payload, now: datetime, room_data=None) -> list[Leftover]:
     sessions = payload.get('sessions') if isinstance(payload, dict) else None
     if not isinstance(sessions, list):
         return []
@@ -110,8 +185,10 @@ def left_room_sessions(payload, now: datetime) -> list[Leftover]:
         if not ROOM_DAYS <= (now - last).days <= MAX_DAYS:
             continue
         detail = 'You stopped it' if stage == 'stopped' else f"It is waiting for you at the {stage[5:]} gate"
+        # A session waiting at a gate is still open in the Room; only a stopped one can be started again.
+        start = _room_start(room_data, str(session.get('id'))) if stage == 'stopped' else None
         found.append(Leftover(f"room:{session.get('id')}", 'room', f'the Agent Room session {title[:80]}', last,
-                              detail))
+                              detail, start=start))
     return found
 
 
@@ -130,7 +207,10 @@ def left_issues(repo: Path, run_gh, now: datetime) -> list[Leftover]:
             continue
         if ISSUE_DAYS <= (now - last).days <= MAX_DAYS:
             found.append(Leftover(f'issue:{repo.as_posix()}:{number}', 'issue',
-                                  f'issue {number} in {_spoken(repo.name)}, {title}', last, 'It is still open'))
+                                  f'issue {number} in {_spoken(repo.name)}, {title}', last, 'It is still open',
+                                  repo=str(repo), ref=str(number),
+                                  start={'template': 'feature', 'project': f'issue-{number}', 'repo': str(repo),
+                                         'issue': number}))
     return found
 
 
@@ -161,19 +241,42 @@ def default_repos(vision_repo: Path) -> list[Path]:
         return []
 
 
-def scan(repos, *, run_git, run_gh, room, now: datetime) -> list[Leftover]:
+def scan(repos, *, run_git, run_gh, room, now: datetime, room_data=None) -> list[Leftover]:
     found = []
     for repo in repos:
-        for finder, runner in ((left_branches, run_git), (left_issues, run_gh)):
+        repo = Path(repo)
+        try:
+            trees = _worktrees(repo, run_git)
+        except Exception:
+            trees = []
+        checked_out = {t['branch'] for t in trees[1:] if t.get('branch')}
+        for finder in (lambda: left_worktrees(repo, run_git, now, entries=trees),
+                       lambda: left_branches(repo, run_git, now, checked_out=checked_out),
+                       lambda: left_issues(repo, run_gh, now)):
             try:
-                found += finder(Path(repo), runner, now)
+                found += finder()
             except Exception as exc:  # one broken repo or a missing gh must not stop the rest
-                LOG.debug('Revival skipped %s (%s)', finder.__name__, type(exc).__name__)
+                LOG.debug('Revival skipped a finder (%s)', type(exc).__name__)
     try:
-        found += left_room_sessions(room(), now)
+        found += left_room_sessions(room(), now, room_data)
     except Exception as exc:
         LOG.debug('Revival Room read skipped (%s)', type(exc).__name__)
     return sorted(found, key=lambda item: item.last, reverse=True)
+
+
+def make_archiver(run_git, run_gh):
+    """item -> (ok, reply): a branch is renamed to archive/..., an issue closed as not planned; nothing is deleted."""
+    def archive(item: Leftover) -> tuple[bool, str]:
+        if item.kind == 'branch' and item.repo and item.ref:
+            if run_git(item.repo, 'branch', '-m', item.ref, f'archive/{item.ref}') is None:
+                return False, "I couldn't rename that branch; it may be checked out somewhere."
+            return True, f'Renamed the branch to archive/{item.ref}. Its commits are all still there.'
+        if item.kind == 'issue' and item.repo and item.ref:
+            if run_gh(item.repo, 'issue', 'close', item.ref, '--reason', 'not planned') is None:
+                return False, f"I couldn't close issue {item.ref}."
+            return True, f'Closed issue {item.ref} as not planned. You can reopen it on GitHub.'
+        return True, "Okay. I'll stop bringing it up; I never delete worktrees or sessions."
+    return archive
 
 
 def command_runner(program: str, timeout: float = 15.0):
@@ -218,8 +321,10 @@ class RevivalStore:
 
 class RevivalCoach:
     def __init__(self, store: RevivalStore, *, scan, announce, promise=None, clock=datetime.now, run=None,
-                 offer_window: float = 120.0):
+                 offer_window: float = 120.0, queue=None, archive=None):
         self.store, self.scan, self.announce, self.promise, self.clock = store, scan, announce, promise, clock
+        self.queue = queue  # start body -> (ok, reply): revive in the Agent Room
+        self.archive = archive  # leftover -> (ok, reply)
         self.run = run or (lambda job: threading.Thread(target=job, name='revival-scan', daemon=True).start())
         self.offer_window = offer_window
         self._lock = threading.Lock()
@@ -263,7 +368,7 @@ class RevivalCoach:
         mark = self._data['marks'].get(item.key)
         if not isinstance(mark, dict):  # a hand-edited entry of the wrong shape counts as no mark
             return False
-        if mark.get('status') == 'forgotten':
+        if mark.get('status') in ('forgotten', 'archived'):
             return True
         try:
             return now < datetime.fromisoformat(mark.get('until') or '')
@@ -301,7 +406,8 @@ class RevivalCoach:
             self._save()
             self._unspoken = True
         self.announce(f'Something you left: {item.label}, last touched {_age(item.last, now)}. {item.detail}. '
-                      'Revive it, later, or forget it?', on_said=self._opened(item))
+                      + ('Revive it, archive it, later, or forget it?' if self.archive else 'Revive it, later, or forget it?'),
+                      on_said=self._opened(item))
 
     def _opened(self, item: Leftover):
         def opened() -> None:
@@ -320,25 +426,37 @@ class RevivalCoach:
                 if found is None or self._scanning:
                     return 'Let me look. Ask me again in a minute.'
                 return self._list(found, now)
+        action = None
         with self._lock:
             offer = self._open_offer(now)
             if not offer:
                 return None
             item = offer[0]
-            if _REVIVE.fullmatch(said):
+            if _REVIVE.fullmatch(said) and self.queue is not None and item.start:
+                self._offer, action = None, 'revived'
+            elif self.archive is not None and _ARCHIVE.fullmatch(said):
+                self._offer, action = None, 'archived'
+            elif _REVIVE.fullmatch(said):
                 self._mark(item, 'revived', now + POSTPONE)
                 if self.promise is not None:
                     tomorrow = datetime.combine(now.date() + timedelta(days=1), datetime.min.time()).replace(hour=10)
                     self.promise(f'get back to {item.label}', tomorrow)
                     return "Okay. I'll check on it tomorrow."
                 return "Okay. It's yours again."
-            if _LATER.fullmatch(said):
+            elif _LATER.fullmatch(said):
                 self._mark(item, 'later', now + POSTPONE)
                 return "Okay. I'll bring it up again next month."
-            if _FORGET.fullmatch(said):
+            elif _FORGET.fullmatch(said) or _ARCHIVE.fullmatch(said):
                 self._mark(item, 'forgotten', None)
                 return "Okay. I won't bring it up again."
-            return None
+            else:
+                return None
+        # The Room, git and gh can take seconds; the lock is not held for them.
+        ok, reply = self.queue(item.start) if action == 'revived' else self.archive(item)
+        if ok:
+            with self._lock:
+                self._mark(item, action, now + POSTPONE if action == 'revived' else None)
+        return reply
 
     def _mark(self, item: Leftover, status: str, until: datetime | None) -> None:
         self._offer = None

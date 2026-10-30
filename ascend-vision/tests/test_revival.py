@@ -262,3 +262,192 @@ def test_an_empty_scan_tries_again_the_next_day_not_next_week(tmp_path):
     clock.now += timedelta(days=1)
     coach.tick(True)
     assert len(scans) == 2
+
+
+# Gap 4: Room queue, stale worktrees, archive
+
+def test_a_left_branch_carries_a_room_start_and_skips_archived_and_worktree_branches():
+    run_git = git_for([('main', ago(1)), ('claude/fix-login', ago(21)), ('archive/old', ago(30)),
+                       ('in-tree', ago(30))], {'claude/fix-login': 4, 'archive/old': 2, 'in-tree': 3})
+    (found,) = left_branches(REPO, run_git, NOW, checked_out={'in-tree'})
+    assert (found.repo, found.ref) == (str(REPO), 'claude/fix-login')
+    assert found.start == {
+        'template': 'feature', 'project': 'claude-fix-login', 'repo': str(REPO),
+        'task': ('Finish the work left on branch claude/fix-login (4 commits not merged). Read '
+                 '`git log main..claude/fix-login` and `git diff main...claude/fix-login` first, '
+                 'then carry that work into this session.')}
+
+
+def test_a_left_issue_starts_from_the_issue():
+    def run_gh(repo, *args):
+        return json.dumps([{'number': 12, 'title': 'Crash on start', 'updatedAt': '2026-09-01T10:00:00Z'}])
+    (found,) = left_issues(REPO, run_gh, NOW)
+    assert found.start == {'template': 'feature', 'project': 'issue-12', 'repo': str(REPO), 'issue': 12}
+    assert found.ref == '12'
+
+
+def test_only_a_stopped_room_session_restarts_from_its_own_start(tmp_path):
+    stamp = (NOW - timedelta(days=5)).astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+    state = tmp_path / 'sessions' / 'a'
+    state.mkdir(parents=True)
+    (state / 'state.json').write_text(json.dumps({
+        'task': 'Add dark mode', 'project': 'dark-mode', 'template': 'feature', 'check': 'npm test',
+        'repo': {'dir': 'D:/ascend_hub', 'branch': 'room/dark-mode'}}))
+    payload = {'sessions': [{'id': 'a', 'stage': 'stopped', 'title': 'Add dark mode', 'createdAt': stamp},
+                            {'id': 'b', 'stage': 'gate-plan', 'title': 'Fix the queue', 'createdAt': stamp},
+                            {'id': 'c', 'stage': 'stopped', 'title': 'No state', 'createdAt': stamp}]}
+    a, b, c = left_room_sessions(payload, NOW, room_data=tmp_path)
+    assert a.start == {'template': 'feature', 'project': 'dark-mode', 'task': 'Add dark mode',
+                       'repo': 'D:/ascend_hub', 'check': 'npm test'}
+    assert b.start is None and c.start is None
+
+
+def worktree_git(listing, last, dirty):
+    def run_git(repo, *args):
+        if args[:2] == ('worktree', 'list'):
+            return listing
+        if args[0] == 'log':
+            return last.get(Path(repo).name)
+        if args[0] == 'status':
+            return dirty.get(Path(repo).name, '')
+        raise AssertionError(args)
+    return run_git
+
+
+def test_stale_worktrees_are_leftovers_and_vision_never_offers_to_start_them():
+    from assistant.revival import left_worktrees
+    listing = ('worktree D:/ascend_hub\nHEAD aaa\nbranch refs/heads/main\n\n'
+               'worktree D:/ascend_hub/.worktrees/old\nHEAD bbb\nbranch refs/heads/feat/old\n\n'
+               'worktree D:/ascend_hub/.worktrees/dirty\nHEAD ccc\nbranch refs/heads/feat/dirty\n\n'
+               'worktree D:/ascend_hub/.worktrees/fresh\nHEAD ddd\nbranch refs/heads/feat/fresh\n\n'
+               'worktree D:/ascend_hub/.worktrees/gone\nHEAD eee\ndetached\n'
+               'prunable gitdir file points to non-existent location\n')
+    run_git = worktree_git(listing, {'old': f'{ago(20)}\n', 'dirty': f'{ago(40)}\n', 'fresh': f'{ago(2)}\n',
+                                     'ascend_hub': f'{ago(60)}\n'},  # a gone folder: its HEAD, read in the repo
+                           {'dirty': ' M a.py\n?? b.py\n'})
+    found = left_worktrees(REPO, run_git, NOW)
+    assert [(f.label, f.detail, f.start) for f in found] == [
+        ('worktree old in ascend hub', 'on branch feat/old, nothing uncommitted', None),
+        ('worktree dirty in ascend hub', '2 files not committed', None),
+        ('worktree gone in ascend hub', 'its folder is gone', None)]
+    assert found[0].key == 'worktree:D:/ascend_hub/.worktrees/old'
+    assert left_worktrees(REPO, lambda repo, *args: None, NOW) == []
+
+
+def test_scan_skips_branches_that_a_worktree_already_covers():
+    listing = ('worktree D:/r\nHEAD a\nbranch refs/heads/main\n\n'
+               'worktree D:/r/.worktrees/w\nHEAD b\nbranch refs/heads/feat/w\n')
+    branches = git_for([('main', ago(1)), ('feat/w', ago(30))], {'feat/w': 2})
+
+    def run_git(repo, *args):
+        if args[:2] == ('worktree', 'list'):
+            return listing
+        if args[0] == 'log':
+            return f'{ago(30)}\n'
+        if args[0] == 'status':
+            return ''
+        return branches(repo, *args)
+    found = scan([Path('D:/r')], run_git=run_git, run_gh=lambda *a: None, room=lambda: None, now=NOW)
+    assert [f.kind for f in found] == ['worktree']
+
+
+def room_coach(tmp_path, queue=None, archive=None, promises=None, items=None):
+    from assistant.revival import Leftover
+    clock, pacer = Clock(), Pacer()
+    start = {'template': 'feature', 'project': 'issue-12', 'repo': 'D:/r', 'issue': 12}
+    items = items or [Leftover('issue:D:/r:12', 'issue', 'issue 12 in r, Crash', NOW - timedelta(days=40),
+                               'It is still open', repo='D:/r', ref='12', start=start)]
+    promise = (lambda what, due: promises.append(what) or True) if promises is not None else None
+    coach = RevivalCoach(RevivalStore(tmp_path / 'revival.json'), scan=lambda: list(items), announce=pacer,
+                         promise=promise, clock=clock, run=lambda job: job(), queue=queue, archive=archive)
+    coach.tick(True)
+    return coach, pacer
+
+
+def marks(folder):
+    return json.loads((folder / 'revival.json').read_text())['marks']
+
+
+def test_revive_queues_the_leftover_in_the_room(tmp_path):
+    bodies = []
+
+    def queue(body):
+        bodies.append(body)
+        return True, 'Queued in the Agent Room.'
+    coach, pacer = room_coach(tmp_path, queue=queue, archive=lambda item: (True, 'ok'))
+    assert pacer.said[-1].endswith('Revive it, archive it, later, or forget it?')
+    assert coach.intercept('revive it') == 'Queued in the Agent Room.'
+    assert bodies == [{'template': 'feature', 'project': 'issue-12', 'repo': 'D:/r', 'issue': 12}]
+    assert marks(tmp_path)['issue:D:/r:12']['status'] == 'revived'
+
+
+def test_a_failed_room_queue_marks_nothing_and_no_start_means_a_promise(tmp_path):
+    from assistant.revival import Leftover
+    coach, pacer = room_coach(tmp_path, queue=lambda body: (False, 'I could not reach the agent room.'))
+    assert coach.intercept('revive it') == 'I could not reach the agent room.'
+    assert marks(tmp_path) == {}
+    promises = []
+    tree = Leftover('worktree:D:/r/w', 'worktree', 'worktree w in r', NOW - timedelta(days=30),
+                    'its folder is gone', repo='D:/r', ref='D:/r/w')
+    coach, pacer = room_coach(tmp_path / 'x', queue=lambda body: (True, 'q'), promises=promises, items=[tree])
+    assert coach.intercept('revive it') == "Okay. I'll check on it tomorrow."
+    assert promises == ['get back to worktree w in r']
+
+
+def test_the_room_queue_runs_outside_the_coach_lock(tmp_path):
+    import threading
+    got = []
+
+    def queue(body):
+        def try_lock():
+            took = coach._lock.acquire(timeout=0.5)
+            got.append(took)
+            if took:
+                coach._lock.release()
+        other = threading.Thread(target=try_lock)
+        other.start()
+        other.join()
+        return True, 'Queued.'
+
+    coach, pacer = room_coach(tmp_path, queue=queue)
+    assert coach.intercept('revive it') == 'Queued.' and got == [True]
+
+
+def test_archive_puts_it_away_and_drop_forgets(tmp_path):
+    archived = []
+
+    def archive(item):
+        archived.append(item.ref)
+        return True, 'Closed issue 12.'
+    coach, pacer = room_coach(tmp_path, archive=archive)
+    assert coach.intercept('archive it') == 'Closed issue 12.'
+    assert archived == ['12']
+    assert marks(tmp_path)['issue:D:/r:12']['status'] == 'archived'
+    coach, pacer = room_coach(tmp_path / 'b', archive=lambda item: (False, 'I could not close issue 12.'))
+    assert coach.intercept('archive') == 'I could not close issue 12.'
+    assert marks(tmp_path / 'b') == {}
+    coach, pacer = room_coach(tmp_path / 'c')
+    assert pacer.said[-1].endswith('Revive it, later, or forget it?')
+    assert coach.intercept('drop it') == "Okay. I won't bring it up again."
+
+
+def test_the_archiver_renames_branches_closes_issues_and_never_deletes():
+    from assistant.revival import Leftover, make_archiver
+    calls = []
+
+    def run(repo, *args):
+        calls.append((str(repo), args))
+        return None if 'fail' in args[2] else ''
+    archive = make_archiver(run, run)
+    branch = Leftover('b', 'branch', 'branch x', NOW, 'd', repo='D:/r', ref='feat/x')
+    issue = Leftover('i', 'issue', 'issue 12', NOW, 'd', repo='D:/r', ref='12')
+    tree = Leftover('w', 'worktree', 'worktree w', NOW, 'd', repo='D:/r', ref='D:/r/w')
+    room = Leftover('s', 'room', 'session', NOW, 'd')
+    assert archive(branch) == (True, 'Renamed the branch to archive/feat/x. Its commits are all still there.')
+    assert archive(issue) == (True, 'Closed issue 12 as not planned. You can reopen it on GitHub.')
+    assert archive(tree)[1] == "Okay. I'll stop bringing it up; I never delete worktrees or sessions."
+    assert archive(room)[0] is True
+    assert calls == [('D:/r', ('branch', '-m', 'feat/x', 'archive/feat/x')),
+                     ('D:/r', ('issue', 'close', '12', '--reason', 'not planned'))]
+    failing = Leftover('b', 'branch', 'branch x', NOW, 'd', repo='D:/r', ref='fail')
+    assert archive(failing) == (False, "I couldn't rename that branch; it may be checked out somewhere.")

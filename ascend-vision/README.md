@@ -107,11 +107,15 @@ Room on, a line pointing to it is added to that repo's Room project memory, so a
 see it.
 
 Once a week, during the day, Vision brings back one thing you left: a branch with
-unmerged commits untouched for two weeks, an Agent Room session you stopped or left
-at a gate, or a GitHub issue you opened that nobody touched for a month. It looks at
-the git repos next to Vision's own folder (or `revival.repos`) and only reads them.
-Answer "revive it" (it becomes a promise for tomorrow), "later" (asked again in a
-month) or "forget it"; ask "what did I leave?" any time.
+unmerged commits untouched for two weeks, an extra worktree nobody committed to for two
+weeks (or whose folder is gone), an Agent Room session you stopped or left at a gate,
+or a GitHub issue you opened that nobody touched for a month. It looks at the git
+repos next to Vision's own folder (or `revival.repos`). Answer "revive it" (with the
+Agent Room on, a branch, issue or stopped session is queued there and starts when the
+Room is free; anything else becomes a promise for tomorrow), "archive it" (a branch is
+renamed to `archive/<name>` and keeps every commit; an issue is closed as not planned;
+worktrees and sessions are never deleted, only not asked about again), "later" (asked
+again in a month) or "forget it"; ask "what did I leave?" any time.
 
 Once a week Vision also looks at your Agent Room sessions from the last 30 days (read
 from the Room's own files, no AI) and coaches your task prompts in three lines: how many

@@ -904,7 +904,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         revival_config = getattr(config, 'revival', None)
         if revival_config is not None and revival_config.enabled:
             try:
-                from assistant.revival import RevivalCoach, RevivalStore, command_runner, default_repos, scan
+                from assistant.revival import (RevivalCoach, RevivalStore, command_runner, default_repos,
+                                               make_archiver, scan)
                 from assistant.slump import read_room_sessions
                 run_git, run_gh = command_runner('git'), command_runner('gh', timeout=20.0)
                 common = run_git(Path(__file__).resolve().parent, 'rev-parse', '--path-format=absolute',
@@ -915,8 +916,12 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 revival_coach = RevivalCoach(
                     RevivalStore(Path(config.storage.database).parent / 'revival.json'),
                     scan=lambda: scan(repos, run_git=run_git, run_gh=run_gh,
-                                      room=lambda: read_room_sessions(revival_room_url), now=datetime.now()),
-                    announce=announce_paced, promise=promise_coach.add if promise_coach is not None else None)
+                                      room=lambda: read_room_sessions(revival_room_url), now=datetime.now(),
+                                      room_data=(Path(common.strip()).parent.parent / 'ascend_hub' / '.sites-runtime'
+                                                 / 'agent-room') if common else None),
+                    announce=announce_paced, promise=promise_coach.add if promise_coach is not None else None,
+                    queue=room_client.queue if room_client is not None else None,
+                    archive=make_archiver(run_git, run_gh))
             except Exception as exc:
                 LOG.warning('Leftover check-ins unavailable (%s)', type(exc).__name__)
 
