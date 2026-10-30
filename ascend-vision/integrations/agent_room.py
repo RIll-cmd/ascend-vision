@@ -133,6 +133,25 @@ def newest_repo(dirs: list, run_git) -> str | None:
     return best
 
 
+def _same_dir(a: str, b: str) -> bool:
+    return a.replace('\\', '/').rstrip('/').lower() == b.replace('\\', '/').rstrip('/').lower()
+
+
+def room_start_queue(client: RoomClient):
+    """start body -> (ok, reply), refusing what the Room would only fail later in its queue."""
+    def queue(body: dict) -> tuple[bool, str]:
+        status = client.status()
+        if status is None:
+            return False, "I couldn't reach the agent room."
+        repos = [r.get('dir') for r in status.get('repos') or [] if isinstance(r, dict) and isinstance(r.get('dir'), str)]
+        if body.get('repo') and not any(_same_dir(body['repo'], d) for d in repos):
+            return False, "The Agent Room can't use that repo yet. Add it to the Room's folders first."
+        if len(str(body.get('task') or '')) > 4000:
+            return False, 'That task is too long for the Agent Room.'
+        return client.queue(body)
+    return queue
+
+
 def promise_queue(client: RoomClient, *, newest):
     """what -> (ok, spoken reply): queues a promise in the Agent Room."""
     def queue(what: str) -> tuple[bool, str]:

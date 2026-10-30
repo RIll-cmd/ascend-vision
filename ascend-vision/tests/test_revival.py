@@ -297,8 +297,9 @@ def test_only_a_stopped_room_session_restarts_from_its_own_start(tmp_path):
                             {'id': 'b', 'stage': 'gate-plan', 'title': 'Fix the queue', 'createdAt': stamp},
                             {'id': 'c', 'stage': 'stopped', 'title': 'No state', 'createdAt': stamp}]}
     a, b, c = left_room_sessions(payload, NOW, room_data=tmp_path)
-    assert a.start == {'template': 'feature', 'project': 'dark-mode', 'task': 'Add dark mode',
-                       'repo': 'D:/ascend_hub', 'check': 'npm test'}
+    assert a.start == {'template': 'feature', 'project': 'dark-mode', 'repo': 'D:/ascend_hub', 'check': 'npm test',
+                       'task': ('Add dark mode\n\n(Revived by Vision: the earlier session left its work on branch '
+                                '`room/dark-mode`. Read `git log room/dark-mode` first and carry that work over.)')}
     assert b.start is None and c.start is None
 
 
@@ -310,6 +311,8 @@ def worktree_git(listing, last, dirty):
             return last.get(Path(repo).name)
         if args[0] == 'status':
             return dirty.get(Path(repo).name, '')
+        if args[:2] == ('rev-parse', '--absolute-git-dir'):
+            return None
         raise AssertionError(args)
     return run_git
 
@@ -344,7 +347,7 @@ def test_scan_skips_branches_that_a_worktree_already_covers():
             return listing
         if args[0] == 'log':
             return f'{ago(30)}\n'
-        if args[0] == 'status':
+        if args[0] == 'status' or args[:2] == ('rev-parse', '--absolute-git-dir'):
             return ''
         return branches(repo, *args)
     found = scan([Path('D:/r')], run_git=run_git, run_gh=lambda *a: None, room=lambda: None, now=NOW)
@@ -447,10 +450,11 @@ def test_the_archiver_renames_branches_closes_issues_and_never_deletes():
     assert archive(issue) == (True, 'Closed issue 12 as not planned. You can reopen it on GitHub.')
     assert archive(tree)[1] == "Okay. I'll stop bringing it up; I never delete worktrees or sessions."
     assert archive(room)[0] is True
-    assert calls == [('D:/r', ('branch', '-m', 'feat/x', 'archive/feat/x')),
+    assert calls == [('D:/r', ('rev-parse', '--verify', '--quiet', 'refs/heads/archive/feat/x')),
+                     ('D:/r', ('branch', '-m', 'feat/x', 'archive/feat/x')),
                      ('D:/r', ('issue', 'close', '12', '--reason', 'not planned'))]
     failing = Leftover('b', 'branch', 'branch x', NOW, 'd', repo='D:/r', ref='fail')
-    assert archive(failing) == (False, "I couldn't rename that branch; it may be checked out somewhere.")
+    assert archive(failing) == (False, "I couldn't rename that branch; git refused, so it is left as it was.")
 
 
 # Gap 3 review fixes
@@ -465,3 +469,95 @@ def test_named_repo_needs_two_words_or_the_word_repo_and_prefers_the_longest():
     assert named_repo('app server setup', dirs) == 'D:/app-server'
     assert named_repo('deploy ascend hub', dirs) == 'D:/ascend_hub'
     assert named_repo('fix the ascend_hub login', dirs) == 'D:/ascend_hub'
+
+
+# Gap 4 review fixes
+
+def test_a_revived_room_session_is_told_about_its_old_branch_and_refs_or_length_skip_it(tmp_path):
+    stamp = (NOW - timedelta(days=5)).astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+    def session(sid, **state):
+        folder = tmp_path / 'sessions' / sid
+        folder.mkdir(parents=True)
+        base = {'project': 'p', 'template': 'feature', 'repo': {'dir': 'D:/r', 'branch': 'room/p-abc', 'base': 'main'}}
+        (folder / 'state.json').write_text(json.dumps({**base, **state}))
+        return {'id': sid, 'stage': 'stopped', 'title': sid, 'createdAt': stamp}
+    payload = {'sessions': [session('a', task='Add dark mode'), session('b', task='Fix @src/app.ts please'),
+                            session('c', task='x' * 3990), session('d', task='Fix it', issue={'number': 7})]}
+    a, b, c, d = left_room_sessions(payload, NOW, room_data=tmp_path)
+    assert a.start['task'] == ('Add dark mode\n\n(Revived by Vision: the earlier session left its work on branch '
+                               '`room/p-abc`. Read `git log main..room/p-abc` first and carry that work over.)')
+    assert b.start is None and c.start is None
+    assert d.start == {'template': 'feature', 'project': 'p', 'repo': 'D:/r', 'issue': 7}
+
+
+def test_worktree_age_counts_recent_git_activity_and_room_worktrees_are_skipped(tmp_path):
+    from assistant.revival import left_worktrees
+    gitdir = tmp_path / 'gitdir'
+    gitdir.mkdir()
+    (gitdir / 'index').write_text('x')  # touched just now
+    listing = ('worktree D:/r\nHEAD a\nbranch refs/heads/main\n\n'
+               'worktree D:/r/.worktrees/busy\nHEAD b\nbranch refs/heads/feat/busy\n\n'
+               'worktree D:/builds/worktrees/p\nHEAD c\nbranch refs/heads/room/p-abc\n')
+
+    def run_git(repo, *args):
+        if args[:2] == ('worktree', 'list'):
+            return listing
+        if args[0] == 'log':
+            return f'{ago(30)}\n'
+        if args[0] == 'rev-parse':
+            return str(gitdir) + '\n'
+        return ''
+    assert left_worktrees(Path('D:/r'), run_git, datetime.now()) == []
+
+
+def test_the_main_checkouts_branch_is_never_offered_but_a_gone_worktrees_branch_is():
+    listing = ('worktree D:/r\nHEAD a\nbranch refs/heads/feat/here\n\n'
+               'worktree D:/r/.worktrees/g\nHEAD b\nbranch refs/heads/feat/gone\nprunable gone\n')
+    branches = git_for([('main', ago(1)), ('feat/here', ago(30)), ('feat/gone', ago(30))],
+                       {'feat/here': 2, 'feat/gone': 3})
+
+    def run_git(repo, *args):
+        if args[:2] == ('worktree', 'list'):
+            return listing
+        if args[0] in ('log', 'status', 'rev-parse') and args[:3] != ('rev-parse', '--verify', '--quiet'):
+            return None
+        return branches(repo, *args)
+    found = scan([Path('D:/r')], run_git=run_git, run_gh=lambda *a: None, room=lambda: None, now=NOW)
+    assert [(f.kind, f.ref) for f in found] == [('branch', 'feat/gone')]
+
+
+def test_archive_picks_a_free_name_when_archive_x_exists():
+    from assistant.revival import Leftover, make_archiver
+    calls = []
+
+    def run_git(repo, *args):
+        calls.append(args)
+        if args[:3] == ('rev-parse', '--verify', '--quiet'):
+            return 'abc\n' if args[3] == 'refs/heads/archive/feat/x' else None
+        return ''
+    archive = make_archiver(run_git, run_git, clock=lambda: NOW)
+    ok, said = archive(Leftover('b', 'branch', 'branch x', NOW, 'd', repo='D:/r', ref='feat/x'))
+    assert ok and said == 'Renamed the branch to archive/feat/x-2026-10-30. Its commits are all still there.'
+    assert calls[-1] == ('branch', '-m', 'feat/x', 'archive/feat/x-2026-10-30')
+
+
+def test_room_starts_are_checked_against_the_rooms_repos_before_queueing():
+    from integrations.agent_room import room_start_queue
+
+    class Client:
+        posted = []
+
+        def status(self):
+            return {'repos': [{'dir': 'D:\\ascend_hub'.replace('\\\\', '\\')}]}
+
+        def queue(self, body):
+            self.posted.append(body)
+            return True, 'Queued in the Agent Room.'
+    client = Client()
+    queue = room_start_queue(client)
+    assert queue({'repo': 'd:/ascend_hub/', 'task': 't', 'project': 'p'}) == (True, 'Queued in the Agent Room.')
+    assert queue({'repo': 'D:/notes', 'task': 't', 'project': 'p'}) == (
+        False, "The Agent Room can't use that repo yet. Add it to the Room's folders first.")
+    assert queue({'repo': 'D:/ascend_hub', 'task': 'x' * 4001, 'project': 'p'})[0] is False
+    assert len(client.posted) == 1

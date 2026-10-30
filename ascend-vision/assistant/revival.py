@@ -33,6 +33,8 @@ _LATER = re.compile(rf"{_LEAD}(?:later|maybe later|not now|next month|no|nope|no
 _FORGET = re.compile(rf"{_LEAD}(?:forget(?: about)? it|forget it for good|drop it|drop)")
 _ARCHIVE = re.compile(rf"{_LEAD}archive(?: it)?(?: please)?")
 _SESSION_ID = re.compile(r'[A-Za-z0-9_-]{1,64}')
+_REFS = re.compile(r'(?:^|\s)@\S')
+MAX_TASK = 4000  # the Room's limit for a task
 _LIST = re.compile(rf"{_LEAD}(?:what did i leave(?: behind)?|what have i left(?: behind)?|anything unfinished"
                    r"|what's unfinished)")
 
@@ -127,12 +129,21 @@ def left_worktrees(repo: Path, run_git, now: datetime, entries=None) -> list[Lef
     found = []
     for entry in (entries if entries is not None else _worktrees(repo, run_git))[1:]:
         folder, branch = Path(entry['worktree']), entry.get('branch')
+        if branch and branch.startswith('room/'):
+            continue  # an Agent Room session's own worktree; the Room session is the leftover
         gone = 'prunable' in entry
         stamp = (run_git(repo, 'log', '-1', '--format=%ct', entry.get('HEAD', '')) if gone
                  else run_git(folder, 'log', '-1', '--format=%ct')) or ''
         if not stamp.strip().isdigit():
             continue
-        last = datetime.fromtimestamp(int(stamp.strip()))
+        times = [int(stamp.strip())]
+        gitdir = None if gone else (run_git(folder, 'rev-parse', '--absolute-git-dir') or '').strip()
+        for name in ('index', 'HEAD') if gitdir else ():
+            try:  # staging, switching or checking a status touches these, so a fresh worktree is not "stale"
+                times.append(int((Path(gitdir) / name).stat().st_mtime))
+            except OSError:
+                pass
+        last = datetime.fromtimestamp(max(times))
         if not BRANCH_DAYS <= (now - last).days <= MAX_DAYS:
             continue
         if gone:
@@ -157,11 +168,23 @@ def _room_start(room_data, session_id: str) -> dict | None:
         return None
     repo = state.get('repo') if isinstance(state, dict) else None
     task, project = (state.get('task'), state.get('project')) if isinstance(state, dict) else (None, None)
-    if not (isinstance(repo, dict) and isinstance(repo.get('dir'), str) and isinstance(task, str) and task.strip()
-            and isinstance(project, str) and project):
+    if not (isinstance(repo, dict) and isinstance(repo.get('dir'), str) and isinstance(project, str) and project):
         return None
-    start = {'template': state.get('template') if isinstance(state.get('template'), str) else 'feature',
-             'project': project, 'task': task, 'repo': repo['dir']}
+    template = state.get('template') if isinstance(state.get('template'), str) else 'feature'
+    issue = state.get('issue')
+    if isinstance(issue, dict) and type(issue.get('number')) is int:  # its saved task holds the issue text already
+        return {'template': template, 'project': project, 'repo': repo['dir'], 'issue': issue['number']}
+    # @file and @diff point at what the repo held then; the Room would refuse them now.
+    if not (isinstance(task, str) and task.strip()) or _REFS.search(task):
+        return None
+    branch, base = repo.get('branch'), repo.get('base')
+    if isinstance(branch, str) and branch:
+        since = f'{base}..{branch}' if isinstance(base, str) and base else branch
+        task += (f'\n\n(Revived by Vision: the earlier session left its work on branch `{branch}`. '
+                 f'Read `git log {since}` first and carry that work over.)')
+    if len(task) > MAX_TASK:
+        return None
+    start = {'template': template, 'project': project, 'task': task, 'repo': repo['dir']}
     if isinstance(state.get('check'), str) and state['check'].strip():
         start['check'] = state['check']
     return start
@@ -258,7 +281,8 @@ def scan(repos, *, run_git, run_gh, room, now: datetime, room_data=None) -> list
             trees = _worktrees(repo, run_git)
         except Exception:
             trees = []
-        checked_out = {t['branch'] for t in trees[1:] if t.get('branch')}
+        # The main checkout's branch is in use too; a worktree whose folder is gone no longer holds its branch.
+        checked_out = {t['branch'] for t in trees if t.get('branch') and 'prunable' not in t}
         for finder in (lambda: left_worktrees(repo, run_git, now, entries=trees),
                        lambda: left_branches(repo, run_git, now, checked_out=checked_out),
                        lambda: left_issues(repo, run_gh, now)):
@@ -273,13 +297,16 @@ def scan(repos, *, run_git, run_gh, room, now: datetime, room_data=None) -> list
     return sorted(found, key=lambda item: item.last, reverse=True)
 
 
-def make_archiver(run_git, run_gh):
+def make_archiver(run_git, run_gh, clock=datetime.now):
     """item -> (ok, reply): a branch is renamed to archive/..., an issue closed as not planned; nothing is deleted."""
     def archive(item: Leftover) -> tuple[bool, str]:
         if item.kind == 'branch' and item.repo and item.ref:
-            if run_git(item.repo, 'branch', '-m', item.ref, f'archive/{item.ref}') is None:
-                return False, "I couldn't rename that branch; it may be checked out somewhere."
-            return True, f'Renamed the branch to archive/{item.ref}. Its commits are all still there.'
+            target = f'archive/{item.ref}'
+            if run_git(item.repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{target}'):
+                target = f'{target}-{clock():%Y-%m-%d}'  # an earlier archive of the same name stays as it was
+            if run_git(item.repo, 'branch', '-m', item.ref, target) is None:
+                return False, "I couldn't rename that branch; git refused, so it is left as it was."
+            return True, f'Renamed the branch to {target}. Its commits are all still there.'
         if item.kind == 'issue' and item.repo and item.ref:
             if run_gh(item.repo, 'issue', 'close', item.ref, '--reason', 'not planned') is None:
                 return False, f"I couldn't close issue {item.ref}."

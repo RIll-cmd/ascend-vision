@@ -906,6 +906,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             try:
                 from assistant.revival import (RevivalCoach, RevivalStore, command_runner, default_repos,
                                                make_archiver, scan)
+                from integrations.agent_room import room_start_queue
                 from assistant.slump import read_room_sessions
                 run_git, run_gh = command_runner('git'), command_runner('gh', timeout=20.0)
                 common = run_git(Path(__file__).resolve().parent, 'rev-parse', '--path-format=absolute',
@@ -920,7 +921,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                                       room_data=(Path(common.strip()).parent.parent / 'ascend_hub' / '.sites-runtime'
                                                  / 'agent-room') if common else None),
                     announce=announce_paced, promise=promise_coach.add if promise_coach is not None else None,
-                    queue=room_client.queue if room_client is not None else None,
+                    queue=room_start_queue(room_client) if room_client is not None else None,
                     archive=make_archiver(run_git, run_gh))
             except Exception as exc:
                 LOG.warning('Leftover check-ins unavailable (%s)', type(exc).__name__)
