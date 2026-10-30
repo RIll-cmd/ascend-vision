@@ -185,6 +185,14 @@ def _room_start(room_data, session_id: str) -> dict | None:
     if len(task) > MAX_TASK:
         return None
     start = {'template': template, 'project': project, 'task': task, 'repo': repo['dir']}
+    extras = [e.get('dir') for e in state.get('extraRepos') or [] if isinstance(e, dict) and isinstance(e.get('dir'), str)]
+    if extras:  # a session over several repos comes back over the same ones
+        start['extraRepos'] = extras
+    for name in ('lint', 'coverage'):
+        if isinstance(state.get(name), str) and state[name].strip():
+            start[name] = state[name]
+    if isinstance(state.get('models'), dict) and state['models']:
+        start['models'] = state['models']
     if isinstance(state.get('check'), str) and state['check'].strip():
         start['check'] = state['check']
     return start
@@ -345,7 +353,10 @@ class RevivalStore:
             return {'last_asked': None, 'marks': {}}
         except ValueError as exc:
             LOG.warning('Revival file unreadable (%s); starting fresh', type(exc).__name__)
-            os.replace(self.path, self.path.with_name(self.path.name + '.bad'))
+            try:
+                os.replace(self.path, self.path.with_name(self.path.name + '.bad'))
+            except OSError:
+                pass  # a locked file is simply read fresh next time
             return {'last_asked': None, 'marks': {}}
 
     def save(self, data: dict) -> None:
@@ -378,9 +389,10 @@ class RevivalCoach:
             LOG.warning('Revival state not saved (%s)', type(exc).__name__)
 
     def _start_scan(self) -> None:
-        if self._scanning:
-            return
-        self._scanning = True
+        with self._lock:  # the chat thread and the main loop can both ask at once
+            if self._scanning:
+                return
+            self._scanning = True
 
         def job() -> None:
             try:
@@ -438,9 +450,7 @@ class RevivalCoach:
                 # Nothing to offer (or every source failed): look again tomorrow, the week is not used up.
                 self._retry_after = now + timedelta(days=1)
                 return
-            self._data['last_asked'] = now.isoformat()
-            self._save()
-            self._unspoken = True
+            self._unspoken = True  # the week starts when the question is heard, not while a focus block holds it
         self.announce(f'Something you left: {item.label}, last touched {_age(item.last, now)}. {item.detail}. '
                       + ('Revive it, archive it, later, or forget it?' if self.archive else 'Revive it, later, or forget it?'),
                       on_said=self._opened(item))
@@ -449,6 +459,8 @@ class RevivalCoach:
         def opened() -> None:
             with self._lock:
                 self._unspoken = False
+                self._data['last_asked'] = self.clock().isoformat()
+                self._save()
                 self._offer = (item, self.clock(), getattr(self.announce, 'question_seq', None))
         return opened
 
@@ -489,6 +501,10 @@ class RevivalCoach:
                 return None
         # The Room, git and gh can take seconds; the lock is not held for them.
         ok, reply = self.queue(item.start) if action == 'revived' else self.archive(item)
+        if not ok and action == 'revived' and self.promise is not None:  # the Room is down: the owner still gets it
+            tomorrow = datetime.combine(now.date() + timedelta(days=1), datetime.min.time()).replace(hour=10)
+            self.promise(f'get back to {item.label}', tomorrow)
+            ok, reply = True, f"{reply} I'll remind you about it tomorrow instead."
         if ok:
             with self._lock:
                 self._mark(item, action, now + POSTPONE if action == 'revived' else None)

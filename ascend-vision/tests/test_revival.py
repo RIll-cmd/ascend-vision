@@ -561,3 +561,62 @@ def test_room_starts_are_checked_against_the_rooms_repos_before_queueing():
         False, "The Agent Room can't use that repo yet. Add it to the Room's folders first.")
     assert queue({'repo': 'D:/ascend_hub', 'task': 'x' * 4001, 'project': 'p'})[0] is False
     assert len(client.posted) == 1
+
+
+# Polish: fallbacks, multi-repo starts, one scan at a time, asked only once heard
+
+def test_a_failed_room_queue_falls_back_to_a_promise(tmp_path):
+    promises = []
+    coach, pacer = room_coach(tmp_path, queue=lambda body: (False, "I couldn't reach the agent room."), promises=promises)
+    assert coach.intercept('revive it') == "I couldn't reach the agent room. I'll remind you about it tomorrow instead."
+    assert promises == ['get back to issue 12 in r, Crash']
+    assert marks(tmp_path)['issue:D:/r:12']['status'] == 'revived'
+
+
+def test_a_revived_session_keeps_its_extra_repos_and_commands(tmp_path):
+    stamp = (NOW - timedelta(days=5)).astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+    folder = tmp_path / 'sessions' / 'a'
+    folder.mkdir(parents=True)
+    (folder / 'state.json').write_text(json.dumps({
+        'task': 'Sync the API', 'project': 'sync', 'template': 'feature', 'lint': 'npm run lint', 'coverage': '',
+        'models': {'claude': 'sonnet'}, 'repo': {'dir': 'D:/hub'},
+        'extraRepos': [{'id': 'vision', 'dir': 'D:/vision', 'worktree': 'D:/b/w'}, {'id': 'odd'}]}))
+    (found,) = left_room_sessions({'sessions': [{'id': 'a', 'stage': 'stopped', 'title': 'Sync', 'createdAt': stamp}]},
+                                  NOW, room_data=tmp_path)
+    assert found.start == {'template': 'feature', 'project': 'sync', 'task': 'Sync the API', 'repo': 'D:/hub',
+                           'lint': 'npm run lint', 'models': {'claude': 'sonnet'}, 'extraRepos': ['D:/vision']}
+
+
+def test_only_one_scan_runs_at_a_time(tmp_path):
+    import threading
+    started, release = [], threading.Event()
+
+    def slow_scan():
+        started.append(1)
+        release.wait(2)
+        return []
+    coach = RevivalCoach(RevivalStore(tmp_path / 'revival.json'), scan=slow_scan, announce=Pacer(), clock=Clock())
+    workers = [threading.Thread(target=coach.intercept, args=('what did I leave',)) for _ in range(5)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    release.set()
+    assert len(started) == 1
+
+
+def test_the_week_starts_when_the_question_is_heard(tmp_path):
+    from assistant.revival import Leftover
+    clock, held = Clock(), []
+
+    class HeldPacer(Pacer):
+        def __call__(self, text, on_said=None, urgent=False):
+            held.append(on_said)  # a focus block holds it
+    pacer = HeldPacer()
+    item = Leftover('room:b', 'room', 'the Agent Room session X', NOW - timedelta(days=5), 'You stopped it')
+    coach = RevivalCoach(RevivalStore(tmp_path / 'revival.json'), scan=lambda: [item], announce=pacer, clock=clock,
+                         run=lambda job: job())
+    coach.tick(True)
+    assert len(held) == 1 and not (tmp_path / 'revival.json').exists()
+    held[0]()
+    assert json.loads((tmp_path / 'revival.json').read_text())['last_asked'] == NOW.isoformat()
