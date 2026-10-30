@@ -605,9 +605,14 @@ class ReleaseNotesConfig:
             raise ValueError('release_notes.enabled must be a YAML boolean')
         if not isinstance(self.folder, str):
             raise ValueError('release_notes.folder must be a string')
-        if not isinstance(self.screenshots, (list, tuple)) or any(
-                not isinstance(s, str) or '=' not in s or not s.split('=', 1)[1].strip().startswith(('http://', 'https://'))
-                for s in self.screenshots):
+        def page(line) -> bool:
+            from urllib.parse import urlsplit
+            if not isinstance(line, str) or '=' not in line:
+                return False
+            name, url = (part.strip() for part in line.split('=', 1))
+            parts = urlsplit(url)
+            return bool(name) and parts.scheme in ('http', 'https') and bool(parts.hostname)
+        if not isinstance(self.screenshots, (list, tuple)) or not all(page(s) for s in self.screenshots):
             raise ValueError('release_notes.screenshots must be a list of "repo=http://..." lines')
         object.__setattr__(self, 'screenshots', tuple(self.screenshots))
 

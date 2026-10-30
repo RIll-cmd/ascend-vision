@@ -154,8 +154,10 @@ Say "write release notes for ascend hub" (or just "write release notes" for the 
 committed to last; "vision" is enough for ascend-vision). Vision groups the commits since
 its last notes for that repo (or the last tag, or the last two weeks, or at least the last
 20 commits) into New, Fixes, Docs and Other, asks the AI for a short "what's new" list and
-a post you could share, and saves it to `data/release-notes/`. It never writes into the
-repo, tags or posts anything. Paste two to five posts you wrote into `voice.md` in the
+a post you could share, and saves it to `data/release-notes/`. It never tags or posts
+anything. Within ten minutes, say "add it to the readme" to put the "What's new" list in
+a marked section near the top of that repo's `README.md` (said again, it replaces that
+section), and "commit the readme" to commit just that file. Paste two to five posts you wrote into `voice.md` in the
 release-notes folder (blank line between them) and the post is written in your voice.
 Fresh screenshots of the pages in `release_notes.screenshots` (`"repo=url"` lines; Hub's
 local page by default) are taken with the installed headless browser and linked in the

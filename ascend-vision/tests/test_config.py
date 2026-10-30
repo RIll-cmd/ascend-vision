@@ -382,3 +382,11 @@ def test_release_notes_screenshot_pages(tmp_path):
     path = tmp_path / 'config.yaml'
     path.write_text('release_notes:\n  screenshots: []\n', encoding='utf-8')
     assert load_config(path).release_notes.screenshots == ()
+
+
+def test_release_notes_screenshot_lines_need_a_name_and_a_host():
+    from config import ReleaseNotesConfig
+    for bad in (['=http://x/'], ['hub=http://'], ['hub=https:///path']):
+        with pytest.raises(ValueError, match='release_notes.screenshots'):
+            ReleaseNotesConfig(screenshots=bad)
+    assert ReleaseNotesConfig(screenshots=['hub=https://example.com:8443/a?b=c']).screenshots

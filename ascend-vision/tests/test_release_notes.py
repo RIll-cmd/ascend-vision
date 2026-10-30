@@ -244,3 +244,90 @@ def test_a_second_run_the_same_day_keeps_the_first_runs_screenshot(tmp_path):
     assert (folder / 'ascend_hub-2026-10-30-shot-1.png').read_bytes() == b'ascend_hub-2026-10-30-shot-1.png'
     assert '![Screenshot 1](ascend_hub-2026-10-30-2-shot-1.png)' in (folder / 'ascend_hub-2026-10-30-2.md').read_text(
         encoding='utf-8')
+
+
+# Polish: README "what's new", commit it, one browser, a fair cap, keys by path
+
+def test_add_it_to_the_readme_writes_a_marked_section_and_replaces_it_later(tmp_path):
+    hub = tmp_path / 'ascend_hub'
+    git = make_repo(hub, ['feat: dark mode'])
+    (hub / 'README.md').write_text('# Ascend Hub\n\nThe hub.\n\n## Setup\n\nRun it.\n', encoding='utf-8')
+    git('add', 'README.md')
+    git('commit', '-q', '-m', 'docs: readme')
+    story = lambda name, commits: {'whats_new': ['You can switch on dark mode.'], 'post': 'p'}
+    notes, said, jobs = notes_for(tmp_path, [hub], story=story)
+    assert notes.intercept('add it to the readme') is None  # nothing written yet: chat
+    notes.intercept('write release notes for ascend hub')
+    finish(jobs)
+    assert notes.intercept('add it to the readme') == "Added what's new to ascend_hub's README. It is not committed yet."
+    text = (hub / 'README.md').read_text(encoding='utf-8')
+    assert text.startswith('# Ascend Hub\n\n<!-- vision-whats-new:start -->\n## What\'s new (2026-10-30)\n\n'
+                           '- You can switch on dark mode.\n<!-- vision-whats-new:end -->\n\nThe hub.')
+    assert notes.intercept('add it to the readme') == "Added what's new to ascend_hub's README. It is not committed yet."
+    assert (hub / 'README.md').read_text(encoding='utf-8').count('vision-whats-new:start') == 1
+    (hub / 'other.txt').write_text('x')
+    git('add', 'other.txt')
+    assert notes.intercept('commit the readme') == 'Committed README.md to ascend_hub on main.'
+    assert subprocess.run(['git', 'show', '--name-only', '--format='], cwd=hub, capture_output=True,
+                          text=True).stdout.split() == ['README.md']
+
+
+def test_a_repo_without_a_readme_is_said(tmp_path):
+    hub = tmp_path / 'ascend_hub'
+    make_repo(hub, ['feat: dark mode'])
+    notes, said, jobs = notes_for(tmp_path, [hub])
+    notes.intercept('write release notes for ascend hub')
+    finish(jobs)
+    assert notes.intercept('add it to the readme') == 'ascend_hub has no README.md, so I left it alone.'
+
+
+def test_the_commit_list_is_cut_on_a_line_and_leaves_room_for_the_voice():
+    from assistant.release_notes import make_story_writer
+    asked = []
+
+    class Router:
+        def generate_structured_response(self, prompt, **kwargs):
+            asked.append(prompt)
+            return {'whats_new': ['A'], 'post': 'p'}
+    commits = parse_log(''.join(f'{n:04d}{SEP}feat: a fairly long change subject number {n}{SEP}2026-10-29T10:00:00Z{END}'
+                                for n in range(300)))
+    make_story_writer(Router())('hub', commits)
+    make_story_writer(Router(), voice=lambda: ['v' * 1500])('hub', commits)
+    plain, voiced = asked
+    assert len(plain) <= 12000 and plain.splitlines()[-1].startswith('- feat: a fairly long change subject number')
+    assert len(voiced) <= 12000 and len(plain) > len(voiced.split('\n\nPosts the owner wrote')[0])
+
+
+def test_one_browser_for_all_of_a_runs_pages(tmp_path):
+    from assistant.release_notes import make_screenshotter
+    events = []
+
+    class Shooter:
+        def start(self):
+            events.append('start')
+
+        def stop(self):
+            events.append('stop')
+
+        def __call__(self, url, path):
+            events.append(url)
+            path.write_bytes(b'png')
+    shots = make_screenshotter(['hub=http://a/', 'hub=http://b/'], Shooter())
+    assert shots(tmp_path / 'hub', 'hub-1', tmp_path)[0] == ['hub-1-shot-1.png', 'hub-1-shot-2.png']
+    assert events == ['start', 'http://a/', 'http://b/', 'stop']
+    assert shots(tmp_path / 'other', 'o', tmp_path) == ([], False) and events[-1] == 'stop' and len(events) == 4
+
+
+def test_two_repos_with_the_same_folder_name_keep_their_own_place(tmp_path):
+    first, second = tmp_path / 'a' / 'app', tmp_path / 'b' / 'app'
+    make_repo(first, ['feat: one'])
+    make_repo(second, ['feat: two'])
+    notes, said, jobs = notes_for(tmp_path, [first])
+    notes.intercept('write release notes for app')
+    finish(jobs)
+    notes.repos = lambda: [second]
+    notes.intercept('write release notes for app')
+    finish(jobs)
+    assert said[-1].startswith('Release notes for app are ready: 1 change')
+    state = json.loads((tmp_path / 'notes' / 'state.json').read_text())
+    assert first.as_posix() in state and second.as_posix() in state

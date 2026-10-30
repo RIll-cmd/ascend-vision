@@ -976,8 +976,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         release_config = getattr(config, 'release_notes', None)
         if release_config is not None and release_config.enabled:
             try:
-                from assistant.release_notes import (ReleaseNotes, make_screenshotter, make_story_writer, read_voice,
-                                                     shoot_page)
+                from assistant.release_notes import (PageShooter, ReleaseNotes, make_screenshotter, make_story_writer,
+                                                     read_voice)
                 from assistant.revival import command_runner, default_repos
                 from llm_router import LLMRouter
                 notes_git = command_runner('git')
@@ -994,7 +994,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     repos=notes_repos, run_git=notes_git,
                     write_story=make_story_writer(LLMRouter(config.llm), voice=lambda: read_voice(notes_folder)),
                     folder=notes_folder, announce=announce_paced,
-                    screenshots=make_screenshotter(release_config.screenshots, shoot_page))
+                    screenshots=make_screenshotter(release_config.screenshots, PageShooter()))
             except Exception as exc:
                 LOG.warning('Release notes unavailable (%s)', type(exc).__name__)
 

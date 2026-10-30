@@ -26,6 +26,12 @@ _CONVENTIONAL = re.compile(r'^(\w+)(?:\([^)]*\))?!?:\s*(.+)$')
 _ASK = re.compile(r"(?:(?:hey|ok|okay) )?(?:vision )?(?:can you )?(?:write|make|draft) (?:the |some )?release notes"
                   r"(?: for (?P<repo>[a-z' ]{1,40}?))?(?: please)?")
 LAST_FEW = 20  # a repo with no notes yet and nothing in two weeks still gets its latest commits
+MAX_REQUEST = 12000
+AFTER_SECONDS = 600  # "add it to the readme" and "commit the readme" work for ten minutes after the notes
+README_START, README_END = '<!-- vision-whats-new:start -->', '<!-- vision-whats-new:end -->'
+_README = re.compile(r"(?:(?:hey|ok|okay) )?(?:vision )?(?:add|put|write) (?:it|that|them|what's new|whats new"
+                     r"|the what's new) (?:in|into|to) (?:the )?readme(?: please)?")
+_COMMIT_README = re.compile(r"(?:(?:hey|ok|okay) )?(?:vision )?commit (?:the |that )?readme(?: please)?")
 STORY_PROMPT = (
     'You turn commit subjects into release notes for the people who use the app, not for developers. Reply with '
     'JSON only: {"whats_new": [1 to 5 short plain sentences about what people can do now or what got better], '
@@ -128,11 +134,16 @@ def read_voice(folder: Path) -> list[str]:
 
 def make_story_writer(router, voice=None):
     def write(name: str, commits: list[Commit]):
-        listing = '\n'.join(f'- {c.kind}: {c.subject}' for c in commits)
-        request = f'App: {name}\n{listing}'[:9500]
         samples = voice() if voice else []
-        if samples:
-            request += '\n\nPosts the owner wrote (match the voice, do not copy):\n' + '\n---\n'.join(samples)
+        tail = ('\n\nPosts the owner wrote (match the voice, do not copy):\n' + '\n---\n'.join(samples)
+                if samples else '')
+        request, room = f'App: {name}', MAX_REQUEST - len(tail) - len(name) - 6
+        for c in commits:  # whole lines only, newest first, as many as fit beside the voice
+            line = f'\n- {c.kind}: {c.subject}'
+            if len(request) + len(line) > room:
+                break
+            request += line
+        request += tail
         return router.generate_structured_response(request, system_prompt=STORY_PROMPT,
                                                    task='reasoning', max_tokens=800)
     return write
@@ -148,29 +159,62 @@ def make_screenshotter(pairs, shoot):
 
     def shots(repo: Path, base: str, folder: Path) -> tuple[list[str], bool]:
         names, failed = [], False
-        for n, url in enumerate(urls.get(Path(repo).name.lower(), []), 1):
-            path = Path(folder) / f'{base}-shot-{n}.png'
-            try:
-                shoot(url, path)
-                names.append(path.name)
-            except Exception as exc:  # the app's server is not running: notes without that picture
-                LOG.info('Release notes screenshot skipped (%s)', type(exc).__name__)
-                failed = True
+        pages = urls.get(Path(repo).name.lower(), [])
+        if not pages:
+            return names, failed
+        try:
+            if hasattr(shoot, 'start'):
+                shoot.start()  # one browser for all of a run's pages
+            for n, url in enumerate(pages, 1):
+                path = Path(folder) / f'{base}-shot-{n}.png'
+                try:
+                    shoot(url, path)
+                    names.append(path.name)
+                except Exception as exc:  # the app's server is not running: notes without that picture
+                    LOG.info('Release notes screenshot skipped (%s)', type(exc).__name__)
+                    failed = True
+        except Exception as exc:  # the browser would not start
+            LOG.info('Release notes screenshots skipped (%s)', type(exc).__name__)
+            failed = True
+        finally:
+            if hasattr(shoot, 'stop'):
+                try:
+                    shoot.stop()
+                except Exception:
+                    pass
         return names, failed
     return shots
 
 
-def shoot_page(url: str, path: Path) -> None:
-    """A fresh 1440x900 screenshot of a page in headless Chromium (Playwright is already installed)."""
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+class PageShooter:
+    """Fresh 1440x900 screenshots in headless Chromium (Playwright is already installed); one browser per run."""
+
+    def __init__(self):
+        self._playwright = self._browser = None
+
+    def start(self) -> None:
+        from playwright.sync_api import sync_playwright
+        self._playwright = sync_playwright().start()
+        self._browser = self._playwright.chromium.launch(headless=True)
+
+    def __call__(self, url: str, path: Path) -> None:
+        page = self._browser.new_page(viewport={'width': 1440, 'height': 900})
         try:
-            page = browser.new_page(viewport={'width': 1440, 'height': 900})
-            page.goto(url, wait_until='networkidle', timeout=20_000)
+            # "load", then a moment for the app to draw: a page that polls never goes network-idle.
+            page.goto(url, wait_until='load', timeout=20_000)
+            page.wait_for_timeout(1500)
             page.screenshot(path=str(path))
         finally:
-            browser.close()
+            page.close()
+
+    def stop(self) -> None:
+        try:
+            if self._browser is not None:
+                self._browser.close()
+        finally:
+            if self._playwright is not None:
+                self._playwright.stop()
+            self._playwright = self._browser = None
 
 
 def _plain(text, limit: int) -> str:
@@ -204,6 +248,7 @@ class ReleaseNotes:
                  screenshots=None):
         self.repos, self.run_git, self.write_story = repos, run_git, write_story
         self.screenshots = screenshots  # (repo, base name, folder) -> (file names, any failed)
+        self._latest = None  # (repo, what's new, when): for "add it to the readme"
         self.folder, self.announce, self.clock = Path(folder), announce, clock
         self.run = run or (lambda job: threading.Thread(target=job, name='release-notes', daemon=True).start())
         self._lock = threading.Lock()
@@ -222,7 +267,14 @@ class ReleaseNotes:
         return max(repos, key=self._newest, default=None)
 
     def intercept(self, text: str) -> str | None:
-        asked = _ASK.fullmatch(words(text))
+        said = words(text)
+        latest = self._latest
+        if latest and (self.clock() - latest[2]).total_seconds() <= AFTER_SECONDS:
+            if _README.fullmatch(said):
+                return self._readme(latest)
+            if _COMMIT_README.fullmatch(said):
+                return self._commit_readme(latest[0])
+        asked = _ASK.fullmatch(said)
         if not asked:
             return None
         with self._lock:
@@ -234,6 +286,46 @@ class ReleaseNotes:
             self._busy = True
         self.run(lambda: self._write(repo))
         return f'Writing the release notes for {_spoken(repo.name)}.'
+
+    def _readme(self, latest) -> str:
+        """Writes (or replaces) a marked "What's new" section near the top of the repo's README.md; uncommitted."""
+        repo, items, when = latest
+        path = Path(repo) / 'README.md'
+        try:
+            with open(path, encoding='utf-8', newline='') as file:
+                text = file.read()
+        except FileNotFoundError:
+            return f'{Path(repo).name} has no README.md, so I left it alone.'
+        except OSError:
+            return f"I couldn't read {Path(repo).name}'s README."
+        eol = '\r\n' if '\r\n' in text else '\n'
+        section = eol.join([README_START, f"## What's new ({when:%Y-%m-%d})", '']
+                           + [f'- {_plain(item, 200)}' for item in items] + [README_END]) + eol
+        start, end = text.find(README_START), text.find(README_END)
+        if 0 <= start < end:
+            stop = end + len(README_END)
+            stop += len(eol) if text.startswith(eol, stop) else 0
+            text = text[:start] + section + text[stop:]
+        else:
+            heading = re.search(r'^# .*(?:\r?\n)(?:\r?\n)?', text, flags=re.M)
+            at = heading.end() if heading else 0
+            text = text[:at] + section + eol + text[at:]
+        try:
+            with open(path, 'w', encoding='utf-8', newline='') as file:
+                file.write(text)
+        except OSError:
+            return f"I couldn't write {Path(repo).name}'s README."
+        return f"Added what's new to {Path(repo).name}'s README. It is not committed yet."
+
+    def _commit_readme(self, repo: Path) -> str | None:
+        if not (self.run_git(repo, 'status', '--porcelain', '--', 'README.md') or '').strip():
+            return None
+        # Only the README goes in the commit, whatever else is staged.
+        if (self.run_git(repo, 'add', '--', 'README.md') is None
+                or self.run_git(repo, 'commit', '-q', '-m', "docs: what's new", '--', 'README.md') is None):
+            return "Git didn't commit the README, so the change is still waiting."
+        branch = (self.run_git(repo, 'rev-parse', '--abbrev-ref', 'HEAD') or '').strip() or 'the current branch'
+        return f'Committed README.md to {Path(repo).name} on {branch}.'
 
     def _state(self) -> dict:
         try:
@@ -269,7 +361,8 @@ class ReleaseNotes:
         if not head:
             self.announce(f'Nothing new in {name} since the last notes.')
             return
-        last = state.get(repo.name)
+        key = repo.as_posix()  # two repos may share a folder name
+        last = state.get(key, state.get(repo.name))
         span = self._range(repo, last, head)
         fmt = f'--format=%h{SEP}%s{SEP}%cI{END}'
         commits = parse_log(self.run_git(repo, 'log', '--no-merges', f'--max-count={MAX_COMMITS}', fmt, *span, '--')
@@ -295,8 +388,10 @@ class ReleaseNotes:
             path, n = self.folder / f'{base}-{n}.md', n + 1
         shots, failed = self.screenshots(repo, path.stem, self.folder) if self.screenshots else ([], False)
         path.write_text(render_notes(name, now, commits, story, shots), encoding='utf-8')
+        self._latest = (repo, story['whats_new'], now)
         if head:
-            state[repo.name] = head
+            state[key] = head
+            state.pop(repo.name, None)
             temporary = self.folder / 'state.json.tmp'
             temporary.write_text(json.dumps(state, indent=1), encoding='utf-8')
             os.replace(temporary, self.folder / 'state.json')
