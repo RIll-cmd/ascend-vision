@@ -665,7 +665,7 @@ def test_microphone_hub_status_reaches_assistant_without_replacing_session_statu
             pass
 
     class Listener:
-        def __init__(self, _config, *, callback, unmatched_callback, is_speaking):
+        def __init__(self, _config, *, callback, unmatched_callback, is_speaking, dictating=None):
             self.callback = callback
             self.unmatched_callback = unmatched_callback
 
