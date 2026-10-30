@@ -265,3 +265,29 @@ def test_a_named_pdf_is_read_and_latest_still_means_newest(tmp_path):
     finish(jobs)
     assert calls == [('lease.pdf', 'application/pdf', len(b'%PDF-1.4 lease'))]
     assert reader.intercept('read the latest pdf') == "I don't see a PDF in Downloads from the last week."
+
+
+# Gap 6 review fixes: names
+
+def test_digits_in_a_pdf_name_count(tmp_path):
+    reader, calls, said_back, jobs = reader_for(tmp_path)
+    picked = []
+    reader.find = lambda name: picked.append(name)
+    reader.intercept('read the 2025 tax pdf')
+    assert picked == ['2025 tax']
+
+
+@pytest.mark.parametrize('said', ['read this pdf', 'read that pdf', 'check the last downloaded pdf', 'read it pdf'])
+def test_this_or_that_pdf_is_not_a_file_name(tmp_path, said):
+    reader, calls, said_back, jobs = reader_for(tmp_path)
+    reader.find = lambda name: (_ for _ in ()).throw(AssertionError(name))
+    assert reader.intercept(said) is None
+
+
+def test_pdf_folders_include_onedrive_desktop_and_documents(tmp_path, monkeypatch):
+    from assistant.read_for_me import pdf_folders
+    home, onedrive = tmp_path / 'home', tmp_path / 'home' / 'OneDrive'
+    for folder in (home / 'Downloads', onedrive / 'Desktop', home / 'Documents'):
+        folder.mkdir(parents=True)
+    monkeypatch.setenv('OneDrive', str(onedrive))
+    assert pdf_folders(home / 'Downloads', home) == [home / 'Downloads', onedrive / 'Desktop', home / 'Documents']

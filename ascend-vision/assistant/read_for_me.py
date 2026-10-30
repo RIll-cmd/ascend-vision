@@ -35,8 +35,10 @@ _SCREEN = re.compile(rf"{_LEAD}(?:read (?:this|this page|my screen|the screen){_
 _CAMERA = re.compile(rf"{_LEAD}(?:read (?:what i'm holding|what i am holding|this paper|the paper){_TAIL}"
                      r"|check this paper)")
 _PDF = re.compile(rf"{_LEAD}(?:read|check) (?:my |the )?(?:latest|last|newest) (?:download|pdf){_TAIL}")
-_NAMED = re.compile(rf"{_LEAD}(?:read|check) (?:the |my |a )?(?:pdf (?:called|named) (?P<a>[a-z' ]+?)"
-                    rf"|(?P<b>[a-z' ]+?) pdf){_TAIL}")
+_NAMED = re.compile(rf"{_LEAD}(?:read|check) (?:the |my |a )?(?:pdf (?:called|named) (?P<a>[a-z0-9' ]+?)"
+                    rf"|(?P<b>[a-z0-9' ]+?) pdf){_TAIL}")
+# "read this pdf" is about the screen, "the last downloaded pdf" about the newest: neither is a file name.
+_NOT_A_NAME = {'this', 'that', 'it', 'last', 'latest', 'newest', 'new', 'recent', 'downloaded', 'the', 'my', 'a'}
 
 
 class MissingKey(Exception):
@@ -166,6 +168,21 @@ def find_pdf(folders, wanted: str, now: datetime) -> Path | None:
     return best[1] if best and asked else None
 
 
+def pdf_folders(downloads: Path, home: Path) -> list[Path]:
+    """Downloads, Desktop and Documents that exist, OneDrive's copies too (OneDrive often moves them)."""
+    import os
+    onedrive = os.environ.get('OneDrive')
+    candidates = [Path(downloads)]
+    for name in ('Desktop', 'Documents'):
+        candidates += [Path(home) / name] + ([Path(onedrive) / name] if onedrive else [])
+    seen, found = set(), []
+    for folder in candidates:
+        if folder.is_dir() and str(folder).lower() not in seen:
+            seen.add(str(folder).lower())
+            found.append(folder)
+    return found
+
+
 def capture_active_monitor() -> Image.Image:
     """The monitor the active window is on, so text stays readable and other screens stay private."""
     from screen_auditor import capture_desktop
@@ -229,13 +246,14 @@ class DocumentReader:
 
     def intercept(self, text: str) -> str | None:
         said = words(text)
-        named = None if _PDF.fullmatch(said) else _NAMED.fullmatch(said)
+        digits = ' '.join(re.sub(r"[^a-z0-9' ]", ' ', text.lower()).split())  # words() drops "2025"
+        named = None if _PDF.fullmatch(said) else _NAMED.fullmatch(digits)
         source = ('screen' if _SCREEN.fullmatch(said) else 'camera' if _CAMERA.fullmatch(said)
                   else 'pdf' if _PDF.fullmatch(said) or named else None)
         if source is None:
             return None
         wanted = ' '.join(w for w in (named['a'] or named['b']).split() if w not in ('the', 'my', 'a')) if named else ''
-        if named and not wanted:
+        if named and set(wanted.split()) <= _NOT_A_NAME:
             return None
         with self._lock:
             if self._busy:

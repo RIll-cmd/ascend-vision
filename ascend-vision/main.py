@@ -857,7 +857,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         read_config = getattr(config, 'read_for_me', None)
         if read_config is not None and read_config.enabled:
             try:
-                from assistant.read_for_me import DocumentReader, capture_active_monitor, make_gemini_reader
+                from assistant.read_for_me import (DocumentReader, capture_active_monitor, make_gemini_reader,
+                                                   pdf_folders)
 
                 def camera_image():
                     frame = latest_frame[0]
@@ -874,8 +875,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     announce=announce_local,
                     folder=Path(read_config.folder) if read_config.folder
                     else Path(config.storage.database).parent / 'readings',
-                    folders=[Path(read_config.downloads) if read_config.downloads else Path.home() / 'Downloads',
-                             Path.home() / 'Desktop', Path.home() / 'Documents'])
+                    folders=pdf_folders(Path(read_config.downloads) if read_config.downloads
+                                        else Path.home() / 'Downloads', Path.home()))
             except Exception as exc:
                 LOG.warning('Document reading unavailable (%s)', type(exc).__name__)
             try:

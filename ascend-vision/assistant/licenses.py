@@ -25,8 +25,12 @@ _LEAD = r"(?:(?:hey|ok|okay) )?(?:vision )?(?:can you |could you |please )?"
 _ASK = re.compile(rf"{_LEAD}(?:check (?:the )?(?:package |dependency )?licen[cs]es(?: for me)?(?: please)?"
                   r"|what licen[cs]es did (?:the agents|they) add)")
 _REQUIREMENT = re.compile(r'^\s*([A-Za-z0-9][A-Za-z0-9._-]*)')
-_MEDIUM = re.compile(r'\b(?:LGPL|MPL|EPL|CDDL|CC-BY-SA)', re.I)
-_HIGH = re.compile(r'\b(?:A?GPL|SSPL|BUSL|Commons Clause|UNLICENSED|proprietary)\b|-NC\b|non-?commercial', re.I)
+_MEDIUM = re.compile(r'\b(?:LGPL|MPL|EPL|CDDL|CC-BY-SA|Lesser General Public)', re.I)
+_HIGH = re.compile(r'\bA?GPL(?:v?\d|\b)|General Public License|\b(?:SSPL|BUSL|Commons Clause|UNLICENSED|proprietary)\b'
+                   r'|-NC\b|non-?commercial', re.I)
+_EXCEPTION = re.compile(r'classpath|linking|LLVM|GCC-exception|autoconf', re.I)  # copyleft that does not spread
+_SKIP_DIRS = ('node_modules/', '.venv/', 'venv/', 'vendor/', 'site-packages/')
+MAX_MANIFESTS = 50
 _LOW = re.compile(r'\b(?:MIT|Apache|BSD|ISC|0BSD|Unlicense|CC0|Zlib|PSF|Python|BlueOak|WTFPL)', re.I)
 
 
@@ -43,40 +47,57 @@ def _requirement(line: str) -> str | None:
 
 
 def manifest_packages(read) -> set[tuple[str, str]]:
-    """Every dependency named at one ref; ``read(path)`` returns a root file's text, ``read('')`` the file list."""
+    """Every dependency named at one ref; ``read(path)`` returns a file's text, ``read('')`` every tracked path."""
     found: set[tuple[str, str]] = set()
-    names = (read('') or '').split()
-    if 'package.json' in names:
-        try:
-            data = json.loads(read('package.json') or '')
-            for section in ('dependencies', 'devDependencies', 'optionalDependencies'):
-                if isinstance(data.get(section), dict):
-                    found |= {('npm', name) for name in data[section]}
-        except (ValueError, AttributeError):
-            pass
-    for name in names:
-        if re.fullmatch(r'requirements[\w.-]*\.txt', name):
-            found |= {('pypi', n) for n in map(_requirement, (read(name) or '').splitlines()) if n}
-    if 'pyproject.toml' in names:
-        try:
-            data = tomllib.loads(read('pyproject.toml') or '')
-        except (tomllib.TOMLDecodeError, TypeError):
-            data = {}
-        project = data.get('project') if isinstance(data.get('project'), dict) else {}
-        lines = list(project.get('dependencies') or [])
-        for extra in (project.get('optional-dependencies') or {}).values():
-            lines += list(extra or [])
-        found |= {('pypi', n) for n in map(_requirement, (str(x) for x in lines)) if n}
-        poetry = data.get('tool', {}).get('poetry', {}).get('dependencies', {})
-        if isinstance(poetry, dict):
-            found |= {('pypi', _pypi(n)) for n in poetry if n.lower() != 'python'}
+    paths = [p for p in (read('') or '').splitlines()
+             if p.strip() and not any(f'/{d}' in f'/{p}' for d in _SKIP_DIRS)]
+
+    def text(path: str) -> str:
+        return (read(path) or '').lstrip('\ufeff')  # a BOM would hide the first package
+
+    manifests = [p for p in paths if p.rsplit('/', 1)[-1] in ('package.json', 'pyproject.toml')
+                 or re.fullmatch(r'requirements[\w.-]*\.txt', p.rsplit('/', 1)[-1])][:MAX_MANIFESTS]
+    for path in manifests:
+        name = path.rsplit('/', 1)[-1]
+        if name == 'package.json':
+            try:
+                data = json.loads(text(path))
+                for section in ('dependencies', 'devDependencies', 'optionalDependencies'):
+                    if isinstance(data.get(section), dict):
+                        found |= {('npm', dep) for dep in data[section]}
+            except (ValueError, AttributeError):
+                pass
+        elif name != 'pyproject.toml':
+            found |= {('pypi', n) for n in map(_requirement, text(path).splitlines()) if n}
+        else:
+            found |= _pyproject(text(path))
+    return found
+
+
+def _pyproject(source: str) -> set[tuple[str, str]]:
+    found: set[tuple[str, str]] = set()
+    try:
+        data = tomllib.loads(source)
+    except (tomllib.TOMLDecodeError, TypeError):
+        data = {}
+    project = data.get('project') if isinstance(data.get('project'), dict) else {}
+    lines = list(project.get('dependencies') or [])
+    for extra in (project.get('optional-dependencies') or {}).values():
+        lines += list(extra or [])
+    found |= {('pypi', n) for n in map(_requirement, (str(x) for x in lines)) if n}
+    poetry = data.get('tool', {}).get('poetry', {}).get('dependencies', {})
+    if isinstance(poetry, dict):
+        found |= {('pypi', _pypi(n)) for n in poetry if n.lower() != 'python'}
     return found
 
 
 def added_packages(repo, base: str, branch: str, run_git) -> list[tuple[str, str]]:
+    """Packages named on ``branch`` and not at ``base``. A ref git cannot read raises: never a false all-clear."""
     def at(ref: str):
-        return lambda path: (run_git(repo, 'ls-tree', '--name-only', ref) if not path
-                             else run_git(repo, 'show', f'{ref}:{path}'))
+        listing = run_git(repo, 'ls-tree', '-r', '--name-only', ref)
+        if listing is None:
+            raise OSError(f'git could not read {ref}')
+        return lambda path: listing if not path else run_git(repo, 'show', f'{ref}:{path}')
     return sorted(manifest_packages(at(branch)) - manifest_packages(at(base)))
 
 
@@ -104,11 +125,18 @@ def license_of(ecosystem: str, name: str, fetch) -> str | None:
 def severity(license_name: str | None) -> str:
     if not license_name:
         return 'medium'
+    options = [o.strip(' ()') for o in re.split(r'\s+OR\s+', license_name.strip()) if o.strip(' ()')]
+    if len(options) > 1:  # a dual license: the user may pick the mildest one
+        return min((severity(o) for o in options), key=lambda level: -SEVERITIES.index(level))
     if _MEDIUM.search(license_name):
         return 'medium'
     if _HIGH.search(license_name):
-        return 'high'
+        return 'medium' if _EXCEPTION.search(license_name) else 'high'
     return 'low' if _LOW.search(license_name) else 'medium'
+
+
+def _count(n: int) -> str:
+    return NUMBERS[n] if n < len(NUMBERS) else str(n)
 
 
 def make_fetch(timeout: float = 10.0):
@@ -193,8 +221,8 @@ class LicenseCheck:
                 return
             spoken = '; '.join(f'{level}, {name} ' + (f'uses {lic}' if lic else 'has no license listed')
                                for level, name, _, lic in watch[:2])
-            more = f' {NUMBERS[len(watch) - 2]} more in the notes.' if len(watch) > 2 else ''
-            self.announce(f"{lead} {count}. {NUMBERS[min(len(watch), 10)]} to watch: {spoken}.{more} Notes saved.")
+            more = f' {_count(len(watch) - 2)} more in the notes.' if len(watch) > 2 else ''
+            self.announce(f"{lead} {count}. {_count(len(watch))} to watch: {spoken}.{more} Notes saved.")
         finally:
             with self._lock:
                 self._busy = False

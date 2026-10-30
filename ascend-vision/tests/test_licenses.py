@@ -125,3 +125,46 @@ def test_a_git_failure_is_said_plainly(tmp_path):
                          lookup=lambda eco, name: None)
     check.intercept('check the licenses')
     assert said == ["I couldn't read that session's packages."]
+
+
+# Gap 6 review fixes
+
+def test_a_git_failure_is_never_an_all_clear():
+    import pytest
+    with pytest.raises(OSError):
+        added_packages('D:/r', 'base', 'gone-branch', lambda repo, *args: None)
+
+
+def test_manifests_anywhere_in_the_tree_count_but_not_vendored_ones():
+    trees = {'base': {'': 'README.md\n'},
+             'room/x': {'': 'README.md\nascend-vision/requirements.txt\napp/package.json\n'
+                            'node_modules/foo/package.json\n.venv/lib/requirements.txt\n',
+                        'ascend-vision/requirements.txt': '\ufeffrich\n',
+                        'app/package.json': '\ufeff' + json.dumps({'dependencies': {'left-pad': '1'}}),
+                        'node_modules/foo/package.json': json.dumps({'dependencies': {'evil': '1'}})}}
+
+    def run_git(repo, *args):
+        if args[0] == 'ls-tree':
+            assert '-r' in args
+            return trees[args[-1]]['']
+        ref, _, path = args[1].partition(':')
+        return trees[ref].get(path)
+    assert added_packages('D:/r', 'base', 'room/x', run_git) == [('npm', 'left-pad'), ('pypi', 'rich')]
+
+
+def test_gpl_spellings_dual_licenses_and_exceptions():
+    for name in ('GPLv3', 'GPLv2+', 'AGPLv3', 'GNU General Public License v3 (GPLv3)',
+                 'GNU Affero General Public License v3'):
+        assert severity(name) == 'high', name
+    assert severity('GNU Lesser General Public License v3 (LGPLv3)') == 'medium'
+    assert severity('(MIT OR GPL-3.0)') == 'low'
+    assert severity('GPL-2.0-with-classpath-exception') == 'medium'
+    assert severity('Apache-2.0 WITH LLVM-exception') == 'low'
+
+
+def test_many_packages_to_watch_do_not_crash(tmp_path):
+    many = [('npm', f'p{n}') for n in range(14)]
+    check, said = check_for(tmp_path, SESSIONS, many, {})
+    check.intercept('check the licenses')
+    assert said[-1].startswith("The last Agent Room session, 'Add a date picker', added 14 packages. 14 to watch:")
+    assert '12 more in the notes.' in said[-1]
