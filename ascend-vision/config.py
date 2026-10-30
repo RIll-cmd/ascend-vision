@@ -570,6 +570,21 @@ class PromptCoachConfig:
 
 
 @dataclass(frozen=True)
+class ReadForMeConfig:
+    """"Read this for me": the screen, a held page or the newest PDF goes to Gemini for a red-flag summary."""
+    enabled: bool = True
+    downloads: str = ''  # '' is the user's Downloads folder
+    folder: str = ''  # '' keeps the notes in data/readings
+
+    def __post_init__(self):
+        if type(self.enabled) is not bool:
+            raise ValueError('read_for_me.enabled must be a YAML boolean')
+        for name in ('downloads', 'folder'):
+            if not isinstance(getattr(self, name), str):
+                raise ValueError(f'read_for_me.{name} must be a string')
+
+
+@dataclass(frozen=True)
 class WeatherConfig:
     """Daily weather briefing from Open-Meteo (free, no key) for the owner's places."""
     enabled: bool = True
@@ -851,6 +866,7 @@ class Config:
     show_me: ShowMeConfig = field(default_factory=ShowMeConfig)
     revival: RevivalConfig = field(default_factory=RevivalConfig)
     prompt_coach: PromptCoachConfig = field(default_factory=PromptCoachConfig)
+    read_for_me: ReadForMeConfig = field(default_factory=ReadForMeConfig)
     github: GitHubCoachConfig = field(default_factory=GitHubCoachConfig)
     phone_chat: PhoneChatConfig = field(default_factory=PhoneChatConfig)
     browser_automation: BrowserAutomationConfig = field(default_factory=BrowserAutomationConfig)
@@ -879,7 +895,7 @@ def load_config(path: Path) -> Config:
                  'weather': WeatherConfig, 'github': GitHubCoachConfig, 'agent_room': AgentRoomConfig,
                  'slump': SlumpConfig, 'promises': PromisesConfig,
                  'focus_doorman': FocusDoormanConfig, 'show_me': ShowMeConfig, 'revival': RevivalConfig,
-                 'prompt_coach': PromptCoachConfig,
+                 'prompt_coach': PromptCoachConfig, 'read_for_me': ReadForMeConfig,
                  'browser_automation': BrowserAutomationConfig}
     if data.keys() - sections.keys():
         raise ValueError(f'Unknown config sections: {data.keys() - sections.keys()}')

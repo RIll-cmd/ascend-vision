@@ -832,6 +832,32 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             except Exception as exc:
                 LOG.warning('How-to recording unavailable (%s)', type(exc).__name__)
 
+        latest_frame = [None]  # the newest camera image (BGR), for "read what I'm holding"
+        document_reader = None
+        read_config = getattr(config, 'read_for_me', None)
+        if read_config is not None and read_config.enabled:
+            try:
+                from assistant.read_for_me import DocumentReader, make_gemini_reader
+                from screen_auditor import capture_desktop
+
+                def camera_image():
+                    frame = latest_frame[0]
+                    if frame is None:
+                        return None
+                    from PIL import Image
+                    return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                document_reader = DocumentReader(
+                    ask_model=make_gemini_reader(
+                        os.getenv(config.llm.gemini_api_key_env, '').strip().split(',')[0].strip(),
+                        config.llm.gemini_model),
+                    screen=capture_desktop, camera=camera_image,
+                    downloads=Path(read_config.downloads) if read_config.downloads else Path.home() / 'Downloads',
+                    announce=announce_local,
+                    folder=Path(read_config.folder) if read_config.folder
+                    else Path(config.storage.database).parent / 'readings')
+            except Exception as exc:
+                LOG.warning('Document reading unavailable (%s)', type(exc).__name__)
+
         promise_coach = None
         promises_config = getattr(config, 'promises', None)
         if promises_config is not None and promises_config.enabled:
@@ -912,7 +938,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         def local_intercept(text):
             # Away/sleep first (it blocks everything while asleep), then eyes, weather, GitHub, food, promises, slumps.
             # While a how-to is recording, every line is narration, so the recorder comes right after away mode.
-            for handler in (away_mode, how_to, eye_calibrator, focus_doorman, weather_coach, github_coach,
+            for handler in (away_mode, how_to, document_reader, eye_calibrator, focus_doorman, weather_coach,
+                            github_coach,
                             nutrition_coach, promise_coach, revival_coach, prompt_coach, slump_coach):
                 if handler is not None:
                     try:
@@ -1286,6 +1313,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 raise
             dropped += max(0, packet.sequence - sequence - 1)
             sequence = packet.sequence
+            latest_frame[0] = packet.image
             consumed += 1
             if window_created:
                 calibration_drag["frame_width"] = packet.image.shape[1]

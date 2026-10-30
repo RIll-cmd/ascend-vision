@@ -320,6 +320,18 @@ def test_prompt_coach_config_defaults_and_validation(tmp_path):
     assert load_config(path).prompt_coach.room_data == 'E:/hub/.sites-runtime/agent-room'
 
 
+def test_read_for_me_config_defaults_and_validation(tmp_path):
+    from config import Config, ReadForMeConfig, load_config
+
+    assert Config().read_for_me == ReadForMeConfig(enabled=True, downloads='', folder='')
+    for name, bad in (('enabled', 1), ('downloads', 2), ('folder', None)):
+        with pytest.raises(ValueError, match=f'read_for_me.{name}'):
+            ReadForMeConfig(**{name: bad})
+    path = tmp_path / 'config.yaml'
+    path.write_text("read_for_me:\n  downloads: 'E:/Downloads'\n", encoding='utf-8')
+    assert load_config(path).read_for_me.downloads == 'E:/Downloads'
+
+
 def test_focus_doorman_config_defaults_and_validation(tmp_path):
     from config import Config, FocusDoormanConfig, load_config
 

@@ -53,6 +53,7 @@ Everything has a default. Edit `config.yaml` only if you need to:
 | Keep how-to guides somewhere else, or write them without the AI | `show_me.folder: 'D:/guides'`, `show_me.ai_cleanup: false` |
 | Stop the weekly "something you left" check-in, or pick which repos it reads | `revival.enabled: false`, `revival.repos: ['D:/ascend_hub']` |
 | Stop the weekly prompt coaching, or read the Agent Room from another folder | `prompt_coach.enabled: false`, `prompt_coach.room_data: 'E:/hub/.sites-runtime/agent-room'` |
+| Turn off "read this for me", or read PDFs from another folder | `read_for_me.enabled: false`, `read_for_me.downloads: 'E:/Downloads'` |
 
 While a gate waits, say the wake word, then the answer ("Vision, approve"); the
 follow-up "yes" needs no wake word for 20 seconds. Phone messages and voice notes
@@ -100,6 +101,13 @@ from the Room's own files, no AI) and coaches your task prompts in three lines: 
 went smoothly, what the smooth ones had that the rough ones lacked (named files, said
 what done looks like, a check command, listed steps, an example), and one tip. Ask "how
 are my prompts?" any time.
+
+Say "read this for me" (the screen), "read what I'm holding" (a page held to the camera)
+or "read my latest download" (the newest PDF in Downloads from the last week). Vision
+sends that one image or PDF to Google Gemini, then says what it is and the two most
+serious red flags (automatic renewal, fees, cancellation notice, deadlines...), and keeps
+the full notes in `data/readings/`. It is a first look, not legal advice. Nothing is sent
+unless you ask.
 
 Advanced and experimental features (phone chat, Discord, browser automation,
 proactive check-ins, Core link) are off by default and are described below.
