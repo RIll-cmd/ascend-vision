@@ -597,12 +597,19 @@ class ReleaseNotesConfig:
     """"Vision, write release notes for <repo>": changelog, what's new and a post from the commits."""
     enabled: bool = True
     folder: str = ''  # '' keeps the notes in data/release-notes
+    # "<repo folder>=<url>": fresh screenshots of that page go with the repo's notes.
+    screenshots: tuple[str, ...] = ('ascend_hub=http://127.0.0.1:5173/',)
 
     def __post_init__(self):
         if type(self.enabled) is not bool:
             raise ValueError('release_notes.enabled must be a YAML boolean')
         if not isinstance(self.folder, str):
             raise ValueError('release_notes.folder must be a string')
+        if not isinstance(self.screenshots, (list, tuple)) or any(
+                not isinstance(s, str) or '=' not in s or not s.split('=', 1)[1].strip().startswith(('http://', 'https://'))
+                for s in self.screenshots):
+            raise ValueError('release_notes.screenshots must be a list of "repo=http://..." lines')
+        object.__setattr__(self, 'screenshots', tuple(self.screenshots))
 
 
 @dataclass(frozen=True)

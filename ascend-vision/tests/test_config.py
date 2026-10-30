@@ -370,3 +370,15 @@ def test_focus_doorman_front_desk_settings(tmp_path):
     path.write_text('focus_doorman:\n  urgent_senders: [Mom, "1234"]\n  urgent_words: [deadline]\n', encoding='utf-8')
     loaded = load_config(path).focus_doorman
     assert (loaded.urgent_senders, loaded.urgent_words) == (('Mom', '1234'), ('deadline',))
+
+
+def test_release_notes_screenshot_pages(tmp_path):
+    from config import ReleaseNotesConfig, load_config
+
+    assert ReleaseNotesConfig().screenshots == ('ascend_hub=http://127.0.0.1:5173/',)
+    for bad in ('ascend_hub=http://x', ['no equals'], ['repo=ftp://x'], [3]):
+        with pytest.raises(ValueError, match='release_notes.screenshots'):
+            ReleaseNotesConfig(screenshots=bad)
+    path = tmp_path / 'config.yaml'
+    path.write_text('release_notes:\n  screenshots: []\n', encoding='utf-8')
+    assert load_config(path).release_notes.screenshots == ()

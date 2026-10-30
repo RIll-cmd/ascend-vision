@@ -149,3 +149,76 @@ def test_markdown_in_subjects_stays_plain():
     commits = parse_log(f'a1{SEP}feat: # big ![x](http://e) <b>{SEP}2026-10-29T10:00:00Z{END}')
     text = render_notes('app', NOW, commits, fallback_story('app', commits))
     assert '\n# big' not in text and '![x]' not in text and '<b>' not in text
+
+
+# Gap 7: your voice, screenshots
+
+def test_voice_samples_come_from_the_owners_own_posts(tmp_path):
+    from assistant.release_notes import read_voice
+    folder = tmp_path / 'notes'
+    assert read_voice(folder) == []
+    voice = (folder / 'voice.md').read_text(encoding='utf-8')
+    assert voice.startswith('<!--') and read_voice(folder) == []  # the how-to comment is not a sample
+    (folder / 'voice.md').write_text(voice + '\nShipped it! Dark mode is live 🌙 #buildinpublic\n\n'
+                                     'tiny fix today, the login works again\n\n' + 'x' * 3000, encoding='utf-8')
+    assert read_voice(folder) == ['Shipped it! Dark mode is live 🌙 #buildinpublic',
+                                  'tiny fix today, the login works again']
+
+
+def test_the_story_writer_hands_the_samples_to_the_ai():
+    from assistant.release_notes import make_story_writer
+    asked = []
+
+    class Router:
+        def generate_structured_response(self, prompt, **kwargs):
+            asked.append((prompt, kwargs['system_prompt']))
+            return {'whats_new': ['A'], 'post': 'p'}
+    commits = parse_log(f'a1{SEP}feat: dark mode{SEP}2026-10-29T10:00:00Z{END}')
+    make_story_writer(Router(), voice=lambda: ['Shipped it! 🌙'])('ascend hub', commits)
+    prompt, system = asked[0]
+    assert 'Shipped it! 🌙' in prompt and 'never copy' in system
+    make_story_writer(Router(), voice=lambda: [])('ascend hub', commits)
+    assert 'owner wrote' not in asked[1][0]
+
+
+def test_screenshots_are_taken_for_the_repo_and_linked(tmp_path):
+    from assistant.release_notes import make_screenshotter
+    hub = tmp_path / 'ascend_hub'
+    make_repo(hub, ['feat: dark mode'])
+    taken = []
+
+    def shoot(url, path):
+        taken.append((url, path.name))
+        path.write_bytes(b'png')
+    shots = make_screenshotter(['ascend_hub=http://127.0.0.1:5173/', 'ascend_hub=http://127.0.0.1:5173/room',
+                                'other=http://x/', 'broken line'], shoot)
+    notes, said, jobs = notes_for(tmp_path, [hub])
+    notes.screenshots = shots
+    notes.intercept('write release notes for ascend hub')
+    finish(jobs)
+    assert taken == [('http://127.0.0.1:5173/', 'ascend_hub-2026-10-30-shot-1.png'),
+                     ('http://127.0.0.1:5173/room', 'ascend_hub-2026-10-30-shot-2.png')]
+    text = (tmp_path / 'notes' / 'ascend_hub-2026-10-30.md').read_text(encoding='utf-8')
+    assert '## Screenshots' in text and '![Screenshot 1](ascend_hub-2026-10-30-shot-1.png)' in text
+    assert 'voice.md' not in said[-1]  # the hint is for an AI-written post only
+    notes, said, jobs = notes_for(tmp_path / 'ai', [hub], story=lambda name, commits: {'whats_new': ['A'], 'post': 'p'})
+    notes.intercept('write release notes for ascend hub')
+    finish(jobs)
+    assert said[-1].endswith('Add a few of your own posts to voice.md so the post sounds like you.')
+
+
+def test_a_failed_screenshot_is_skipped_and_said(tmp_path):
+    from assistant.release_notes import make_screenshotter
+    hub = tmp_path / 'ascend_hub'
+    make_repo(hub, ['feat: dark mode'])
+
+    def shoot(url, path):
+        raise TimeoutError('server down')
+    notes, said, jobs = notes_for(tmp_path, [hub])
+    notes.screenshots = make_screenshotter(['ascend_hub=http://127.0.0.1:5173/'], shoot)
+    (tmp_path / 'notes').mkdir()
+    (tmp_path / 'notes' / 'voice.md').write_text('my own post\n', encoding='utf-8')
+    notes.intercept('write release notes for ascend hub')
+    finish(jobs)
+    assert '## Screenshots' not in (tmp_path / 'notes' / 'ascend_hub-2026-10-30.md').read_text(encoding='utf-8')
+    assert said[-1].endswith('The screenshot did not work, so the notes have none.')

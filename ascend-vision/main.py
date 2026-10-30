@@ -966,7 +966,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         release_config = getattr(config, 'release_notes', None)
         if release_config is not None and release_config.enabled:
             try:
-                from assistant.release_notes import ReleaseNotes, make_story_writer
+                from assistant.release_notes import (ReleaseNotes, make_screenshotter, make_story_writer, read_voice,
+                                                     shoot_page)
                 from assistant.revival import command_runner, default_repos
                 from llm_router import LLMRouter
                 notes_git = command_runner('git')
@@ -977,11 +978,13 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     common = notes_git(Path(__file__).resolve().parent, 'rev-parse', '--path-format=absolute',
                                        '--git-common-dir')
                     return default_repos(Path(common.strip()).parent) if common else []
+                notes_folder = (Path(release_config.folder) if release_config.folder
+                                else Path(config.storage.database).parent / 'release-notes')
                 release_notes = ReleaseNotes(
-                    repos=notes_repos, run_git=notes_git, write_story=make_story_writer(LLMRouter(config.llm)),
-                    folder=Path(release_config.folder) if release_config.folder
-                    else Path(config.storage.database).parent / 'release-notes',
-                    announce=announce_paced)
+                    repos=notes_repos, run_git=notes_git,
+                    write_story=make_story_writer(LLMRouter(config.llm), voice=lambda: read_voice(notes_folder)),
+                    folder=notes_folder, announce=announce_paced,
+                    screenshots=make_screenshotter(release_config.screenshots, shoot_page))
             except Exception as exc:
                 LOG.warning('Release notes unavailable (%s)', type(exc).__name__)
 
