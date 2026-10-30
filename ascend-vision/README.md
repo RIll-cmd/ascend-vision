@@ -50,6 +50,7 @@ Everything has a default. Edit `config.yaml` only if you need to:
 | Stop promise check-ins | `promises.enabled: false` |
 | Turn off "do not disturb" focus blocks | `focus_doorman.enabled: false` |
 | Hold agent room announcements during a focus block too | `focus_doorman.let_room_through: false` |
+| Keep how-to guides somewhere else, or write them without the AI | `show_me.folder: 'D:/guides'`, `show_me.ai_cleanup: false` |
 
 While a gate waits, say the wake word, then the answer ("Vision, approve"); the
 follow-up "yes" needs no wake word for 20 seconds. Phone messages and voice notes
@@ -77,6 +78,13 @@ no time) and Vision's own notices (weather, GitHub, food, check-ins) wait until 
 block ends and you are back at the PC; then it says how many waited and plays them.
 Agent room announcements and reminders you set for a clock time still come in. Ask
 "what's waiting?", say "let them through" to hear them early, or "end focus block".
+
+Say "Vision, watch me" (or "watch me set up the printer"), do the task while you talk
+it through, then say "done recording". Vision takes a screenshot with each thing you
+say (and when the screen changes), then writes `data/howto/<date>-<title>/guide.md`
+with numbered steps and those screenshots. Only the words you said go to the AI to tidy
+the steps (`show_me.ai_cleanup`); screenshots stay on this computer, so mind what is on
+screen. "cancel recording" throws it away; recording stops by itself after 30 minutes.
 
 Advanced and experimental features (phone chat, Discord, browser automation,
 proactive check-ins, Core link) are off by default and are described below.

@@ -816,6 +816,21 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
             except Exception as exc:
                 LOG.warning('Slump check-ins unavailable (%s)', type(exc).__name__)
 
+        how_to = None
+        show_me_config = getattr(config, 'show_me', None)
+        if show_me_config is not None and show_me_config.enabled:
+            try:
+                from assistant.show_me import HowToRecorder, make_writer
+                from llm_router import LLMRouter
+                from screen_auditor import capture_desktop
+                how_to = HowToRecorder(
+                    Path(show_me_config.folder) if show_me_config.folder
+                    else Path(config.storage.database).parent / 'howto',
+                    announce=announce_paced, capture=capture_desktop,
+                    write_steps=make_writer(LLMRouter(config.llm)) if show_me_config.ai_cleanup else None)
+            except Exception as exc:
+                LOG.warning('How-to recording unavailable (%s)', type(exc).__name__)
+
         promise_coach = None
         promises_config = getattr(config, 'promises', None)
         if promises_config is not None and promises_config.enabled:
@@ -855,8 +870,9 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
 
         def local_intercept(text):
             # Away/sleep first (it blocks everything while asleep), then eyes, weather, GitHub, food, promises, slumps.
-            for handler in (away_mode, eye_calibrator, focus_doorman, weather_coach, github_coach, nutrition_coach,
-                            promise_coach, slump_coach):
+            # While a how-to is recording, every line is narration, so the recorder comes right after away mode.
+            for handler in (away_mode, how_to, eye_calibrator, focus_doorman, weather_coach, github_coach,
+                            nutrition_coach, promise_coach, slump_coach):
                 if handler is not None:
                     try:
                         answer = handler.intercept(text)
@@ -1068,6 +1084,8 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 raise RuntimeError('Shared local chat is not initialized')
             def on_local_chat_reply(message, text):
                 source = message.get('source')
+                if text == '📝':  # a narrated how-to line: shown in chat, never spoken
+                    return
                 if (source == 'voice'
                         or (focus_ui_bridge is not None
                             and focus_ui_bridge.should_speak_replies())):
@@ -1744,6 +1762,11 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                         slump_coach.tick(owner_available)
                     except Exception as exc:
                         LOG.debug('Slump check skipped (%s)', type(exc).__name__)
+                if how_to is not None:
+                    try:
+                        how_to.tick()
+                    except Exception as exc:
+                        LOG.debug('How-to screenshot skipped (%s)', type(exc).__name__)
                 if promise_coach is not None:
                     try:
                         promise_coach.tick(owner_available)

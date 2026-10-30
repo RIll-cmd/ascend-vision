@@ -281,6 +281,18 @@ def test_promises_config_defaults_and_validation(tmp_path):
     assert load_config(path).promises.enabled is False
 
 
+def test_show_me_config_defaults_and_validation(tmp_path):
+    from config import Config, ShowMeConfig, load_config
+
+    assert Config().show_me == ShowMeConfig(enabled=True, folder='', ai_cleanup=True)
+    for name, bad in (('enabled', 'no'), ('ai_cleanup', 1), ('folder', 3)):
+        with pytest.raises(ValueError, match=f'show_me.{name}'):
+            ShowMeConfig(**{name: bad})
+    path = tmp_path / 'config.yaml'
+    path.write_text("show_me:\n  folder: 'D:/guides'\n  ai_cleanup: false\n", encoding='utf-8')
+    assert load_config(path).show_me == ShowMeConfig(folder='D:/guides', ai_cleanup=False)
+
+
 def test_focus_doorman_config_defaults_and_validation(tmp_path):
     from config import Config, FocusDoormanConfig, load_config
 
