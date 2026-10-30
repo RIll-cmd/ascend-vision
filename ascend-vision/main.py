@@ -853,7 +853,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                 LOG.warning('How-to recording unavailable (%s)', type(exc).__name__)
 
         latest_frame = [None]  # the newest camera image (BGR), for "read what I'm holding"
-        document_reader = None
+        document_reader = license_check = None
         read_config = getattr(config, 'read_for_me', None)
         if read_config is not None and read_config.enabled:
             try:
@@ -873,9 +873,25 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
                     downloads=Path(read_config.downloads) if read_config.downloads else Path.home() / 'Downloads',
                     announce=announce_local,
                     folder=Path(read_config.folder) if read_config.folder
-                    else Path(config.storage.database).parent / 'readings')
+                    else Path(config.storage.database).parent / 'readings',
+                    folders=[Path(read_config.downloads) if read_config.downloads else Path.home() / 'Downloads',
+                             Path.home() / 'Desktop', Path.home() / 'Documents'])
             except Exception as exc:
                 LOG.warning('Document reading unavailable (%s)', type(exc).__name__)
+            try:
+                from assistant.licenses import LicenseCheck, make_fetch
+                from assistant.revival import command_runner
+                licenses_git = command_runner('git')
+                common = licenses_git(Path(__file__).resolve().parent, 'rev-parse', '--path-format=absolute',
+                                      '--git-common-dir')
+                if common:  # the Hub's Room data, next to Vision's own repo
+                    license_check = LicenseCheck(
+                        Path(common.strip()).parent.parent / 'ascend_hub' / '.sites-runtime' / 'agent-room',
+                        run_git=licenses_git, fetch=make_fetch(), announce=announce_local,
+                        folder=Path(read_config.folder) if read_config.folder
+                        else Path(config.storage.database).parent / 'readings')
+            except Exception as exc:
+                LOG.warning('License check unavailable (%s)', type(exc).__name__)
 
         promise_coach = None
         promises_config = getattr(config, 'promises', None)
@@ -999,7 +1015,7 @@ def run(config: Config, *, duration=None, detector=None, capture=None, hand_trac
         def local_intercept(text):
             # Away/sleep first (it blocks everything while asleep), then eyes, weather, GitHub, food, promises, slumps.
             # While a how-to is recording, every line is narration, so the recorder comes right after away mode.
-            for handler in (away_mode, how_to, document_reader, eye_calibrator, focus_doorman, weather_coach,
+            for handler in (away_mode, how_to, document_reader, license_check, eye_calibrator, focus_doorman, weather_coach,
                             github_coach,
                             nutrition_coach, promise_coach, revival_coach, prompt_coach, release_notes,
                             slump_coach):

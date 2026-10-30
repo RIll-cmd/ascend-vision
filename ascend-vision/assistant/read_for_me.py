@@ -35,6 +35,8 @@ _SCREEN = re.compile(rf"{_LEAD}(?:read (?:this|this page|my screen|the screen){_
 _CAMERA = re.compile(rf"{_LEAD}(?:read (?:what i'm holding|what i am holding|this paper|the paper){_TAIL}"
                      r"|check this paper)")
 _PDF = re.compile(rf"{_LEAD}(?:read|check) (?:my |the )?(?:latest|last|newest) (?:download|pdf){_TAIL}")
+_NAMED = re.compile(rf"{_LEAD}(?:read|check) (?:the |my |a )?(?:pdf (?:called|named) (?P<a>[a-z' ]+?)"
+                    rf"|(?P<b>[a-z' ]+?) pdf){_TAIL}")
 
 
 class MissingKey(Exception):
@@ -138,6 +140,32 @@ def latest_pdf(folder: Path, now: datetime) -> Path | None:
     return best[1] if best else None
 
 
+def find_pdf(folders, wanted: str, now: datetime) -> Path | None:
+    """The newest PDF (top level of each folder, any age) whose name holds every word asked for."""
+    asked = set(re.findall(r'[a-z0-9]+', wanted.lower()))
+    best = None
+    for folder in folders:
+        try:
+            paths = list(Path(folder).iterdir())
+        except OSError:
+            continue
+        for path in paths:
+            try:
+                if path.suffix.lower() != '.pdf' or not path.is_file():
+                    continue
+                if not asked <= set(re.findall(r'[a-z0-9]+', path.stem.lower())):
+                    continue
+                if any(path.with_name(path.name + end).exists() for end in PARTIAL):
+                    continue
+                info = path.stat()
+            except OSError:
+                continue
+            changed = datetime.fromtimestamp(info.st_mtime)
+            if info.st_size and changed <= now - timedelta(seconds=2) and (best is None or changed > best[0]):
+                best = (changed, path)
+    return best[1] if best and asked else None
+
+
 def capture_active_monitor() -> Image.Image:
     """The monitor the active window is on, so text stays readable and other screens stay private."""
     from screen_auditor import capture_desktop
@@ -188,32 +216,41 @@ def make_gemini_reader(api_key: str, model: str, timeout_seconds: float = 60.0):
 
 
 class DocumentReader:
-    def __init__(self, *, ask_model, screen, camera, downloads, announce, folder, clock=datetime.now, run=None):
+    def __init__(self, *, ask_model, screen, camera, downloads, announce, folder, clock=datetime.now, run=None,
+                 folders=None):
         self.ask_model, self.screen, self.camera = ask_model, screen, camera
         self.downloads, self.announce, self.folder, self.clock = Path(downloads), announce, Path(folder), clock
+        # Where a PDF asked for by name is looked for: Downloads, Desktop and Documents by default.
+        self.folders = [Path(f) for f in folders] if folders else [self.downloads]
+        self.find = lambda wanted: find_pdf(self.folders, wanted, self.clock())
         self.run = run or (lambda job: threading.Thread(target=job, name='document-reader', daemon=True).start())
         self._lock = threading.Lock()
         self._busy = False
 
     def intercept(self, text: str) -> str | None:
         said = words(text)
+        named = None if _PDF.fullmatch(said) else _NAMED.fullmatch(said)
         source = ('screen' if _SCREEN.fullmatch(said) else 'camera' if _CAMERA.fullmatch(said)
-                  else 'pdf' if _PDF.fullmatch(said) else None)
+                  else 'pdf' if _PDF.fullmatch(said) or named else None)
         if source is None:
+            return None
+        wanted = ' '.join(w for w in (named['a'] or named['b']).split() if w not in ('the', 'my', 'a')) if named else ''
+        if named and not wanted:
             return None
         with self._lock:
             if self._busy:
                 return 'Still reading the last one.'
             if source == 'pdf':
-                path = latest_pdf(self.downloads, self.clock())
+                path = self.find(wanted) if named else latest_pdf(self.downloads, self.clock())
                 if path is None:
-                    return "I don't see a PDF in Downloads from the last week."
+                    return (f"I can't find a PDF called {wanted} in Downloads, Desktop or Documents." if named
+                            else "I don't see a PDF in Downloads from the last week.")
                 try:
                     too_big = path.stat().st_size > MAX_PDF_BYTES
                 except OSError:
                     too_big = False
                 if too_big:  # never quietly read an older file instead
-                    return f'The newest PDF, {path.name}, is too big for me to read.'
+                    return f"{'That' if named else 'The newest'} PDF, {path.name}, is too big for me to read."
                 job = (path.name, lambda: path.read_bytes(), 'application/pdf', path.name)
             elif source == 'camera':
                 frame = self.camera()

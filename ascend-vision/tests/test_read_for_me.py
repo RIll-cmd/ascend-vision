@@ -76,6 +76,7 @@ def test_the_newest_recent_pdf_in_downloads(tmp_path):
     huge = downloads / 'huge.pdf'
     with open(huge, 'wb') as file:
         file.truncate(21 * 1024 * 1024)
+    os.utime(huge, (0, (NOW - timedelta(days=2)).timestamp()))  # not the real clock: the test's own
     assert latest_pdf(downloads, NOW) == newer
     reader, calls, said, jobs = reader_for(tmp_path, downloads=downloads)
     assert reader.intercept('read my latest download') == 'Reading it now.'
@@ -217,3 +218,50 @@ def test_a_failed_screenshot_is_said_plainly(tmp_path):
 def test_natural_phrasings(tmp_path, phrase):
     reader, *_ = reader_for(tmp_path)
     assert reader.intercept(phrase) is not None
+
+
+def test_find_pdf_by_name_in_downloads_desktop_and_documents(tmp_path):
+    from assistant.read_for_me import find_pdf
+    downloads, desktop = tmp_path / 'Downloads', tmp_path / 'Desktop'
+    downloads.mkdir()
+    desktop.mkdir()
+    old = downloads / 'Rental_Agreement-2025.pdf'
+    old.write_bytes(b'%PDF old')
+    os.utime(old, (0, (NOW - timedelta(days=400)).timestamp()))
+    new = desktop / 'rental agreement signed.pdf'
+    new.write_bytes(b'%PDF new')
+    os.utime(new, (0, (NOW - timedelta(days=3)).timestamp()))
+    (desktop / 'rental agreement draft.pdf.crdownload').write_bytes(b'x')
+    partial = desktop / 'rental agreement draft.pdf'
+    partial.write_bytes(b'%PDF part')
+    folders = [downloads, desktop, tmp_path / 'Documents']
+    assert find_pdf(folders, 'rental agreement', NOW) == new
+    assert find_pdf(folders, 'rental 2025', NOW) == old
+    assert find_pdf(folders, 'tax return', NOW) is None
+
+
+@pytest.mark.parametrize('said, wanted', [
+    ('read the pdf called lease', 'lease'),
+    ('Vision, read lease.pdf', 'lease'),
+    ('read the rental agreement pdf for me', 'rental agreement'),
+    ('check my bank statement PDF', 'bank statement'),
+])
+def test_named_pdf_phrases(tmp_path, said, wanted):
+    reader, calls, said_back, jobs = reader_for(tmp_path)
+    picked = []
+    reader.find = lambda name: picked.append(name)
+    assert reader.intercept(said) == f"I can't find a PDF called {wanted} in Downloads, Desktop or Documents."
+    assert picked == [wanted]
+
+
+def test_a_named_pdf_is_read_and_latest_still_means_newest(tmp_path):
+    downloads = tmp_path / 'Downloads'
+    downloads.mkdir()
+    lease = downloads / 'lease.pdf'
+    lease.write_bytes(b'%PDF-1.4 lease')
+    os.utime(lease, (0, (NOW - timedelta(days=90)).timestamp()))
+    reader, calls, said, jobs = reader_for(tmp_path, downloads=downloads)
+    assert reader.intercept('read the lease pdf') == 'Reading it now.'
+    finish(jobs)
+    assert calls == [('lease.pdf', 'application/pdf', len(b'%PDF-1.4 lease'))]
+    assert reader.intercept('read the latest pdf') == "I don't see a PDF in Downloads from the last week."
